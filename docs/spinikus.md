@@ -1,0 +1,464 @@
+# Spinikus Feature List
+
+Spinikus is a Rust-based, self-hosted PaaS, a lighter alternative to Coolify and Dokploy, in the spirit of a self-hosted Vercel. Features are grouped by area and marked **MVP** (needed to be usable), **v1** (needed to compete with Coolify and Dokploy) or **Later** (differentiators and polish).
+
+## Deployment core
+
+- **Git-based deploys** (MVP): GitHub, GitLab, Gitea/Forgejo and generic Git over SSH, with auto-deploy on push via webhooks.
+- **Build strategies** (MVP): Dockerfile, Docker Compose, and auto-detected builds via Railpack or Cloud Native Buildpacks.
+- **Prebuilt image deploys** (MVP): from Docker Hub, GHCR or private registries.
+- **Zero-downtime deploys and instant rollback** (v1): health-check-gated cutover, with old releases kept around.
+- **Preview deployments per PR** (v1): ephemeral URLs and automatic cleanup. This is the most "Vercel" feature.
+- **Build caching and a build queue** (v1): layer caching, concurrent build limits, cancelable builds.
+- **Monorepo support** (v1): multiple apps per repo, with path-based build triggers.
+
+## Networking and routing
+
+- **Built-in reverse proxy with automatic HTTPS** (MVP): Let's Encrypt, wildcard certs via DNS-01, custom domains. A Rust-native proxy (Pingora, or hyper/axum-based) rather than shelling out to Traefik would be a real differentiator.
+- **Per-app and wildcard domains** (MVP), with HTTP to HTTPS redirects.
+- **Path routing, basic auth, rate limiting, IP allowlists** (v1).
+- **Tunnels / private networking** (Later): WireGuard mesh between servers, with optional Cloudflare Tunnel integration.
+
+## Configuration and secrets
+
+- **Environment variables** (MVP): per environment (production, staging, preview), with build-time versus runtime separation.
+- **Encrypted secrets at rest** (MVP).
+- **Shared variables across a project** (v1), plus `.env` import and export.
+- **External secret managers** (Later): Vault, Infisical, 1Password.
+
+## Databases and services
+
+- **One-click databases** (MVP): Postgres, MySQL/MariaDB, Redis/Valkey, MongoDB.
+- **Volume management and persistent storage** (MVP).
+- **Scheduled backups to S3-compatible storage** (v1), with one-click restore and retention policies.
+- **One-click service templates** (v1): a community-driven catalog (Plausible, n8n, Umami, Ghost and so on) defined in a simple declarative format.
+- **Backup verification** (Later): automatically test-restore backups. Almost nobody does this, and it builds trust.
+
+## Multi-server and scaling
+
+- **Multiple servers from one control plane** (v1), managed over SSH or a lightweight agent. A single Rust agent binary is a natural fit.
+- **Server provisioning and hardening** (v1): a one-line install script, firewall setup, Docker install, updates.
+- **Horizontal scaling** (Later): replicas across nodes with load balancing.
+- **Cloud provider integration** (Later): Hetzner, DigitalOcean and others, spinning up servers from the UI.
+
+## Observability
+
+- **Live build and runtime logs** (MVP): streamed over WebSocket or SSE, searchable.
+- **Resource metrics** (v1): CPU, memory, disk and network per container and server.
+- **Alerts and notifications** (v1): Discord, Slack, Telegram, email, webhooks for deploy status, crashes, disk space, cert expiry.
+- **Uptime and health monitoring** (v1).
+- **OpenTelemetry export** (Later).
+
+## Access and teams
+
+- **API tokens** (MVP).
+- **Multi-user with roles (RBAC)** (v1): projects and environments as scopes.
+- **SSO** (v1): OIDC and GitHub login, with SAML later.
+- **2FA and passkeys** (v1).
+- **Audit log** (v1).
+
+## Developer experience
+
+- **Web dashboard** (MVP): keep it fast and simple; speed is where Spinikus can beat the competition.
+- **CLI** (MVP): deploys, logs, env management and shell access.
+- **Full REST or gRPC API, plus an OpenAPI spec** (MVP).
+- **Optional per-repo config file** (v1): `spinikus.json` in the repo root, covering build and runtime settings only (build command, port, health check, monorepo paths), with `$schema` support. Domains, secrets and environments stay in the database. A declarative `spinikus apply` command and a Terraform provider are Later.
+- **Web terminal into containers** (v1).
+- **Cron jobs and one-off tasks** (v1).
+
+## Platform and operations
+
+- **Single static binary with an embedded database** (MVP): SQLite for the control plane, with optional Postgres. Install takes under a minute.
+- **Instance configuration** (MVP): `spinikus.toml` holds only what Spinikus needs to start (data directory and DB location, listen addresses and proxy ports, log level, master encryption key source, and node discovery later). Everything else lives in the database.
+- **Low resource footprint** (MVP): Spinikus should idle in tens of MB, not hundreds. This is the clearest reason for it to be Rust.
+- **Self-update and config backup/restore** (v1).
+- **Container runtime choice** (Later): Docker first, with Podman or containerd supported later.
+
+## Web UI
+
+The web dashboard is the main way users will configure and monitor Spinikus, so it gets its own plan.
+
+### Core screens
+
+- **Overview**: all projects, apps, databases and servers with live status, recent deploys, and anything needing attention (failed deploys, disk nearly full, cert about to expire).
+- **Project / environment / app hierarchy**: production, staging and preview environments per project, with per-environment config.
+- **App detail page**: current release, deploy history, rollback button, domains, env vars and secrets, resource limits, health status.
+- **Live logs**: build and runtime logs streamed in the browser, with search, filtering and download.
+- **Metrics**: CPU, memory, disk and network graphs per app and per server.
+- **Databases and backups**: create a database, see connection details, browse backups, restore with one click.
+- **Servers**: add a server, see its health, run the install script, view hardening status.
+- **Settings**: users and roles, SSO, API tokens, notification channels, Git provider connections, audit log.
+
+### Interactive features
+
+- **Deploy flow**: connect a repo, auto-detect the build strategy, review the detected config, deploy.
+- **Web terminal** into running containers.
+- **Export view**: an app's build and runtime settings can be exported as `spinikus.json`, so users can commit it to Git.
+- **Service template catalog** with one-click install.
+- **Command palette** (Cmd/Ctrl+K) for fast navigation.
+
+### Architecture decisions
+
+1. **API-first**: the public JSON API covers everything the UI does, and the CLI uses it. The UI's HTML endpoints and the API are thin layers over the same internal service functions, so the UI never has capabilities the API lacks.
+2. **Realtime updates**: SSE (through the HTMX SSE extension) for logs, deploy progress and status changes.
+3. **Embedded in the single binary**: HTMX and the JS islands are vendored and embedded (for example with `rust-embed`), so the one-binary install promise holds and Cargo alone builds everything.
+4. **Frontend stack**: Axum with server-rendered Maud templates and HTMX. Small vendored JS islands cover what HTMX does poorly: the web terminal (xterm.js), charts, a virtualized log viewer and the command palette.
+5. **Light footprint**: pages are rendered by the control plane with little client-side JavaScript, which keeps idle memory low and suits mobile monitoring.
+6. **First-run experience**: a setup wizard on first visit (admin account, domain, first server) so nobody has to touch config files.
+
+## Differentiators to consider
+
+1. **Resource efficiency**: a measurable advantage over Node-based competitors on small VPSes.
+2. **API-first, declarative where it counts**: everything in the UI is also available through the API, and apps can keep their build and runtime settings in the repo.
+3. **Built-in proxy**: fewer moving parts than Coolify plus Traefik.
+4. **Sleep-on-idle / scale-to-zero** for hobby apps, so a small VPS can host many projects.
+5. **Previews and rollbacks treated as first-class**, not bolted on.
+6. **Secure defaults**: automatic hardening, rootless containers, per-app network isolation.
+
+## Suggested MVP scope
+
+The first release should cover Git deploy, Dockerfile and Railpack builds, a built-in proxy with automatic HTTPS, env vars and secrets, Postgres and Redis with backups, live logs, a CLI, and a single-binary install. That alone would make a credible first release.
+
+Next step: decide the architecture (control plane vs. agent, proxy approach, container runtime interface) or sharpen the MVP cut line.
+
+## Decisions
+
+- **`spinikus.toml` is instance configuration only**: data directory and DB location, listen addresses and proxy ports, log level, master encryption key source, and node discovery later.
+- **Everything else lives in the database**: projects, apps, deployments, Git connections, domains, env vars, secrets, and instance-wide settings such as ACME email, SSO providers and notification channels. These are managed through the UI and the API.
+- **The API covers everything the UI does**, so the CLI and a future Terraform provider work on the same footing.
+- **The master encryption key lives outside the database** (TOML, env var or key file), so encrypted secrets stay usable after a restore.
+- **A full backup is the database, `spinikus.toml` and the key.**
+- **The optional per-repo file is `spinikus.json`**, covering build and runtime settings only. It supports `$schema` for editor validation and allows comments. Domains, secrets and environments stay in the database. Declarative apply comes later. A TOML variant (`spinikus.app.toml`) was considered and rejected to avoid confusion with the instance config.
+- **For any setting `spinikus.json` covers, the file wins.** The UI shows those settings read-only with a note that the file sets them. The full scope is in the `spinikus.json` scope section below.
+- **The UI does not need to be complete for every feature at MVP.** Features reach the UI one step at a time.
+- **Mobile support is limited to monitoring and rollback for now.** Full configuration is desktop-only.
+- **The frontend is Axum, Maud and HTMX with SSE, plus vendored JS islands** (web terminal, charts, log viewer, command palette). HTML endpoints and the public API share one service layer. An SPA (React) and a Rust-native frontend (Leptos, Dioxus) were considered and not chosen.
+
+## `spinikus.json` scope
+
+The test for what belongs in the file: does the setting change with the code version? If it must ship in the same commit as the code (a new start command, a new port), it goes in `spinikus.json`. If it describes where or how the app is hosted, it stays in the database.
+
+### Build
+
+- Build strategy override (Dockerfile, Compose, Railpack or buildpacks) when auto-detection guesses wrong.
+- Dockerfile path, build context and target stage.
+- Install and build commands, and a root directory for monorepos.
+- Non-secret build args.
+- Watch paths, so only relevant changes trigger a build.
+
+### Runtime
+
+- Start command and listening port.
+- Health check (path, interval, timeout, retries, start period), which gates zero-downtime cutover.
+- Graceful shutdown timeout.
+- Release command that runs once before cutover, such as database migrations.
+- Extra processes (worker, scheduler), in the spirit of a Procfile.
+- Persistent volume mount paths.
+- Cron jobs: schedule and command.
+
+### Environment variable declarations
+
+Names of required variables, plus non-secret defaults, so a deploy fails early with a clear message when something is missing. Values for secrets never go in the file.
+
+### Monorepos
+
+An `apps` array, each entry with its own root directory, build settings and trigger paths.
+
+### Gray areas, decided
+
+- **Resource limits** (CPU, memory): allowed as optional hints in the file, which the UI can override.
+- **Preview deployment behavior** (enabled, branch filters): stays in the database for MVP.
+- **Service dependencies** (such as "this app needs Postgres"): not specified yet; too early.
+
+### Never in the file
+
+Domains, env var values and secrets, server placement, Git credentials, users and roles, notification channels, and backup schedules.
+
+### Example
+
+```json
+{
+  "$schema": "https://spinikus.dev/schema/v1.json",
+  "build": { "strategy": "dockerfile", "dockerfile": "docker/Dockerfile" },
+  "runtime": {
+    "port": 3000,
+    "start": "node dist/server.js",
+    "release": "npm run migrate",
+    "healthcheck": { "path": "/healthz", "interval": "10s" }
+  },
+  "env": { "required": ["DATABASE_URL"] },
+  "cron": [{ "schedule": "0 3 * * *", "command": "node dist/cleanup.js" }]
+}
+```
+
+The `$schema` URL is a placeholder.
+
+## Backend architecture
+
+Spinikus is one Rust binary with two runtime roles: a control plane that owns state and decisions, and an agent that owns containers, builds and traffic on one server. On a single-server install the agent runs inside the control plane's process, behind the same interface a remote agent uses, so multi-server in v1 needs no rewrite. Agents connect out to the control plane over a long-lived mTLS stream.
+
+&#91;embedded content: control plane and agent · 8 components, 1 connection\]
+
+The agent opens the connection, so servers behind NAT work and nothing connects in over SSH.
+
+### Control plane
+
+- **API layer (Axum)**: JSON API, Maud/HTMX pages, SSE and auth, all calling one shared service layer.
+- **Core and store**: the domain model (projects, apps, environments, deployments) in SQLite, with secrets encrypted by the master key.
+- **Reconciler**: compares desired state in the database with what agents report, and acts on the difference.
+- **Deployments as durable state machines**: queued, building, starting, health-checking, then live, or failed and rolled back. A restart never loses track of one.
+- **Event stream**: logs, progress and status changes flowing to the UI over SSE.
+
+### Agent
+
+- **R\****untime driver**: a trait over the container runtime, with Docker first.
+- **Builder**: clones the repo, builds the image and reports progress.
+- **Proxy and certificate manager**: routes and TLS for the apps on that server, built on hyper and rustls.
+- **Reporter**: streams logs, stats and container state back to the control plane.
+
+### Decided
+
+- **Agents dial out to the control plane** over a long-lived mTLS gRPC stream, instead of the control plane connecting in over SSH. It works through NAT, avoids SSH key handling, and lets agents push events. SSH is used only once, by the install script.
+- **The proxy is built on hyper and rustls**, sharing the Tokio runtime with the rest of Spinikus, instead of Pingora.
+- **The proxy runs on every agent**, with the control plane distributing route tables. Traffic never has to cross servers just to reach an app, and the single-server case works the same way.
+- **ACME uses instant-acme** with our own certificate manager, storing certificates in the database and using an SNI resolver in the proxy. HTTP-01 maturity still needs checking.
+- **Container runtime**: bollard behind our own trait, covering Docker and Podman.
+- **Builds**: Dockerfile and Compose builds go through the runtime; auto-detected builds shell out to Railpack, which produces an image. Railpack is the successor to Nixpacks, which is in maintenance mode.
+- **Database**: SQLite only for MVP, with repository traits so Postgres can be added later.
+- **Logs and metrics**: logs in rotated files on disk with a retention limit; metrics with short retention and downsampling.
+
+## Data model
+
+The data model is built around a split between desired state (what users configured) and observed state (what agents report). The reconciler acts on the difference. Logs live on disk, not in the database.
+
+&#91;embedded content: main entities · 12 boxes, 1 hierarchy\]
+
+A service owns its source, deployments, domains, variables and volumes; instances link it to the servers it runs on.
+
+### Entities
+
+| Entity                                           | Holds                                                                         | Relates to                                                              |
+| ------------------------------------------------ | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Project                                          | Name and slug                                                                 | Has environments and members                                            |
+| Environment                                      | Kind (production, staging, preview); PR number for previews                   | Belongs to a project; has services                                      |
+| Service                                          | Kind (app, database, template); kind-specific JSON config; current deployment | Belongs to an environment; has a source, variables, volumes and domains |
+| Source                                           | Git repo (provider connection, branch, root directory) or image reference     | Belongs to a service                                                    |
+| Deployment                                       | Commit or image, trigger, status, timestamps, config snapshot; immutable      | Belongs to a service                                                    |
+| Deployment event                                 | One row per state transition                                                  | Belongs to a deployment                                                 |
+| Server                                           | Agent identity (mTLS), status, last-seen time                                 | Runs instances                                                          |
+| Instance                                         | A container as reported by an agent: ID, health, status (observed state)      | Links a service to a server                                             |
+| Job                                              | Durable queue entry for builds, backups and cleanups                          | Standalone                                                              |
+| Domain                                           | Hostname and redirect setting                                                 | Points at a service; uses a certificate                                 |
+| Certificate                                      | Certificate, encrypted key, expiry, ACME account details                      | Used by domains                                                         |
+| Variable                                         | Name, encrypted value, build-time or runtime, secret flag                     | Scoped to a project, environment or service                             |
+| Volume                                           | Persistent mount path                                                         | Belongs to a service                                                    |
+| Storage destination, backup schedule, backup run | S3-compatible target, schedule, run results (verification later)              | Backups belong to database services                                     |
+| User, membership, API token, session             | Accounts and access; a membership scopes a role to a project or environment   | Memberships link users to projects or environments                      |
+| Audit log                                        | Append-only record of actions                                                 | References actors and entities                                          |
+| Notification channel, Git connection, setting    | Instance-wide integrations and key/value settings                             | Standalone                                                              |
+
+Logs, and metrics beyond short retention, are deliberately not stored in the database.
+
+### Decided
+
+- **IDs are prefixed ULIDs** (for example `svc_01J…`): sortable by creation time and safe to expose in the API and URLs. Human-friendly slugs are separate and unique per parent.
+- **One service table with a kind** (app, database, template) and kind-specific JSON config, since all three end up as containers with ports, volumes and variables.
+- **Desired vs observed state** are kept in separate tables, with agents writing only observed state.
+- **Deployments are immutable records** with a config snapshot. Rollback redeploys an old deployment's image and snapshot, with no rebuild.
+- **Variable resolution** follows one precedence chain (project, then environment, then service; most specific wins), resolved at deploy time into the deployment snapshot.
+- **`spinikus.json` interplay**: the snapshot records the merged result and which fields came from the file, so the UI can show those settings read-only.
+- **Secret encryption** is envelope-style, with each value carrying a key ID, so the master key can be rotated without re-entering secrets.
+- **No organization entity at MVP**: memberships scope directly to projects and environments.
+- **Deletion**: soft delete for projects, services and domains; hard delete for ephemeral records such as sessions and old events.
+- **SQLite specifics**: WAL mode, enforced foreign keys, strict tables, JSON columns for kind-specific config, and automatic migrations on startup.
+
+## Deployment state machine
+
+A deployment is an immutable record that moves through a fixed set of states. Cutover happens only after the health check passes, so a failed deployment never receives traffic and the previous deployment simply stays live. Every transition writes one deployment event row (from, to, reason, actor, time) in the same transaction that changes the status.
+
+&#91;embedded content: deployment states · 8 states, 2 ways to end early\]
+
+A deployment that fails or is canceled before going live never receives traffic, and the previous deployment stays live.
+
+### States
+
+| State        | Meaning                                                                                                          | Moves to                          |
+| ------------ | ---------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| `queued`     | Created, waiting for its turn                                                                                    | `preparing`, `canceled`           |
+| `preparing`  | The agent clones and builds, or pulls the image                                                                  | `releasing`, `failed`, `canceled` |
+| `releasing`  | The release command (such as migrations) runs once in a one-off container; skipped if there is none              | `starting`, `failed`, `canceled`  |
+| `starting`   | New containers start from the snapshot config                                                                    | `verifying`, `failed`, `canceled` |
+| `verifying`  | The health check (path, interval, retries, start period from `spinikus.json`) must pass                          | `live`, `failed`, `canceled`      |
+| `live`       | Routes have switched; this is the service's current deployment                                                   | `draining`                        |
+| `draining`   | A replaced deployment finishes in-flight requests, up to the graceful shutdown timeout, then its containers stop | `superseded`                      |
+| `superseded` | Replaced by a newer live deployment (terminal)                                                                   | None                              |
+| `failed`     | Terminal, with a reason code                                                                                     | None                              |
+| `canceled`   | Terminal; cancellation is not possible once the deployment is live                                               | None                              |
+
+### Decided
+
+- **State set**: building and image pull are merged into `preparing`, and the old deployment has an explicit `draining` state.
+- **Failure causes live in a reason code**, not in more states: `build_failed`, `release_failed`, `health_check_failed`, `timeout`, `agent_lost`, `canceled_by_user`, `superseded_in_queue`.
+- **Two strategies**: `blue_green` is the default for apps (start the new containers, verify, switch routes, drain the old ones). `recreate` is used for databases and anything with a persistent volume (stop the old, start the new), since two containers shouldn't share a volume. Databases accept brief downtime on redeploy.
+- **Failure after going live**: no automatic rollback in MVP. The reconciler restarts crash-looping containers with backoff and sends an alert. Automatic rollback can be an opt-in setting later.
+- **Concurrency**: one active deployment per service. A newer deployment cancels older queued ones (`superseded_in_queue`). An in-progress build finishes unless the user cancels it.
+- **Rollback** creates a new deployment with trigger `rollback`, reusing the target's image and snapshot. It starts at `starting` and skips the build and, by default, the release command.
+- **Agent loss**: deployments in progress on a server whose agent disconnects are failed with `agent_lost` after a timeout. When the agent reconnects, it reports what is actually running and the reconciler reconciles that against the database.
+- **Timeouts**: a default timeout per phase for the build and the release command, with health check parameters coming from `spinikus.json`. Concrete values are still to be set.
+
+## Agent protocol
+
+Agents dial out to the control plane over gRPC with mTLS, so the control plane can never call an RPC on an agent: everything it wants an agent to do travels down a stream the agent opened. tonic and prost are the likely implementation, with the protocol in a versioned package such as `spinikus.agent.v1`.
+
+&#91;embedded content: agent connections · 5 RPCs, 1 control stream\]
+
+`Connect` is the main channel; the other streams carry enrollment, on-demand sessions and bulk metrics.
+
+### RPCs
+
+| RPC                | Kind                 | Called by                         | Purpose                                                                  |
+| ------------------ | -------------------- | --------------------------------- | ------------------------------------------------------------------------ |
+| `Enroll`           | Unary                | Agent (no client certificate yet) | Exchange a one-time join token and a CSR for a signed client certificate |
+| `RenewCertificate` | Unary                | Agent                             | Rotate its client certificate before expiry                              |
+| `Connect`          | Bidirectional stream | Agent                             | The control channel: hello, heartbeats, commands, acks and state reports |
+| `OpenSession`      | Bidirectional stream | Agent, when told to               | On-demand sessions such as the web terminal and live log tails           |
+| `PushStats`        | Client stream        | Agent                             | Container and server metrics samples                                     |
+
+### Messages on `Connect`
+
+- **Control plane to agent**: `SetRoutes` and `SetCertificates` (full snapshots with a revision number), `PrepareDeployment` (clone and build, or pull), `RunRelease`, `StartDeployment`, `StopDeployment`, `RestartInstance`, `OpenSession` (the request, not the stream) and `CancelCommand`.
+- **Agent to control plane**: `Hello` (protocol version, agent version, server facts), `Heartbeat`, `StateReport` (a full instance snapshot on connect, deltas afterwards), and `CommandProgress` and `CommandResult`. The health check result for the `verifying` state comes back as a command result, since the agent runs the check locally.
+
+### Decided
+
+- **Runtime logs stay on the agent that runs the container** and are streamed on demand through a session, which keeps constant log traffic off the control plane. Build logs stream live to the control plane and are stored with the deployment.
+- **The embedded agent connects over loopback gRPC**, exactly like a remote agent, so there is one code path.
+- **Metrics**: agents push samples to the control plane, which downsamples them and keeps short retention.
+- **Identity**: agents connect to a separate listener that requires mTLS. The certificate subject carries the server ID (`srv_…`), and revoking a server blocks it even if its certificate has not expired.
+- **Enrollment**: the install script includes a single-use, short-lived join token and the control plane CA's fingerprint. The agent generates its keypair locally and sends a CSR with the token. Certificates come from an internal CA whose key is stored encrypted under the master key. They are valid for 30 days by default (configurable) and are renewed over the live connection once about two thirds of the lifetime has passed. An agent that stays offline past expiry must re-enroll with a new join token.
+- **Streams**: one control stream for low-volume reliable messages, with separate streams for bulk data, so a burst of metrics can never delay a deploy command.
+- **Commands and snapshots**: deployments are multi-step workflows, so they are commands with IDs. Routes and certificates are versioned snapshots, and the agent acknowledges the revision it applied. The agent keeps the last routes and certificates on disk, so the proxy keeps serving traffic when the control plane is down or the agent restarts.
+- **Delivery**: at-least-once, with command IDs and idempotent handlers. The agent persists in-flight command state locally so it can resume after a restart.
+- **Reconnect and liveness**: exponential backoff with jitter. The first message after every connect is a full `StateReport`, which the reconciler compares against the database. Liveness uses application heartbeats every 10 seconds plus HTTP/2 keepalive. The agent-lost timeout is configurable and defaults to 2 minutes: deployments in progress on a server that has been disconnected that long fail with `agent_lost`, while a shorter outage resumes from the agent's persisted command state.
+- **On-demand sessions**: for a web terminal, the control plane sends an `OpenSession` command on the control stream, and the agent opens a new stream tagged with the session ID. The same pattern serves live log tails.
+- **Versioning**: additive changes only within `v1`. `Hello` carries the protocol version, and the control plane enforces a minimum supported agent version. Agent self-update is a later command.
+- **Secrets**: build-time and runtime variables travel inside commands over mTLS. The agent keeps them in memory or in the container environment only, and redacts them from logs.
+
+## Workspace layout
+
+Spinikus is a Cargo workspace of nine crates plus an `xtask` crate, built into one binary. The crate boundaries enforce the architecture decisions: the API and the web UI share only the control crate, the proxy knows nothing about the control plane, and the agent and control plane share only the protocol definitions.
+
+&#91;embedded content: crate dependencies · 9 crates\]
+
+The agent and the control plane never depend on each other; they share only the protocol crate.
+
+### Layout
+
+```text
+spinikus/
+├── Cargo.toml              # workspace, shared dependency versions and lints
+├── rust-toolchain.toml     # pinned stable toolchain
+├── deny.toml               # cargo-deny: licenses and advisories
+├── xtask/                  # dev tasks: OpenAPI generation, asset build, release
+└── crates/
+    ├── spinikus/           # the binary: CLI, client, wiring
+    ├── spinikus-proto/
+    ├── spinikus-core/
+    ├── spinikus-store/
+    ├── spinikus-control/
+    ├── spinikus-api/
+    ├── spinikus-web/
+    ├── spinikus-proxy/
+    └── spinikus-agent/
+```
+
+### Crates
+
+| Crate               | Responsibility                                                                                                                                   | Depends on         |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------ |
+| `spinikus-proto`    | `.proto` files and the generated tonic/prost code                                                                                                | Nothing internal   |
+| `spinikus-core`     | Domain types, prefixed ULID IDs, the deployment state machine as pure logic, schemas for `spinikus.json` and `spinikus.toml`; no I/O             | Nothing internal   |
+| `spinikus-store`    | Repository traits and the SQLite implementation, migrations, envelope encryption for secrets                                                     | core               |
+| `spinikus-control`  | The control plane: service layer, reconciler, deployment orchestrator and job queue, agent gRPC server, internal CA and enrollment, event stream | core, store, proto |
+| `spinikus-api`      | Axum JSON API, auth, OpenAPI spec                                                                                                                | control            |
+| `spinikus-web`      | Maud templates, HTMX handlers, embedded static assets                                                                                            | control            |
+| `spinikus-proxy`    | hyper and rustls proxy, route table, SNI resolver, ACME certificate manager                                                                      | core               |
+| `spinikus-agent`    | Container runtime trait with the bollard implementation, builder (Railpack runner), command handlers, reporter, local persistence                | core, proto, proxy |
+| `spinikus` (binary) | clap CLI with `server`, `agent` and client subcommands, the API client, and the wiring of the above                                              | All of the above   |
+
+### Decided
+
+- **Dependency rules**: `api` and `web` never depend on each other and meet only in `control`, so the compiler enforces the shared service layer. `core` has no I/O, so the state machine and config resolution can be tested exhaustively and fast. `proxy` knows only route and certificate types, so it can be tested on its own against local backends. `agent` and `control` do not depend on each other and share only `proto`, which is what makes loopback gRPC for the embedded agent work.
+- **Granularity**: nine crates, enough to enforce these boundaries without much overhead for a solo project.
+- **Slim agent builds**: Cargo features (`server` and `agent`, both on by default) are set up now, so an agent-only binary without Axum, SQLite and the web assets can be published later. The full binary ships first.
+- **SQLite library**: sqlx, which is async, can check queries at compile time, and eases a later Postgres backend behind the repository traits.
+- **API client**: lives as a module in the binary crate. If a Terraform provider or other tooling needs it, it gets extracted into `spinikus-client`.
+- **Tooling**: Rust edition 2024, shared `[workspace.dependencies]` and `[workspace.lints]`, rustfmt and clippy in CI, cargo-nextest for tests, cargo-deny for licenses and advisories, and an `xtask` crate for dev chores instead of shell scripts. End-to-end tests that need Docker can become a separate dev-only crate later.
+
+## API and CLI
+
+The API covers everything the UI does, and the CLI is a client of it. The public API is JSON over HTTP under `/api/v1`. The web UI, the CLI and inbound Git webhooks all reach the same service layer in the control crate.
+
+&#91;embedded content: entry points · 3 clients, 1 service layer\]
+
+Whatever the entry point, the same services enforce the same rules, so the UI never has capabilities the API lacks.
+
+### API
+
+JSON over HTTP under `/api/v1`. The OpenAPI spec is generated from the Rust types (code-first) and served at `/api/v1/openapi.json`. Changes within `v1` are additive only.
+
+| Group          | Main routes                                                                                       | Notes                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Hierarchy      | `projects`, `projects/{id}/environments`, `environments/{id}/services`, then flat `services/{id}` | Flat after creation, since IDs are globally unique                                 |
+| Deployments    | `services/{id}/deployments` (list, trigger), `deployments/{id}`                                   | Includes the config snapshot and event history                                     |
+| Actions        | `POST deployments/{id}/cancel`, `POST services/{id}/rollback`, `POST services/{id}/restart`       | Actions return the new or affected resource; a rollback returns the new deployment |
+| Config         | `variables`, `domains`, `volumes`                                                                 | Scoped by project, environment or service                                          |
+| Infrastructure | `servers`, `servers/{id}/enrollment-tokens`                                                       |                                                                                    |
+| Databases      | `services/{id}/backups`, `backup-schedules`, `storage-destinations`                               |                                                                                    |
+| Access         | `users`, `memberships`, `tokens`, `audit-log`, `settings`                                         |                                                                                    |
+
+**Realtime**: SSE for deployment events (state transitions and build logs), dashboard status and runtime log tails (served through an agent session). The web terminal is the one WebSocket, since it needs to be bidirectional.
+
+**Inbound webhooks** live outside `/api/v1`, at `/hooks/git/{provider}/{id}`. They verify signatures and trigger deployments.
+
+### CLI
+
+The CLI is the same `spinikus` binary as the server.
+
+```text
+# running Spinikus
+spinikus server run | migrate | backup | restore | check-config
+spinikus admin create-user          # bootstrap the first admin
+spinikus agent run | join <url> --token <t>
+
+# talking to a Spinikus instance
+spinikus login | logout | context list|use
+spinikus link                       # remember which service this directory means
+spinikus project|env|service list|create|show|delete
+spinikus deploy [service]           # waits and streams build logs
+spinikus rollback [service]
+spinikus logs [service] -f
+spinikus shell [service]            # web terminal equivalent
+spinikus env list|set|unset|import|export
+spinikus domain add|remove
+spinikus db backup|restore
+spinikus token create|revoke
+```
+
+- **Global flags**: `--server`, `--token`, `-o table|json|yaml`, `--quiet` and `--no-color`. `SPINIKUS_URL` and `SPINIKUS_TOKEN` work for CI.
+- **Config**: named contexts (server URL plus token) in `~/.config/spinikus/`, with the token in the OS keychain if available, otherwise in a file with 0600 permissions.
+- **`deploy`** waits by default and streams build logs, exiting non-zero on failure. `--detach` returns immediately.
+- **Stable exit codes**, and JSON output that matches the API's shapes, so scripts do not have to parse tables.
+
+### Decided
+
+- **The public API is REST/JSON** with an OpenAPI spec, not gRPC. gRPC stays for the agent protocol.
+- **The CLI client is hand-written**, in the binary crate. The OpenAPI spec is used for docs and contract tests, not for client generation.
+- **The CLI knows which service you mean through flags plus a link file** created by `spinikus link`. It cannot be `spinikus.json`, which holds no hosting details.
+- **Git-based deploys are MVP.** Deploying from a local directory is Later.
+- **Errors** use RFC 9457 problem details, with a stable machine-readable `code` for every error.
+- **Pagination** is cursor-based. ULIDs sort by creation time, so the cursor is just an ID.
+- **Idempotency**: an `Idempotency-Key` header on POSTs that create deployments or other side effects.
+- **Concurrent edits**: every mutable resource carries a revision, and updates use `If-Match`, so the UI and CLI cannot silently overwrite each other.
+- **Secrets are write-only.** Reads return metadata only, and a separate reveal endpoint requires the right role and writes to the audit log.
+- **Authentication**: a session cookie for the web UI (HttpOnly, SameSite, CSRF protection) and bearer API tokens for the CLI and automation. Tokens have a recognizable prefix, are shown once, are stored hashed, are scoped like memberships (role plus project or environment), and can expire.
