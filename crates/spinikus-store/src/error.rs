@@ -10,6 +10,9 @@ pub enum StoreError {
     /// An update was based on an older revision than the one stored.
     #[error("{entity} `{id}` is at revision {actual}, not {expected}")]
     RevisionMismatch { entity: &'static str, id: String, expected: i64, actual: i64 },
+    /// The deployment state machine does not allow the requested change.
+    #[error(transparent)]
+    InvalidTransition(#[from] spinikus_core::deployment::TransitionError),
     /// A stored value could not be read back into its domain type.
     #[error("invalid {column} in {entity} row: {problem}")]
     InvalidRow { entity: &'static str, column: &'static str, problem: String },

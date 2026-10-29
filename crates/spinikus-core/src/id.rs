@@ -4,7 +4,18 @@
 //! `ProjectId` is expected. IDs sort by creation time and are safe to expose in
 //! the API and in URLs.
 
+use std::sync::Mutex;
+
 use thiserror::Error;
+
+/// Shared by every ID type, so IDs created in the same millisecond still sort in creation order.
+static GENERATOR: Mutex<ulid::Generator> = Mutex::new(ulid::Generator::new());
+
+fn generate() -> ulid::Ulid {
+    let mut generator = GENERATOR.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Overflow needs 2^80 IDs in one millisecond; fall back to a random ULID if it ever happens.
+    generator.generate().unwrap_or_else(|overflow| overflow.commit_overflow_random())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum IdError {
@@ -23,10 +34,9 @@ macro_rules! define_id {
         impl $name {
             pub const PREFIX: &'static str = $prefix;
 
-            /// Generates a new ID for the current time. IDs created within the same
-            /// millisecond are not guaranteed to sort in creation order.
+            /// Generates a new ID for the current time, sorting after every ID this process created before.
             pub fn new() -> Self {
-                Self(ulid::Ulid::generate())
+                Self(generate())
             }
         }
 
@@ -133,13 +143,11 @@ mod tests {
     }
 
     #[test]
-    fn sorts_by_creation_time() {
-        let first = DeploymentId::new();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let second = DeploymentId::new();
+    fn sorts_by_creation_time_within_a_millisecond() {
+        let ids: Vec<DeploymentId> = (0..1000).map(|_| DeploymentId::new()).collect();
 
-        assert!(first < second);
-        assert!(first.to_string() < second.to_string());
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(ids.windows(2).all(|pair| pair[0].to_string() < pair[1].to_string()));
     }
 
     #[test]

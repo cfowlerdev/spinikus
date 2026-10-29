@@ -199,7 +199,6 @@ mod tests {
         let mut ids = Vec::new();
         for slug in ["a", "b", "c"] {
             ids.push(store.create_project(fields(slug, slug)).await.unwrap().id);
-            std::thread::sleep(std::time::Duration::from_millis(2));
         }
 
         let first_page = store.list_projects(None, 2).await.unwrap();

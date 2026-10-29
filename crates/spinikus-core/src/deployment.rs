@@ -1,286 +1,149 @@
-//! The deployment state machine.
-//!
-//! A deployment moves `queued → preparing → releasing → starting → verifying → live`,
-//! and later `live → draining → superseded` when a newer deployment replaces it.
-//! Before going live it can end early as `failed` or `canceled`, always with a reason.
-//! Only `live` deployments receive traffic, so a deployment that ends early never does.
+//! Deployments: immutable records of one release of a service, moving through the
+//! state machine in [`state`].
 
+mod state;
+
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
+pub use state::*;
 
-use crate::text::impl_text;
+use crate::{
+    actor::Actor,
+    id::{DeploymentEventId, DeploymentId, ServiceId},
+    service::{ServiceConfig, ServiceKind},
+    source::SourceSpec,
+    text::impl_text
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Deployment {
+    pub id: DeploymentId,
+    pub service_id: ServiceId,
+    pub trigger: DeploymentTrigger,
+    pub strategy: DeploymentStrategy,
+    pub status: DeploymentStatus,
+    /// Set when the deployment is `failed` or `canceled`.
+    pub reason: Option<EndReason>,
+    /// The deployment this one rolls back to, for rollbacks.
+    pub rollback_of: Option<DeploymentId>,
+    pub snapshot: DeploymentSnapshot,
+    /// The commit being deployed, once known: from the webhook, or after the agent clones.
+    pub commit_sha: Option<String>,
+    /// The image that runs, once known: the source image, or the result of the build.
+    pub image: Option<String>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp
+}
+
+/// What a new deployment starts from. The ID, status and timestamps are set by the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDeployment {
+    pub service_id: ServiceId,
+    pub trigger: DeploymentTrigger,
+    pub strategy: DeploymentStrategy,
+    pub rollback_of: Option<DeploymentId>,
+    pub snapshot: DeploymentSnapshot,
+    pub commit_sha: Option<String>,
+    pub image: Option<String>
+}
+
+/// The service's settings as they were when the deployment was created, so later
+/// edits never change what an existing deployment runs. A rollback reuses its target's snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploymentSnapshot {
+    pub source: SourceSpec,
+    pub config: ServiceConfig
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DeploymentStatus {
-    /// Created, waiting for its turn.
-    Queued,
-    /// The agent clones and builds, or pulls the image.
-    Preparing,
-    /// The release command (such as migrations) runs once in a one-off container.
-    Releasing,
-    /// New containers start from the snapshot config.
-    Starting,
-    /// The health check must pass before routes switch.
-    Verifying,
-    /// Routes have switched; this is the service's current deployment.
-    Live,
-    /// Replaced; finishing in-flight requests before its containers stop.
-    Draining,
-    /// Replaced by a newer live deployment.
-    Superseded,
-    /// Ended before going live, with a failure reason.
-    Failed,
-    /// Ended before going live, with a cancel reason.
-    Canceled
+pub enum DeploymentTrigger {
+    /// Started by a user from the UI, API or CLI.
+    Manual,
+    /// Started by a Git webhook.
+    GitPush,
+    /// Redeploys an earlier deployment's image and snapshot.
+    Rollback
 }
 
-/// Why a deployment ended as `failed` or `canceled`.
+impl DeploymentTrigger {
+    pub const ALL: [DeploymentTrigger; 3] = [Self::Manual, Self::GitPush, Self::Rollback];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::GitPush => "git_push",
+            Self::Rollback => "rollback"
+        }
+    }
+}
+
+/// How the new deployment replaces the live one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EndReason {
-    BuildFailed,
-    ReleaseFailed,
-    StartFailed,
-    HealthCheckFailed,
-    /// A phase ran past its timeout.
-    Timeout,
-    /// The agent running the deployment was disconnected past the agent-lost timeout.
-    AgentLost,
-    CanceledByUser,
-    /// A newer deployment of the same service was queued before this one started.
-    SupersededInQueue
+pub enum DeploymentStrategy {
+    /// Start the new containers, verify them, switch routes, then drain the old ones.
+    BlueGreen,
+    /// Stop the old containers before starting the new ones, accepting brief downtime.
+    /// Used when two containers must not share a volume.
+    Recreate
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum TransitionError {
-    #[error("a deployment cannot move from `{from}` to `{to}`")]
-    NotAllowed { from: DeploymentStatus, to: DeploymentStatus },
-    #[error("moving to `{to}` requires a reason")]
-    MissingReason { to: DeploymentStatus },
-    #[error("moving to `{to}` does not take a reason")]
-    UnexpectedReason { to: DeploymentStatus },
-    #[error("reason `{reason}` cannot end a deployment that is `{from}` as `{to}`")]
-    WrongReason { from: DeploymentStatus, to: DeploymentStatus, reason: EndReason }
+impl DeploymentStrategy {
+    pub const ALL: [DeploymentStrategy; 2] = [Self::BlueGreen, Self::Recreate];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BlueGreen => "blue_green",
+            Self::Recreate => "recreate"
+        }
+    }
+
+    /// Databases are recreated; everything else is blue-green. Services with persistent
+    /// volumes will be recreated too, once volumes exist.
+    pub fn default_for(kind: ServiceKind) -> Self {
+        match kind {
+            ServiceKind::Database => Self::Recreate,
+            ServiceKind::App | ServiceKind::Template => Self::BlueGreen
+        }
+    }
 }
 
-/// A checked change of status, ready to be recorded as a deployment event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Transition {
-    pub from: DeploymentStatus,
+impl_text!(DeploymentTrigger, "deployment trigger");
+impl_text!(DeploymentStrategy, "deployment strategy");
+
+/// One recorded change of a deployment's status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeploymentEvent {
+    pub id: DeploymentEventId,
+    pub deployment_id: DeploymentId,
+    /// `None` for the event that creates the deployment.
+    pub from: Option<DeploymentStatus>,
     pub to: DeploymentStatus,
-    pub reason: Option<EndReason>
+    pub reason: Option<EndReason>,
+    pub actor: Actor,
+    pub created_at: Timestamp
 }
-
-impl DeploymentStatus {
-    pub const ALL: [DeploymentStatus; 10] = [
-        Self::Queued,
-        Self::Preparing,
-        Self::Releasing,
-        Self::Starting,
-        Self::Verifying,
-        Self::Live,
-        Self::Draining,
-        Self::Superseded,
-        Self::Failed,
-        Self::Canceled
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Preparing => "preparing",
-            Self::Releasing => "releasing",
-            Self::Starting => "starting",
-            Self::Verifying => "verifying",
-            Self::Live => "live",
-            Self::Draining => "draining",
-            Self::Superseded => "superseded",
-            Self::Failed => "failed",
-            Self::Canceled => "canceled"
-        }
-    }
-
-    /// No further transitions are possible.
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Superseded | Self::Failed | Self::Canceled)
-    }
-
-    /// Still on its way to going live, so it can fail or be canceled.
-    pub fn is_in_progress(self) -> bool {
-        matches!(self, Self::Queued | Self::Preparing | Self::Releasing | Self::Starting | Self::Verifying)
-    }
-
-    /// Checks that a deployment in this status may move to `to`, for `reason`.
-    ///
-    /// `failed` and `canceled` require a reason that fits the current status; every
-    /// other target takes none. Two forward skips are allowed: `preparing → starting`
-    /// when there is no release command, and `queued → starting` for a rollback,
-    /// which reuses an existing image and skips the release command by default.
-    pub fn transition(self, to: DeploymentStatus, reason: Option<EndReason>) -> Result<Transition, TransitionError> {
-        use DeploymentStatus::*;
-
-        let allowed = match (self, to) {
-            (Queued, Preparing | Starting) => true,
-            (Preparing, Releasing | Starting) => true,
-            (Releasing, Starting) => true,
-            (Starting, Verifying) => true,
-            (Verifying, Live) => true,
-            (Live, Draining) => true,
-            (Draining, Superseded) => true,
-            (from, Failed | Canceled) => from.is_in_progress(),
-            _ => false
-        };
-        if !allowed {
-            return Err(TransitionError::NotAllowed { from: self, to });
-        }
-
-        match (to, reason) {
-            (Failed | Canceled, None) => Err(TransitionError::MissingReason { to }),
-            (Failed | Canceled, Some(reason)) if !reason.can_end(self, to) => {
-                Err(TransitionError::WrongReason { from: self, to, reason })
-            }
-            (Failed | Canceled, Some(_)) => Ok(Transition { from: self, to, reason }),
-            (_, Some(_)) => Err(TransitionError::UnexpectedReason { to }),
-            (_, None) => Ok(Transition { from: self, to, reason: None })
-        }
-    }
-}
-
-impl EndReason {
-    pub const ALL: [EndReason; 8] = [
-        Self::BuildFailed,
-        Self::ReleaseFailed,
-        Self::StartFailed,
-        Self::HealthCheckFailed,
-        Self::Timeout,
-        Self::AgentLost,
-        Self::CanceledByUser,
-        Self::SupersededInQueue
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::BuildFailed => "build_failed",
-            Self::ReleaseFailed => "release_failed",
-            Self::StartFailed => "start_failed",
-            Self::HealthCheckFailed => "health_check_failed",
-            Self::Timeout => "timeout",
-            Self::AgentLost => "agent_lost",
-            Self::CanceledByUser => "canceled_by_user",
-            Self::SupersededInQueue => "superseded_in_queue"
-        }
-    }
-
-    /// Whether this reason can end a deployment that is `from` with status `to`.
-    fn can_end(self, from: DeploymentStatus, to: DeploymentStatus) -> bool {
-        use DeploymentStatus::*;
-
-        match self {
-            Self::BuildFailed => from == Preparing && to == Failed,
-            Self::ReleaseFailed => from == Releasing && to == Failed,
-            Self::StartFailed => from == Starting && to == Failed,
-            Self::HealthCheckFailed => from == Verifying && to == Failed,
-            Self::Timeout | Self::AgentLost => from != Queued && to == Failed,
-            Self::CanceledByUser => to == Canceled,
-            Self::SupersededInQueue => from == Queued && to == Canceled
-        }
-    }
-}
-
-impl_text!(DeploymentStatus, "deployment status");
-impl_text!(EndReason, "end reason");
 
 #[cfg(test)]
 mod tests {
-    use super::{DeploymentStatus::*, EndReason::*, *};
-
-    /// Every allowed (from, to, reason) combination, written out independently of the implementation.
-    const ALLOWED: &[(DeploymentStatus, DeploymentStatus, Option<EndReason>)] = &[
-        (Queued, Preparing, None),
-        (Queued, Starting, None),
-        (Queued, Canceled, Some(CanceledByUser)),
-        (Queued, Canceled, Some(SupersededInQueue)),
-        (Preparing, Releasing, None),
-        (Preparing, Starting, None),
-        (Preparing, Failed, Some(BuildFailed)),
-        (Preparing, Failed, Some(Timeout)),
-        (Preparing, Failed, Some(AgentLost)),
-        (Preparing, Canceled, Some(CanceledByUser)),
-        (Releasing, Starting, None),
-        (Releasing, Failed, Some(ReleaseFailed)),
-        (Releasing, Failed, Some(Timeout)),
-        (Releasing, Failed, Some(AgentLost)),
-        (Releasing, Canceled, Some(CanceledByUser)),
-        (Starting, Verifying, None),
-        (Starting, Failed, Some(StartFailed)),
-        (Starting, Failed, Some(Timeout)),
-        (Starting, Failed, Some(AgentLost)),
-        (Starting, Canceled, Some(CanceledByUser)),
-        (Verifying, Live, None),
-        (Verifying, Failed, Some(HealthCheckFailed)),
-        (Verifying, Failed, Some(Timeout)),
-        (Verifying, Failed, Some(AgentLost)),
-        (Verifying, Canceled, Some(CanceledByUser)),
-        (Live, Draining, None),
-        (Draining, Superseded, None)
-    ];
-
-    #[test]
-    fn allows_exactly_the_listed_transitions() {
-        let reasons = std::iter::once(None).chain(EndReason::ALL.into_iter().map(Some));
-
-        for from in DeploymentStatus::ALL {
-            for to in DeploymentStatus::ALL {
-                for reason in reasons.clone() {
-                    let expected = ALLOWED.contains(&(from, to, reason));
-                    let result = from.transition(to, reason);
-
-                    assert_eq!(result.is_ok(), expected, "{from} -> {to} with {reason:?}: {result:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn terminal_statuses_have_no_way_out() {
-        for status in DeploymentStatus::ALL.into_iter().filter(|status| status.is_terminal()) {
-            assert!(ALLOWED.iter().all(|(from, ..)| *from != status), "{status} has a transition");
-        }
-    }
-
-    #[test]
-    fn live_cannot_be_failed_or_canceled() {
-        assert_eq!(
-            Live.transition(Canceled, Some(CanceledByUser)),
-            Err(TransitionError::NotAllowed { from: Live, to: Canceled })
-        );
-        assert_eq!(Live.transition(Failed, Some(AgentLost)), Err(TransitionError::NotAllowed { from: Live, to: Failed }));
-    }
-
-    #[test]
-    fn reports_reason_errors() {
-        assert_eq!(Preparing.transition(Failed, None), Err(TransitionError::MissingReason { to: Failed }));
-        assert_eq!(
-            Preparing.transition(Releasing, Some(Timeout)),
-            Err(TransitionError::UnexpectedReason { to: Releasing })
-        );
-        assert_eq!(
-            Verifying.transition(Failed, Some(BuildFailed)),
-            Err(TransitionError::WrongReason { from: Verifying, to: Failed, reason: BuildFailed })
-        );
-    }
+    use super::*;
 
     #[test]
     fn text_round_trips() {
-        for status in DeploymentStatus::ALL {
-            assert_eq!(status.to_string().parse(), Ok(status));
-            assert_eq!(serde_json::to_string(&status).unwrap(), format!("\"{status}\""));
+        for trigger in DeploymentTrigger::ALL {
+            assert_eq!(trigger.to_string().parse(), Ok(trigger));
+            assert_eq!(serde_json::to_string(&trigger).unwrap(), format!("\"{trigger}\""));
         }
-        for reason in EndReason::ALL {
-            assert_eq!(reason.to_string().parse(), Ok(reason));
-            assert_eq!(serde_json::to_string(&reason).unwrap(), format!("\"{reason}\""));
+        for strategy in DeploymentStrategy::ALL {
+            assert_eq!(strategy.to_string().parse(), Ok(strategy));
+            assert_eq!(serde_json::to_string(&strategy).unwrap(), format!("\"{strategy}\""));
         }
-        assert!("building".parse::<DeploymentStatus>().is_err());
+    }
+
+    #[test]
+    fn databases_default_to_recreate() {
+        assert_eq!(DeploymentStrategy::default_for(ServiceKind::Database), DeploymentStrategy::Recreate);
+        assert_eq!(DeploymentStrategy::default_for(ServiceKind::App), DeploymentStrategy::BlueGreen);
     }
 }
