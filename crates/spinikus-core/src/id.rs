@@ -76,7 +76,7 @@ define_id!(EnvironmentId, "env");
 define_id!(ServiceId, "svc");
 define_id!(SourceId, "src");
 define_id!(DeploymentId, "dep");
-define_id!(DeploymentEventId, "dev");
+define_id!(DeploymentEventId, "evt");
 define_id!(ServerId, "srv");
 define_id!(InstanceId, "ins");
 define_id!(JobId, "job");
