@@ -1,5 +1,8 @@
 pub mod config;
 pub mod deployment;
+pub mod environment;
 pub mod id;
 pub mod project;
+pub mod service;
 pub mod slug;
+pub mod text;

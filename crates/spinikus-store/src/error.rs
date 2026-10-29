@@ -4,6 +4,9 @@ pub enum StoreError {
     NotFound { entity: &'static str, id: String },
     #[error("a {entity} with {field} `{value}` already exists")]
     Conflict { entity: &'static str, field: &'static str, value: String },
+    /// A delete was refused because the entity still has children that are not deleted.
+    #[error("{entity} `{id}` still has {children}")]
+    HasChildren { entity: &'static str, id: String, children: &'static str },
     /// An update was based on an older revision than the one stored.
     #[error("{entity} `{id}` is at revision {actual}, not {expected}")]
     RevisionMismatch { entity: &'static str, id: String, expected: i64, actual: i64 },
@@ -19,10 +22,13 @@ pub enum StoreError {
 }
 
 impl StoreError {
-    /// Turns a unique constraint violation into the given conflict, and passes other errors through.
-    pub(crate) fn on_unique_violation(error: sqlx::Error, conflict: impl FnOnce() -> StoreError) -> StoreError {
+    /// Turns a unique constraint violation into a conflict, and passes other errors through.
+    ///
+    /// `conflict` gets SQLite's message, which names the columns of the violated index,
+    /// for example `UNIQUE constraint failed: projects.slug`.
+    pub(crate) fn on_unique_violation(error: sqlx::Error, conflict: impl FnOnce(&str) -> StoreError) -> StoreError {
         match error.as_database_error() {
-            Some(db_error) if db_error.is_unique_violation() => conflict(),
+            Some(db_error) if db_error.is_unique_violation() => conflict(db_error.message()),
             _ => StoreError::Database(error)
         }
     }

@@ -21,7 +21,7 @@ pub trait ProjectRepository: Send + Sync {
     /// Replaces the project's fields if it is still at `revision`.
     async fn update_project(&self, id: ProjectId, revision: i64, fields: ProjectFields) -> Result<Project, StoreError>;
 
-    /// Soft-deletes the project, which frees its slug.
+    /// Soft-deletes the project, which frees its slug. Refused while it has environments.
     async fn delete_project(&self, id: ProjectId) -> Result<(), StoreError>;
 }
 
@@ -50,9 +50,9 @@ impl TryFrom<ProjectRow> for Project {
     }
 }
 
-fn slug_conflict(fields: &ProjectFields) -> impl FnOnce() -> StoreError {
+fn slug_conflict(fields: &ProjectFields) -> impl FnOnce(&str) -> StoreError {
     let value = fields.slug.to_string();
-    move || StoreError::Conflict { entity: ENTITY, field: "slug", value }
+    move |_| StoreError::Conflict { entity: ENTITY, field: "slug", value }
 }
 
 fn not_found(id: ProjectId) -> StoreError {
@@ -131,14 +131,17 @@ impl ProjectRepository for SqliteStore {
             "UPDATE projects
              SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                  revision = revision + 1
-             WHERE id = ? AND deleted_at IS NULL"
+             WHERE id = ? AND deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM environments WHERE project_id = projects.id AND deleted_at IS NULL)"
         )
         .bind(id.to_string())
         .execute(self.pool())
         .await?;
 
         if result.rows_affected() == 0 {
-            return Err(not_found(id));
+            // Either the project is gone, or it still has environments.
+            self.get_project(id).await?;
+            return Err(StoreError::HasChildren { entity: ENTITY, id: id.to_string(), children: "environments" });
         }
         Ok(())
     }

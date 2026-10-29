@@ -5,10 +5,10 @@
 //! Before going live it can end early as `failed` or `canceled`, always with a reason.
 //! Only `live` deployments receive traffic, so a deployment that ends early never does.
 
-use std::{fmt, str::FromStr};
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::text::impl_text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -188,36 +188,8 @@ impl EndReason {
     }
 }
 
-macro_rules! impl_text {
-    ($type:ty, $what:literal) => {
-        impl fmt::Display for $type {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-
-        impl FromStr for $type {
-            type Err = UnknownValue;
-
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
-                Self::ALL
-                    .into_iter()
-                    .find(|item| item.as_str() == value)
-                    .ok_or_else(|| UnknownValue { what: $what, value: value.to_string() })
-            }
-        }
-    };
-}
-
 impl_text!(DeploymentStatus, "deployment status");
 impl_text!(EndReason, "end reason");
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("unknown {what} `{value}`")]
-pub struct UnknownValue {
-    what: &'static str,
-    value: String
-}
 
 #[cfg(test)]
 mod tests {
