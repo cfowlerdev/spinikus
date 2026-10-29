@@ -1,3 +1,3 @@
 pub mod db;
 
-pub use db::{StoreError, connect};
+pub use db::{StoreError, connect, migrate};

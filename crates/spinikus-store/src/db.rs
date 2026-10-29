@@ -13,7 +13,9 @@ pub enum StoreError {
     #[error("failed to create database directory {path}")]
     CreateDir { path: String, source: std::io::Error },
     #[error(transparent)]
-    Database(#[from] sqlx::Error)
+    Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    Migrate(#[from] sqlx::migrate::MigrateError)
 }
 
 /// Opens the SQLite database at `path`, creating the file and its directory if needed.
@@ -37,9 +39,22 @@ pub async fn connect(path: &Path) -> Result<SqlitePool, StoreError> {
     Ok(pool)
 }
 
+/// Applies any pending migrations embedded from `migrations/`.
+pub async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
+    sqlx::migrate!().run(pool).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn migrated_pool() -> (tempfile::TempDir, SqlitePool) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = connect(&dir.path().join("spinikus.db")).await.unwrap();
+        migrate(&pool).await.unwrap();
+        (dir, pool)
+    }
 
     #[tokio::test]
     async fn creates_database_and_directory() {
@@ -63,5 +78,37 @@ mod tests {
         assert_eq!(journal_mode, "wal");
         assert_eq!(foreign_keys, 1);
         assert_eq!(busy_timeout, 5000);
+    }
+
+    #[tokio::test]
+    async fn migrations_are_idempotent() {
+        let (_dir, pool) = migrated_pool().await;
+
+        migrate(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_table_is_strict() {
+        let (_dir, pool) = migrated_pool().await;
+
+        let strict: i64 = sqlx::query_scalar("SELECT strict FROM pragma_table_list WHERE name = 'settings'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(strict, 1);
+    }
+
+    #[tokio::test]
+    async fn settings_reject_invalid_json() {
+        let (_dir, pool) = migrated_pool().await;
+
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('acme_email', '\"ops@example.com\"')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let invalid = sqlx::query("INSERT INTO settings (key, value) VALUES ('broken', 'not json')").execute(&pool).await;
+
+        assert!(invalid.is_err());
     }
 }
