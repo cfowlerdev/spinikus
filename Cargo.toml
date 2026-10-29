@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/*"
+]
+
+[workspace.dependencies]
+async-trait = "0.1.92"
+serde = {version = "1.0.229", features=["derive"]}
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+tokio = {version = "1.54.1", features = ["full"]}
+
+spinikus-agent = { path = "crates/spinkus-agent" }
+spinikus-api = { path = "crates/spinikus-api" }
+spinikus-control = { path = "crates/spinikus-control" }
+spinikus-core = { path = "crates/spinikus-core" }
+spinikus-proto = { path = "crates/spinikus-proto" }
+spinikus-proxy = { path = "crates/spinikus-proxy" }
+spinikus-store = { path = "crates/spinikus-store" }
+spinikus-web = { path = "crates/spinikus-web" }
