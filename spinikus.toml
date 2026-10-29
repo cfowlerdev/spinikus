@@ -1,3 +1,8 @@
+data_dir = "data"
+
 [logging]
 level = "debug"
 json = false
+
+[database]
+# path = "spinikus.db"   # relative paths resolve against data_dir

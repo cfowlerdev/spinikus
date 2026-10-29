@@ -1,5 +1,5 @@
 use clap::Parser;
-use spinikus::{cli::{Cli, Commands}, config::SpinikusConfig};
+use spinikus::{cli::{Cli, Commands}, config};
 
 async fn run_command(command: Commands) {
     let result = match command {
@@ -16,10 +16,10 @@ async fn main() {
     let cli = Cli::parse();
 
     // Load config
-    let config = SpinikusConfig::load().expect("Failed to load Spinikus configuration");
+    let config = config::load().expect("Failed to load Spinikus configuration");
 
     // Init logging
-    config.logging.init();
+    config::init_logging(&config.logging);
 
     tracing::info!("Spinikus v0.1");
     // Decide what to do based on command line

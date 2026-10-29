@@ -1,40 +1,23 @@
 use config::{Config, Environment, File};
-use serde::Deserialize;
+use spinikus_core::config::{LoggingConfig, SpinikusConfig};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+pub fn init_logging(logging: &LoggingConfig) {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&logging.level));
 
-#[derive(Deserialize, Default)]
-pub struct LoggingConfig {
-    pub level: String,
-    pub json: bool
-}
+    let registry = tracing_subscriber::registry().with(filter);
 
-impl LoggingConfig {
-    pub fn init(&self) {
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&self.level));
-
-        let registry = tracing_subscriber::registry().with(filter);
-
-        if self.json {
-            registry.with(fmt::layer().json()).init();
-        } else {
-            registry.with(fmt::layer()).init();
-        }
+    if logging.json {
+        registry.with(fmt::layer().json()).init();
+    } else {
+        registry.with(fmt::layer()).init();
     }
 }
 
-
-#[derive(Deserialize, Default)]
-pub struct SpinikusConfig {
-    pub logging: LoggingConfig
-}
-
-impl SpinikusConfig {
-    pub fn load() -> Result<Self, config::ConfigError> {
-        Config::builder()
-            .add_source(File::with_name("spinikus.toml"))
-            .add_source(Environment::with_prefix("SPINIKUS").separator("__"))
-            .build()?
-            .try_deserialize()
-    }
+pub fn load() -> Result<SpinikusConfig, config::ConfigError> {
+    Config::builder()
+        .add_source(File::with_name("spinikus.toml"))
+        .add_source(Environment::with_prefix("SPINIKUS").separator("__"))
+        .build()?
+        .try_deserialize()
 }
