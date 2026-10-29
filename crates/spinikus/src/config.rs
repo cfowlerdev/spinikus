@@ -17,7 +17,7 @@ pub fn init_logging(logging: &LoggingConfig) {
 pub fn load() -> Result<SpinikusConfig, config::ConfigError> {
     Config::builder()
         .add_source(File::with_name("spinikus.toml"))
-        .add_source(Environment::with_prefix("SPINIKUS").separator("__"))
+        .add_source(Environment::with_prefix("SPINIKUS").prefix_separator("_").separator("__"))
         .build()?
         .try_deserialize()
 }

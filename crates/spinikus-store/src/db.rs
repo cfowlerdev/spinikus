@@ -1,7 +1,7 @@
 use std::{path::Path, time::Duration};
 
 use sqlx::{
-    SqlitePool,
+    ConnectOptions, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous}
 };
 
@@ -32,7 +32,8 @@ pub async fn connect(path: &Path) -> Result<SqlitePool, StoreError> {
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
-        .busy_timeout(BUSY_TIMEOUT);
+        .busy_timeout(BUSY_TIMEOUT)
+        .log_statements(tracing::log::LevelFilter::Trace);
 
     let pool = SqlitePoolOptions::new().connect_with(options).await?;
     tracing::debug!(path = %path.display(), "connected to database");

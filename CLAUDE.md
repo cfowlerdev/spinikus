@@ -14,11 +14,14 @@ cargo check --workspace
 cargo test --workspace               # all tests
 cargo test -p spinikus-core          # one crate
 cargo test -p spinikus-core it_works # one test by name filter
-cargo run -- server                  # run the binary (subcommands: server, admin, agent)
+cargo run -- server run              # start the control plane (connects to SQLite, applies migrations)
+cargo run -- server migrate          # apply pending migrations and exit
 cargo clippy --workspace && cargo fmt
 ```
 
-The binary loads `spinikus.toml` from the **current working directory** (required), overlaid by env vars with prefix `SPINIKUS` and `__` as the nesting separator (e.g. `SPINIKUS_LOGGING__LEVEL=info`). `RUST_LOG` overrides `logging.level` when set. Run it from the repo root.
+The binary loads `spinikus.toml` from the **current working directory** (required), overlaid by env vars with prefix `SPINIKUS` and `__` as the nesting separator (e.g. `SPINIKUS_LOGGING__LEVEL=info`). `RUST_LOG` overrides `logging.level` when set. Run it from the repo root. The database defaults to `<data_dir>/spinikus.db` (`data/` in dev, gitignored).
+
+Migrations live in `crates/spinikus-store/migrations/` as `NNNN_<name>.sql`, are embedded with `sqlx::migrate!`, and run automatically on startup. Tables are `STRICT`; timestamps are `TEXT` in UTC RFC 3339 with milliseconds (`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`).
 
 Planned but not yet present (per the design doc): `rust-toolchain.toml`, `deny.toml`, `[workspace.lints]`, cargo-nextest, and an `xtask` crate for OpenAPI generation, asset builds and releases — use `xtask` rather than shell scripts for dev chores once it exists.
 
