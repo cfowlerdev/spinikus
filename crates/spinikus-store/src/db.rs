@@ -5,18 +5,10 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous}
 };
 
+use crate::StoreError;
+
 /// How long a connection waits on a locked database before giving up.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[derive(Debug, thiserror::Error)]
-pub enum StoreError {
-    #[error("failed to create database directory {path}")]
-    CreateDir { path: String, source: std::io::Error },
-    #[error(transparent)]
-    Database(#[from] sqlx::Error),
-    #[error(transparent)]
-    Migrate(#[from] sqlx::migrate::MigrateError)
-}
 
 /// Opens the SQLite database at `path`, creating the file and its directory if needed.
 ///
@@ -40,6 +32,22 @@ pub async fn connect(path: &Path) -> Result<SqlitePool, StoreError> {
     Ok(pool)
 }
 
+/// The SQLite implementation of every repository trait.
+#[derive(Clone)]
+pub struct SqliteStore {
+    pool: SqlitePool
+}
+
+impl SqliteStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+}
+
 /// Applies any pending migrations embedded from `migrations/`.
 pub async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
     sqlx::migrate!().run(pool).await?;
@@ -49,13 +57,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    async fn migrated_pool() -> (tempfile::TempDir, SqlitePool) {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = connect(&dir.path().join("spinikus.db")).await.unwrap();
-        migrate(&pool).await.unwrap();
-        (dir, pool)
-    }
+    use crate::test_support::migrated_pool;
 
     #[tokio::test]
     async fn creates_database_and_directory() {
@@ -89,15 +91,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_table_is_strict() {
+    async fn all_tables_are_strict() {
         let (_dir, pool) = migrated_pool().await;
 
-        let strict: i64 = sqlx::query_scalar("SELECT strict FROM pragma_table_list WHERE name = 'settings'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let loose: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_list WHERE schema = 'main' AND type = 'table' AND strict = 0
+             AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations'"
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
 
-        assert_eq!(strict, 1);
+        assert!(loose.is_empty(), "tables without STRICT: {loose:?}");
     }
 
     #[tokio::test]
