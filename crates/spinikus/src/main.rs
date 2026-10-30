@@ -1,6 +1,9 @@
 use anyhow::Context;
 use clap::Parser;
-use spinikus::{cli::{Cli, Commands, ServerCommand}, config, server};
+use spinikus::{
+    cli::{Cli, Commands, ServerCommand},
+    config, server,
+};
 use spinikus_core::config::SpinikusConfig;
 
 async fn run_command(command: Commands, config: &SpinikusConfig) -> anyhow::Result<()> {
@@ -9,8 +12,8 @@ async fn run_command(command: Commands, config: &SpinikusConfig) -> anyhow::Resu
         Commands::Agent(_args) => tracing::info!("Running in AGENT mode"),
         Commands::Server(args) => match args.command {
             ServerCommand::Run(args) => server::run(config, args).await?,
-            ServerCommand::Migrate => server::migrate(config).await?
-        }
+            ServerCommand::Migrate => server::migrate(config).await?,
+        },
     }
     Ok(())
 }

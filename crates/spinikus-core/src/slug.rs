@@ -16,7 +16,7 @@ pub struct Slug(String);
 #[error("`{value}` is not a valid slug: {problem}")]
 pub struct SlugError {
     value: String,
-    problem: &'static str
+    problem: &'static str,
 }
 
 impl Slug {
@@ -45,7 +45,7 @@ impl FromStr for Slug {
 
         match problem {
             Some(problem) => Err(SlugError { value: value.to_string(), problem }),
-            None => Ok(Self(value.to_string()))
+            None => Ok(Self(value.to_string())),
         }
     }
 }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     id::{EnvironmentId, MembershipId, ProjectId, UserId},
-    text::impl_text
+    text::impl_text,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -17,7 +17,7 @@ pub struct Membership {
     pub role: Role,
     pub revision: i64,
     pub created_at: Timestamp,
-    pub updated_at: Timestamp
+    pub updated_at: Timestamp,
 }
 
 /// What a membership grants access to. A user has at most one membership per scope.
@@ -27,7 +27,7 @@ pub enum MembershipScope {
     /// The project and all of its environments.
     Project(ProjectId),
     /// One environment only, such as giving a contractor access to staging.
-    Environment(EnvironmentId)
+    Environment(EnvironmentId),
 }
 
 /// Roles, ordered from least to most access.
@@ -39,7 +39,7 @@ pub enum Role {
     /// Also deploys, rolls back, and edits services, variables, domains and volumes.
     Developer,
     /// Also manages the scope itself and its members, and reveals secrets.
-    Admin
+    Admin,
 }
 
 impl Role {
@@ -49,7 +49,7 @@ impl Role {
         match self {
             Self::Viewer => "viewer",
             Self::Developer => "developer",
-            Self::Admin => "admin"
+            Self::Admin => "admin",
         }
     }
 }
@@ -65,7 +65,7 @@ pub fn effective_role(memberships: &[Membership], project: ProjectId, environmen
         .iter()
         .filter(|membership| match membership.scope {
             MembershipScope::Project(id) => id == project,
-            MembershipScope::Environment(id) => Some(id) == environment
+            MembershipScope::Environment(id) => Some(id) == environment,
         })
         .map(|membership| membership.role)
         .max()
@@ -83,7 +83,7 @@ mod tests {
             role,
             revision: 1,
             created_at: Timestamp::UNIX_EPOCH,
-            updated_at: Timestamp::UNIX_EPOCH
+            updated_at: Timestamp::UNIX_EPOCH,
         }
     }
 
@@ -94,7 +94,7 @@ mod tests {
         let memberships = [
             membership(MembershipScope::Project(project), Role::Viewer),
             membership(MembershipScope::Environment(staging), Role::Developer),
-            membership(MembershipScope::Project(other_project), Role::Admin)
+            membership(MembershipScope::Project(other_project), Role::Admin),
         ];
 
         assert_eq!(effective_role(&memberships, project, Some(staging)), Some(Role::Developer));

@@ -5,7 +5,7 @@ use spinikus_core::{
     deployment::{Deployment, DeploymentEvent, DeploymentSnapshot, DeploymentStatus, EndReason, NewDeployment, Transition},
     id::{DataKeyId, DeploymentEventId, DeploymentId, ServiceId, VariableId},
     secret::Secret,
-    variable::{ResolvedVariable, ScopeLevel, VariableAvailability, VariableName}
+    variable::{ResolvedVariable, ScopeLevel, VariableAvailability, VariableName},
 };
 use sqlx::SqliteConnection;
 use zeroize::Zeroizing;
@@ -27,7 +27,7 @@ pub trait DeploymentRepository: Send + Sync {
         &self,
         service_id: ServiceId,
         before: Option<DeploymentId>,
-        limit: u32
+        limit: u32,
     ) -> Result<Vec<Deployment>, StoreError>;
 
     /// Every status change of the deployment, oldest first.
@@ -43,7 +43,7 @@ pub trait DeploymentRepository: Send + Sync {
         id: DeploymentId,
         to: DeploymentStatus,
         reason: Option<EndReason>,
-        actor: Actor
+        actor: Actor,
     ) -> Result<Deployment, StoreError>;
 
     /// Records the commit and image once the agent knows them. Each can be set once;
@@ -52,7 +52,7 @@ pub trait DeploymentRepository: Send + Sync {
         &self,
         id: DeploymentId,
         commit_sha: Option<String>,
-        image: Option<String>
+        image: Option<String>,
     ) -> Result<Deployment, StoreError>;
 
     /// The variables the deployment was created with, decrypted, secrets included.
@@ -80,7 +80,7 @@ struct DeploymentRow {
     commit_sha: Option<String>,
     image: Option<String>,
     created_at: String,
-    updated_at: String
+    updated_at: String,
 }
 
 impl TryFrom<DeploymentRow> for Deployment {
@@ -95,13 +95,15 @@ impl TryFrom<DeploymentRow> for Deployment {
             status: parse_column(ENTITY, "status", &row.status)?,
             reason: row.reason.map(|reason| parse_column(ENTITY, "reason", &reason)).transpose()?,
             rollback_of: row.rollback_of.map(|id| parse_column(ENTITY, "rollback_of", &id)).transpose()?,
-            snapshot: serde_json::from_str::<DeploymentSnapshot>(&row.snapshot).map_err(|error| {
-                StoreError::InvalidRow { entity: ENTITY, column: "snapshot", problem: error.to_string() }
+            snapshot: serde_json::from_str::<DeploymentSnapshot>(&row.snapshot).map_err(|error| StoreError::InvalidRow {
+                entity: ENTITY,
+                column: "snapshot",
+                problem: error.to_string(),
             })?,
             commit_sha: row.commit_sha,
             image: row.image,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
-            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?
+            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
         })
     }
 }
@@ -114,7 +116,7 @@ struct EventRow {
     to_status: String,
     reason: Option<String>,
     actor: String,
-    created_at: String
+    created_at: String,
 }
 
 impl TryFrom<EventRow> for DeploymentEvent {
@@ -129,7 +131,7 @@ impl TryFrom<EventRow> for DeploymentEvent {
             to: parse_column(ENTITY, "to_status", &row.to_status)?,
             reason: row.reason.map(|reason| parse_column(ENTITY, "reason", &reason)).transpose()?,
             actor: parse_column(ENTITY, "actor", &row.actor)?,
-            created_at: parse_column(ENTITY, "created_at", &row.created_at)?
+            created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
         })
     }
 }
@@ -143,7 +145,7 @@ struct StoredVariable<'a> {
     availability: VariableAvailability,
     secret: bool,
     level: ScopeLevel,
-    variable_id: VariableId
+    variable_id: VariableId,
 }
 
 fn seal_variables(keyring: &Keyring, id: DeploymentId, variables: &[ResolvedVariable]) -> Sealed {
@@ -155,7 +157,7 @@ fn seal_variables(keyring: &Keyring, id: DeploymentId, variables: &[ResolvedVari
             availability: variable.availability,
             secret: variable.secret,
             level: variable.level,
-            variable_id: variable.variable_id
+            variable_id: variable.variable_id,
         })
         .collect();
     let json = Zeroizing::new(serde_json::to_vec(&stored).expect("variables serialize to JSON"));
@@ -167,7 +169,7 @@ fn open_variables(keyring: &Keyring, id: DeploymentId, sealed: &Sealed) -> Resul
     let stored: Vec<StoredVariable> = serde_json::from_slice(&json).map_err(|error| StoreError::InvalidRow {
         entity: "deployment variables",
         column: "variables",
-        problem: error.to_string()
+        problem: error.to_string(),
     })?;
     Ok(stored
         .into_iter()
@@ -177,7 +179,7 @@ fn open_variables(keyring: &Keyring, id: DeploymentId, sealed: &Sealed) -> Resul
             availability: variable.availability,
             secret: variable.secret,
             level: variable.level,
-            variable_id: variable.variable_id
+            variable_id: variable.variable_id,
         })
         .collect())
 }
@@ -201,11 +203,11 @@ async fn insert_event(
     from: Option<DeploymentStatus>,
     to: DeploymentStatus,
     reason: Option<EndReason>,
-    actor: Actor
+    actor: Actor,
 ) -> Result<(), StoreError> {
     sqlx::query(
         "INSERT INTO deployment_events (id, deployment_id, from_status, to_status, reason, actor)
-         VALUES (?, ?, ?, ?, ?, ?)"
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(DeploymentEventId::new().to_string())
     .bind(deployment_id.to_string())
@@ -219,10 +221,15 @@ async fn insert_event(
 }
 
 /// Applies a checked transition to a deployment and records its event.
-async fn apply(conn: &mut SqliteConnection, deployment: &Deployment, transition: Transition, actor: Actor) -> Result<(), StoreError> {
+async fn apply(
+    conn: &mut SqliteConnection,
+    deployment: &Deployment,
+    transition: Transition,
+    actor: Actor,
+) -> Result<(), StoreError> {
     sqlx::query(
         "UPDATE deployments SET status = ?, reason = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?"
+         WHERE id = ?",
     )
     .bind(transition.to.as_str())
     .bind(transition.reason.map(EndReason::as_str))
@@ -234,7 +241,7 @@ async fn apply(conn: &mut SqliteConnection, deployment: &Deployment, transition:
         StoreError::on_unique_violation(error, |_| StoreError::Conflict {
             entity: ENTITY,
             field: "status",
-            value: format!("{} (service {} already has one)", transition.to, deployment.service_id)
+            value: format!("{} (service {} already has one)", transition.to, deployment.service_id),
         })
     })?;
 
@@ -245,7 +252,7 @@ async fn apply(conn: &mut SqliteConnection, deployment: &Deployment, transition:
 async fn find_by_status(
     conn: &mut SqliteConnection,
     service_id: ServiceId,
-    status: DeploymentStatus
+    status: DeploymentStatus,
 ) -> Result<Option<Deployment>, StoreError> {
     let row: Option<DeploymentRow> =
         sqlx::query_as(concat!("SELECT ", columns!(), " FROM deployments WHERE service_id = ? AND status = ?"))
@@ -263,7 +270,7 @@ impl DeploymentRepository for SqliteStore {
         let snapshot = serde_json::to_string(&new.snapshot).map_err(|error| StoreError::InvalidRow {
             entity: ENTITY,
             column: "snapshot",
-            problem: error.to_string()
+            problem: error.to_string(),
         })?;
         let mut tx = self.begin_write().await?;
 
@@ -284,7 +291,7 @@ impl DeploymentRepository for SqliteStore {
         sqlx::query(
             "INSERT INTO deployments
                  (id, service_id, trigger_type, strategy, status, rollback_of, snapshot, commit_sha, image)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(new.service_id.to_string())
@@ -320,7 +327,7 @@ impl DeploymentRepository for SqliteStore {
         &self,
         service_id: ServiceId,
         before: Option<DeploymentId>,
-        limit: u32
+        limit: u32,
     ) -> Result<Vec<Deployment>, StoreError> {
         // `~` sorts after every character used in IDs, so no cursor means "from the newest".
         let rows: Vec<DeploymentRow> = sqlx::query_as(concat!(
@@ -340,7 +347,7 @@ impl DeploymentRepository for SqliteStore {
     async fn list_deployment_events(&self, id: DeploymentId) -> Result<Vec<DeploymentEvent>, StoreError> {
         let rows: Vec<EventRow> = sqlx::query_as(
             "SELECT id, deployment_id, from_status, to_status, reason, actor, created_at
-             FROM deployment_events WHERE deployment_id = ? ORDER BY id"
+             FROM deployment_events WHERE deployment_id = ? ORDER BY id",
         )
         .bind(id.to_string())
         .fetch_all(self.pool())
@@ -362,7 +369,7 @@ impl DeploymentRepository for SqliteStore {
         id: DeploymentId,
         to: DeploymentStatus,
         reason: Option<EndReason>,
-        actor: Actor
+        actor: Actor,
     ) -> Result<Deployment, StoreError> {
         let mut tx = self.begin_write().await?;
         let deployment = fetch(&mut tx, id).await?;
@@ -385,12 +392,13 @@ impl DeploymentRepository for SqliteStore {
         &self,
         id: DeploymentId,
         commit_sha: Option<String>,
-        image: Option<String>
+        image: Option<String>,
     ) -> Result<Deployment, StoreError> {
         let mut tx = self.begin_write().await?;
         let deployment = fetch(&mut tx, id).await?;
 
-        for (field, stored, given) in [("commit_sha", &deployment.commit_sha, &commit_sha), ("image", &deployment.image, &image)] {
+        for (field, stored, given) in [("commit_sha", &deployment.commit_sha, &commit_sha), ("image", &deployment.image, &image)]
+        {
             if let (Some(stored), Some(given)) = (stored, given)
                 && stored != given
             {
@@ -402,7 +410,7 @@ impl DeploymentRepository for SqliteStore {
             "UPDATE deployments
              SET commit_sha = coalesce(commit_sha, ?), image = coalesce(image, ?),
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ?"
+             WHERE id = ?",
         )
         .bind(commit_sha)
         .bind(image)
@@ -437,7 +445,7 @@ mod tests {
         id::UserId,
         project::ProjectFields,
         service::{ServiceFields, ServiceKind},
-        source::{ImageSource, SourceSpec}
+        source::{ImageSource, SourceSpec},
     };
 
     use spinikus_core::variable::{VariableFields, VariableScope};
@@ -462,11 +470,11 @@ mod tests {
             rollback_of: None,
             snapshot: DeploymentSnapshot {
                 source: SourceSpec::Image(ImageSource { image: "ghcr.io/acme/web:1".to_string() }),
-                config: Map::new()
+                config: Map::new(),
             },
             commit_sha: None,
             image: None,
-            variables: Vec::new()
+            variables: Vec::new(),
         }
     }
 
@@ -519,7 +527,10 @@ mod tests {
 
         assert_eq!((first.status, first.reason), (Canceled, Some(EndReason::SupersededInQueue)));
         assert_eq!(second.status, Queued);
-        assert_eq!(statuses(&store.list_deployment_events(first.id).await.unwrap()), vec![(None, Queued), (Some(Queued), Canceled)]);
+        assert_eq!(
+            statuses(&store.list_deployment_events(first.id).await.unwrap()),
+            vec![(None, Queued), (Some(Queued), Canceled)]
+        );
     }
 
     #[tokio::test]
@@ -533,7 +544,13 @@ mod tests {
         assert_eq!(deployment.status, Live);
         assert_eq!(
             statuses(&events),
-            vec![(None, Queued), (Some(Queued), Preparing), (Some(Preparing), Starting), (Some(Starting), Verifying), (Some(Verifying), Live)]
+            vec![
+                (None, Queued),
+                (Some(Queued), Preparing),
+                (Some(Preparing), Starting),
+                (Some(Starting), Verifying),
+                (Some(Verifying), Live)
+            ]
         );
         assert_eq!(store.live_deployment(service_id).await.unwrap(), Some(deployment));
     }
@@ -607,7 +624,8 @@ mod tests {
         let deployment = store.create_deployment(new_deployment(service_id), Actor::System).await.unwrap();
 
         let with_commit = store.record_build(deployment.id, Some("abc123".to_string()), None).await.unwrap();
-        let with_image = store.record_build(deployment.id, Some("abc123".to_string()), Some("web@sha256:1".to_string())).await.unwrap();
+        let with_image =
+            store.record_build(deployment.id, Some("abc123".to_string()), Some("web@sha256:1".to_string())).await.unwrap();
         let changed = store.record_build(deployment.id, Some("def456".to_string()), None).await;
 
         assert_eq!((with_commit.commit_sha.as_deref(), with_commit.image.as_deref()), (Some("abc123"), None));
@@ -643,20 +661,24 @@ mod tests {
         let (_dir, store) = store().await;
         let service_id = service(&store).await;
         let scope = VariableScope::Service(service_id);
-        let fields = |name: &str, secret| VariableFields { name: name.parse().unwrap(), availability: VariableAvailability::Both, secret };
+        let fields =
+            |name: &str, secret| VariableFields { name: name.parse().unwrap(), availability: VariableAvailability::Both, secret };
         let api_key = store.create_variable(scope, fields("API_KEY", true), Secret::new("hunter\"2")).await.unwrap();
         store.create_variable(scope, fields("PORT", false), Secret::new("8080")).await.unwrap();
 
         let resolved = store.resolve_service_variables(service_id).await.unwrap();
-        let deployment =
-            store.create_deployment(NewDeployment { variables: resolved.clone(), ..new_deployment(service_id) }, Actor::System).await.unwrap();
+        let deployment = store
+            .create_deployment(NewDeployment { variables: resolved.clone(), ..new_deployment(service_id) }, Actor::System)
+            .await
+            .unwrap();
         // Later edits do not reach the existing deployment.
         store.update_variable(api_key.id, 1, fields("API_KEY", true), Some(Secret::new("rotated"))).await.unwrap();
 
         let stored = store.deployment_variables(deployment.id).await.unwrap();
         assert_eq!(stored, resolved);
         assert_eq!(stored[0].value.expose(), "hunter\"2");
-        let ciphertext: Vec<u8> = sqlx::query_scalar("SELECT variables FROM deployment_variables").fetch_one(store.pool()).await.unwrap();
+        let ciphertext: Vec<u8> =
+            sqlx::query_scalar("SELECT variables FROM deployment_variables").fetch_one(store.pool()).await.unwrap();
         assert!(!ciphertext.windows(4).any(|window| window == b"8080"));
     }
 

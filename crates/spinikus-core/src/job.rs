@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     id::JobId,
-    text::{MAX_DOTTED_NAME_LEN, dotted_name_problem, impl_text}
+    text::{MAX_DOTTED_NAME_LEN, dotted_name_problem, impl_text},
 };
 
 /// Job input, stored as a JSON object. Each kind's handler defines its shape.
@@ -48,7 +48,7 @@ pub struct Job {
     pub last_error: Option<String>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
-    pub finished_at: Option<Timestamp>
+    pub finished_at: Option<Timestamp>,
 }
 
 /// What a new job starts from. The ID, status and timestamps are set by the store.
@@ -60,7 +60,7 @@ pub struct NewJob {
     pub run_at: Option<Timestamp>,
     /// At least 1.
     pub max_attempts: u32,
-    pub dedupe_key: Option<String>
+    pub dedupe_key: Option<String>,
 }
 
 impl NewJob {
@@ -80,7 +80,7 @@ pub enum JobStatus {
     Succeeded,
     /// Out of attempts, or failed with an error that retrying cannot fix.
     Failed,
-    Canceled
+    Canceled,
 }
 
 impl JobStatus {
@@ -92,7 +92,7 @@ impl JobStatus {
             Self::Running => "running",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
-            Self::Canceled => "canceled"
+            Self::Canceled => "canceled",
         }
     }
 
@@ -120,7 +120,7 @@ pub struct JobKind(String);
 #[error("`{value}` is not a valid job kind: {problem}")]
 pub struct JobKindError {
     value: String,
-    problem: &'static str
+    problem: &'static str,
 }
 
 impl JobKind {
@@ -135,7 +135,7 @@ impl FromStr for JobKind {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match dotted_name_problem(value) {
             Some(problem) => Err(JobKindError { value: value.to_string(), problem }),
-            None => Ok(Self(value.to_string()))
+            None => Ok(Self(value.to_string())),
         }
     }
 }

@@ -2,12 +2,12 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use sqlx::{
     ConnectOptions, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous}
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
 use crate::{
     StoreError,
-    secrets::{Keyring, MasterKey}
+    secrets::{Keyring, MasterKey},
 };
 
 /// How long a connection waits on a locked database before giving up.
@@ -45,7 +45,7 @@ pub(crate) fn format_timestamp(at: jiff::Timestamp) -> String {
 #[derive(Clone)]
 pub struct SqliteStore {
     pool: SqlitePool,
-    keyring: Arc<Keyring>
+    keyring: Arc<Keyring>,
 }
 
 impl SqliteStore {
@@ -129,7 +129,7 @@ mod tests {
 
         let loose: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM pragma_table_list WHERE schema = 'main' AND type = 'table' AND strict = 0
-             AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations'"
+             AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations'",
         )
         .fetch_all(&pool)
         .await

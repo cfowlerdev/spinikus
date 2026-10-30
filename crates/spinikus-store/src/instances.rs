@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     id::{DeploymentId, InstanceId, ServerId, ServiceId},
-    server::{Instance, ObservedInstance}
+    server::{Instance, ObservedInstance},
 };
 use sqlx::SqliteConnection;
 
@@ -17,7 +17,7 @@ pub trait InstanceRepository: Send + Sync {
     async fn replace_server_instances(
         &self,
         server_id: ServerId,
-        instances: Vec<ObservedInstance>
+        instances: Vec<ObservedInstance>,
     ) -> Result<Vec<Instance>, StoreError>;
 
     /// Applies one changed container from a `StateReport` delta.
@@ -50,7 +50,7 @@ struct InstanceRow {
     health: String,
     restart_count: u32,
     started_at: Option<String>,
-    reported_at: String
+    reported_at: String,
 }
 
 impl TryFrom<InstanceRow> for Instance {
@@ -67,9 +67,9 @@ impl TryFrom<InstanceRow> for Instance {
                 status: parse_column(ENTITY, "status", &row.status)?,
                 health: parse_column(ENTITY, "health", &row.health)?,
                 restart_count: row.restart_count,
-                started_at: row.started_at.map(|at| parse_column(ENTITY, "started_at", &at)).transpose()?
+                started_at: row.started_at.map(|at| parse_column(ENTITY, "started_at", &at)).transpose()?,
             },
-            reported_at: parse_column(ENTITY, "reported_at", &row.reported_at)?
+            reported_at: parse_column(ENTITY, "reported_at", &row.reported_at)?,
         })
     }
 }
@@ -82,7 +82,7 @@ async fn check_server_active(conn: &mut SqliteConnection, server_id: ServerId) -
 
     match active {
         Some(_) => Ok(()),
-        None => Err(StoreError::NotFound { entity: "server", id: server_id.to_string() })
+        None => Err(StoreError::NotFound { entity: "server", id: server_id.to_string() }),
     }
 }
 
@@ -123,20 +123,18 @@ impl InstanceRepository for SqliteStore {
     async fn replace_server_instances(
         &self,
         server_id: ServerId,
-        instances: Vec<ObservedInstance>
+        instances: Vec<ObservedInstance>,
     ) -> Result<Vec<Instance>, StoreError> {
         let container_ids: Vec<&str> = instances.iter().map(|instance| instance.container_id.as_str()).collect();
         let container_ids = serde_json::to_string(&container_ids).expect("a list of strings serializes");
         let mut tx = self.begin_write().await?;
         check_server_active(&mut tx, server_id).await?;
 
-        sqlx::query(
-            "DELETE FROM instances WHERE server_id = ? AND container_id NOT IN (SELECT value FROM json_each(?))"
-        )
-        .bind(server_id.to_string())
-        .bind(container_ids)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("DELETE FROM instances WHERE server_id = ? AND container_id NOT IN (SELECT value FROM json_each(?))")
+            .bind(server_id.to_string())
+            .bind(container_ids)
+            .execute(&mut *tx)
+            .await?;
 
         let mut stored = Vec::with_capacity(instances.len());
         for instance in &instances {
@@ -174,8 +172,12 @@ impl InstanceRepository for SqliteStore {
     }
 
     async fn list_service_instances(&self, service_id: ServiceId) -> Result<Vec<Instance>, StoreError> {
-        list_where(self, concat!("SELECT ", columns!(), " FROM instances WHERE service_id = ? ORDER BY id"), service_id.to_string())
-            .await
+        list_where(
+            self,
+            concat!("SELECT ", columns!(), " FROM instances WHERE service_id = ? ORDER BY id"),
+            service_id.to_string(),
+        )
+        .await
     }
 
     async fn list_deployment_instances(&self, deployment_id: DeploymentId) -> Result<Vec<Instance>, StoreError> {
@@ -203,7 +205,7 @@ mod tests {
             status: InstanceStatus::Running,
             health: InstanceHealth::Healthy,
             restart_count: 0,
-            started_at: Some("2026-10-30T09:00:00.000Z".parse().unwrap())
+            started_at: Some("2026-10-30T09:00:00.000Z".parse().unwrap()),
         }
     }
 
@@ -223,10 +225,8 @@ mod tests {
 
         let mut b_restarted = observed("b", service, deployment);
         b_restarted.restart_count = 3;
-        let second = store
-            .replace_server_instances(server_id, vec![b_restarted, observed("c", service, deployment)])
-            .await
-            .unwrap();
+        let second =
+            store.replace_server_instances(server_id, vec![b_restarted, observed("c", service, deployment)]).await.unwrap();
 
         assert_eq!(container_ids(&store.list_server_instances(server_id).await.unwrap()), vec!["b", "c"]);
         assert_eq!(second[0].id, first[1].id, "a container seen before keeps its instance ID");
@@ -274,13 +274,22 @@ mod tests {
         let service = ServiceId::new();
         let (old, new) = (DeploymentId::new(), DeploymentId::new());
         store.replace_server_instances(one, vec![observed("a", service, old), observed("b", service, new)]).await.unwrap();
-        store.replace_server_instances(two, vec![observed("a", service, new), observed("x", ServiceId::new(), DeploymentId::new())]).await.unwrap();
+        store
+            .replace_server_instances(
+                two,
+                vec![observed("a", service, new), observed("x", ServiceId::new(), DeploymentId::new())],
+            )
+            .await
+            .unwrap();
 
         let by_service = store.list_service_instances(service).await.unwrap();
         let by_deployment = store.list_deployment_instances(new).await.unwrap();
 
         assert_eq!(by_service.len(), 3);
-        assert_eq!(by_deployment.iter().map(|i| (i.server_id, i.observed.container_id.as_str())).collect::<Vec<_>>(), vec![(one, "b"), (two, "a")]);
+        assert_eq!(
+            by_deployment.iter().map(|i| (i.server_id, i.observed.container_id.as_str())).collect::<Vec<_>>(),
+            vec![(one, "b"), (two, "a")]
+        );
     }
 
     #[tokio::test]

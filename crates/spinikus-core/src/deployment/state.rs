@@ -32,7 +32,7 @@ pub enum DeploymentStatus {
     /// Ended before going live, with a failure reason.
     Failed,
     /// Ended before going live, with a cancel reason.
-    Canceled
+    Canceled,
 }
 
 /// Why a deployment ended as `failed` or `canceled`.
@@ -49,7 +49,7 @@ pub enum EndReason {
     AgentLost,
     CanceledByUser,
     /// A newer deployment of the same service was queued before this one started.
-    SupersededInQueue
+    SupersededInQueue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -61,7 +61,7 @@ pub enum TransitionError {
     #[error("moving to `{to}` does not take a reason")]
     UnexpectedReason { to: DeploymentStatus },
     #[error("reason `{reason}` cannot end a deployment that is `{from}` as `{to}`")]
-    WrongReason { from: DeploymentStatus, to: DeploymentStatus, reason: EndReason }
+    WrongReason { from: DeploymentStatus, to: DeploymentStatus, reason: EndReason },
 }
 
 /// A checked change of status, ready to be recorded as a deployment event.
@@ -69,7 +69,7 @@ pub enum TransitionError {
 pub struct Transition {
     pub from: DeploymentStatus,
     pub to: DeploymentStatus,
-    pub reason: Option<EndReason>
+    pub reason: Option<EndReason>,
 }
 
 impl DeploymentStatus {
@@ -83,7 +83,7 @@ impl DeploymentStatus {
         Self::Draining,
         Self::Superseded,
         Self::Failed,
-        Self::Canceled
+        Self::Canceled,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -97,7 +97,7 @@ impl DeploymentStatus {
             Self::Draining => "draining",
             Self::Superseded => "superseded",
             Self::Failed => "failed",
-            Self::Canceled => "canceled"
+            Self::Canceled => "canceled",
         }
     }
 
@@ -129,7 +129,7 @@ impl DeploymentStatus {
             (Live, Draining) => true,
             (Draining, Superseded) => true,
             (from, Failed | Canceled) => from.is_in_progress(),
-            _ => false
+            _ => false,
         };
         if !allowed {
             return Err(TransitionError::NotAllowed { from: self, to });
@@ -142,7 +142,7 @@ impl DeploymentStatus {
             }
             (Failed | Canceled, Some(_)) => Ok(Transition { from: self, to, reason }),
             (_, Some(_)) => Err(TransitionError::UnexpectedReason { to }),
-            (_, None) => Ok(Transition { from: self, to, reason: None })
+            (_, None) => Ok(Transition { from: self, to, reason: None }),
         }
     }
 }
@@ -156,7 +156,7 @@ impl EndReason {
         Self::Timeout,
         Self::AgentLost,
         Self::CanceledByUser,
-        Self::SupersededInQueue
+        Self::SupersededInQueue,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -168,7 +168,7 @@ impl EndReason {
             Self::Timeout => "timeout",
             Self::AgentLost => "agent_lost",
             Self::CanceledByUser => "canceled_by_user",
-            Self::SupersededInQueue => "superseded_in_queue"
+            Self::SupersededInQueue => "superseded_in_queue",
         }
     }
 
@@ -183,7 +183,7 @@ impl EndReason {
             Self::HealthCheckFailed => from == Verifying && to == Failed,
             Self::Timeout | Self::AgentLost => from != Queued && to == Failed,
             Self::CanceledByUser => to == Canceled,
-            Self::SupersededInQueue => from == Queued && to == Canceled
+            Self::SupersededInQueue => from == Queued && to == Canceled,
         }
     }
 }
@@ -223,7 +223,7 @@ mod tests {
         (Verifying, Failed, Some(AgentLost)),
         (Verifying, Canceled, Some(CanceledByUser)),
         (Live, Draining, None),
-        (Draining, Superseded, None)
+        (Draining, Superseded, None),
     ];
 
     #[test]
@@ -261,10 +261,7 @@ mod tests {
     #[test]
     fn reports_reason_errors() {
         assert_eq!(Preparing.transition(Failed, None), Err(TransitionError::MissingReason { to: Failed }));
-        assert_eq!(
-            Preparing.transition(Releasing, Some(Timeout)),
-            Err(TransitionError::UnexpectedReason { to: Releasing })
-        );
+        assert_eq!(Preparing.transition(Releasing, Some(Timeout)), Err(TransitionError::UnexpectedReason { to: Releasing }));
         assert_eq!(
             Verifying.transition(Failed, Some(BuildFailed)),
             Err(TransitionError::WrongReason { from: Verifying, to: Failed, reason: BuildFailed })

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     id::{EnvironmentId, ServiceId},
-    service::{Service, ServiceConfig, ServiceFields, ServiceKind}
+    service::{Service, ServiceConfig, ServiceFields, ServiceKind},
 };
 
 use crate::{EnvironmentRepository, SqliteStore, StoreError, error::parse_column};
@@ -15,7 +15,7 @@ pub trait ServiceRepository: Send + Sync {
         &self,
         environment_id: EnvironmentId,
         kind: ServiceKind,
-        fields: ServiceFields
+        fields: ServiceFields,
     ) -> Result<Service, StoreError>;
 
     /// Fails with `NotFound` for deleted services too.
@@ -26,7 +26,7 @@ pub trait ServiceRepository: Send + Sync {
         &self,
         environment_id: EnvironmentId,
         after: Option<ServiceId>,
-        limit: u32
+        limit: u32,
     ) -> Result<Vec<Service>, StoreError>;
 
     /// Replaces the service's fields if it is still at `revision`.
@@ -47,7 +47,7 @@ struct ServiceRow {
     config: String,
     revision: i64,
     created_at: String,
-    updated_at: String
+    updated_at: String,
 }
 
 impl TryFrom<ServiceRow> for Service {
@@ -63,11 +63,11 @@ impl TryFrom<ServiceRow> for Service {
             config: serde_json::from_str::<ServiceConfig>(&row.config).map_err(|error| StoreError::InvalidRow {
                 entity: ENTITY,
                 column: "config",
-                problem: error.to_string()
+                problem: error.to_string(),
             })?,
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
-            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?
+            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
         })
     }
 }
@@ -87,12 +87,12 @@ impl ServiceRepository for SqliteStore {
         &self,
         environment_id: EnvironmentId,
         kind: ServiceKind,
-        fields: ServiceFields
+        fields: ServiceFields,
     ) -> Result<Service, StoreError> {
         let row: Option<ServiceRow> = sqlx::query_as(
             "INSERT INTO services (id, environment_id, name, slug, kind, config)
              SELECT ?, id, ?, ?, ?, ? FROM environments WHERE id = ? AND deleted_at IS NULL
-             RETURNING id, environment_id, name, slug, kind, config, revision, created_at, updated_at"
+             RETURNING id, environment_id, name, slug, kind, config, revision, created_at, updated_at",
         )
         .bind(ServiceId::new().to_string())
         .bind(&fields.name)
@@ -106,14 +106,14 @@ impl ServiceRepository for SqliteStore {
 
         match row {
             Some(row) => row.try_into(),
-            None => Err(StoreError::NotFound { entity: "environment", id: environment_id.to_string() })
+            None => Err(StoreError::NotFound { entity: "environment", id: environment_id.to_string() }),
         }
     }
 
     async fn get_service(&self, id: ServiceId) -> Result<Service, StoreError> {
         let row: Option<ServiceRow> = sqlx::query_as(
             "SELECT id, environment_id, name, slug, kind, config, revision, created_at, updated_at
-             FROM services WHERE id = ? AND deleted_at IS NULL"
+             FROM services WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(id.to_string())
         .fetch_optional(self.pool())
@@ -126,11 +126,11 @@ impl ServiceRepository for SqliteStore {
         &self,
         environment_id: EnvironmentId,
         after: Option<ServiceId>,
-        limit: u32
+        limit: u32,
     ) -> Result<Vec<Service>, StoreError> {
         let rows: Vec<ServiceRow> = sqlx::query_as(
             "SELECT id, environment_id, name, slug, kind, config, revision, created_at, updated_at
-             FROM services WHERE environment_id = ? AND deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?"
+             FROM services WHERE environment_id = ? AND deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?",
         )
         .bind(environment_id.to_string())
         .bind(after.map(|id| id.to_string()).unwrap_or_default())
@@ -151,7 +151,7 @@ impl ServiceRepository for SqliteStore {
              SET name = ?, slug = ?, config = ?, revision = revision + 1,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ? AND revision = ? AND deleted_at IS NULL
-             RETURNING id, environment_id, name, slug, kind, config, revision, created_at, updated_at"
+             RETURNING id, environment_id, name, slug, kind, config, revision, created_at, updated_at",
         )
         .bind(&fields.name)
         .bind(fields.slug.as_str())
@@ -167,7 +167,12 @@ impl ServiceRepository for SqliteStore {
             // Nothing matched: either the service is gone or it has moved on to a newer revision.
             None => {
                 let current = self.get_service(id).await?;
-                Err(StoreError::RevisionMismatch { entity: ENTITY, id: id.to_string(), expected: revision, actual: current.revision })
+                Err(StoreError::RevisionMismatch {
+                    entity: ENTITY,
+                    id: id.to_string(),
+                    expected: revision,
+                    actual: current.revision,
+                })
             }
         }
     }
@@ -178,7 +183,7 @@ impl ServiceRepository for SqliteStore {
              SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                  revision = revision + 1
              WHERE id = ? AND deleted_at IS NULL
-               AND NOT EXISTS (SELECT 1 FROM domains WHERE service_id = services.id AND deleted_at IS NULL)"
+               AND NOT EXISTS (SELECT 1 FROM domains WHERE service_id = services.id AND deleted_at IS NULL)",
         )
         .bind(id.to_string())
         .execute(self.pool())
@@ -198,7 +203,7 @@ mod tests {
     use serde_json::json;
     use spinikus_core::{
         environment::{EnvironmentFields, EnvironmentKind},
-        project::ProjectFields
+        project::ProjectFields,
     };
 
     use super::*;
@@ -222,7 +227,11 @@ mod tests {
         let env = environment(&store, "web").await;
 
         let created = store
-            .create_service(env, ServiceKind::Database, fields("Postgres", "postgres", json!({ "engine": "postgres", "version": 17 })))
+            .create_service(
+                env,
+                ServiceKind::Database,
+                fields("Postgres", "postgres", json!({ "engine": "postgres", "version": 17 })),
+            )
             .await
             .unwrap();
 

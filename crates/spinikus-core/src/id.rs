@@ -22,7 +22,7 @@ pub enum IdError {
     #[error("expected an ID starting with `{expected}_`, got `{value}`")]
     WrongPrefix { expected: &'static str, value: String },
     #[error("`{value}` is not a valid ID")]
-    InvalidUlid { value: String }
+    InvalidUlid { value: String },
 }
 
 macro_rules! define_id {

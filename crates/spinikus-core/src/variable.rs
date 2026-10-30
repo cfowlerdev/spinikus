@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::{
     id::{EnvironmentId, ProjectId, ServiceId, VariableId},
     secret::Secret,
-    text::impl_text
+    text::impl_text,
 };
 
 /// Longest allowed variable name.
@@ -33,7 +33,7 @@ pub struct Variable {
     pub secret: bool,
     pub revision: i64,
     pub created_at: Timestamp,
-    pub updated_at: Timestamp
+    pub updated_at: Timestamp,
 }
 
 /// The fields a user sets when creating a variable, or replaces when updating one.
@@ -43,7 +43,7 @@ pub struct VariableFields {
     pub name: VariableName,
     pub availability: VariableAvailability,
     /// Once set, a variable stays secret: its value has been treated as one.
-    pub secret: bool
+    pub secret: bool,
 }
 
 /// What a variable is set on.
@@ -54,7 +54,7 @@ pub enum VariableScope {
     Project(ProjectId),
     /// Shared by every service in the environment.
     Environment(EnvironmentId),
-    Service(ServiceId)
+    Service(ServiceId),
 }
 
 impl VariableScope {
@@ -62,7 +62,7 @@ impl VariableScope {
         match self {
             Self::Project(_) => ScopeLevel::Project,
             Self::Environment(_) => ScopeLevel::Environment,
-            Self::Service(_) => ScopeLevel::Service
+            Self::Service(_) => ScopeLevel::Service,
         }
     }
 }
@@ -73,7 +73,7 @@ impl VariableScope {
 pub enum ScopeLevel {
     Project,
     Environment,
-    Service
+    Service,
 }
 
 impl ScopeLevel {
@@ -83,7 +83,7 @@ impl ScopeLevel {
         match self {
             Self::Project => "project",
             Self::Environment => "environment",
-            Self::Service => "service"
+            Self::Service => "service",
         }
     }
 }
@@ -96,7 +96,7 @@ pub enum VariableAvailability {
     Runtime,
     /// Passed to the build only. Build values can end up in image layers.
     Build,
-    Both
+    Both,
 }
 
 impl VariableAvailability {
@@ -106,7 +106,7 @@ impl VariableAvailability {
         match self {
             Self::Runtime => "runtime",
             Self::Build => "build",
-            Self::Both => "both"
+            Self::Both => "both",
         }
     }
 
@@ -131,7 +131,7 @@ pub struct VariableName(String);
 #[error("`{value}` is not a valid variable name: {problem}")]
 pub struct VariableNameError {
     value: String,
-    problem: &'static str
+    problem: &'static str,
 }
 
 impl VariableName {
@@ -160,7 +160,7 @@ impl FromStr for VariableName {
 
         match problem {
             Some(problem) => Err(VariableNameError { value: value.to_string(), problem }),
-            None => Ok(Self(value.to_string()))
+            None => Ok(Self(value.to_string())),
         }
     }
 }
@@ -193,7 +193,7 @@ pub struct ResolvedVariable {
     pub secret: bool,
     /// Where the winning value was set, so the UI can show inherited variables.
     pub level: ScopeLevel,
-    pub variable_id: VariableId
+    pub variable_id: VariableId,
 }
 
 /// Applies precedence: for each name, the variable from the most specific scope wins.
@@ -222,7 +222,7 @@ mod tests {
             availability: VariableAvailability::Runtime,
             secret: false,
             level,
-            variable_id: VariableId::new()
+            variable_id: VariableId::new(),
         }
     }
 
@@ -248,7 +248,7 @@ mod tests {
             resolved("LOG", "project", ScopeLevel::Project),
             resolved("PORT", "environment", ScopeLevel::Environment),
             resolved("API", "environment", ScopeLevel::Environment),
-            resolved("API", "project", ScopeLevel::Project)
+            resolved("API", "project", ScopeLevel::Project),
         ];
 
         let winners: Vec<_> = resolve(variables)
@@ -285,7 +285,7 @@ mod tests {
             secret: true,
             revision: 1,
             created_at: Timestamp::UNIX_EPOCH,
-            updated_at: Timestamp::UNIX_EPOCH
+            updated_at: Timestamp::UNIX_EPOCH,
         };
 
         let json = serde_json::to_value(&variable).unwrap();

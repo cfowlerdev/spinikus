@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use spinikus_core::{
     id::{SessionId, UserId},
     secret::Secret,
-    token::{NewSession, Session}
+    token::{NewSession, Session},
 };
 
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
     api_tokens::check_user_active,
     db::format_timestamp,
     error::parse_column,
-    secrets::{generate_bearer, hash_bearer}
+    secrets::{generate_bearer, hash_bearer},
 };
 
 const ENTITY: &str = "session";
@@ -52,7 +52,7 @@ struct SessionRow {
     last_seen_at: String,
     user_agent: Option<String>,
     ip_address: Option<String>,
-    created_at: String
+    created_at: String,
 }
 
 impl TryFrom<SessionRow> for Session {
@@ -66,7 +66,7 @@ impl TryFrom<SessionRow> for Session {
             last_seen_at: parse_column(ENTITY, "last_seen_at", &row.last_seen_at)?,
             user_agent: row.user_agent,
             ip_address: row.ip_address,
-            created_at: parse_column(ENTITY, "created_at", &row.created_at)?
+            created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
         })
     }
 }
@@ -99,7 +99,7 @@ impl SessionRepository for SqliteStore {
         let row: Option<SessionRow> = sqlx::query_as(
             "SELECT s.id, s.user_id, s.expires_at, s.last_seen_at, s.user_agent, s.ip_address, s.created_at
              FROM sessions s JOIN users u ON u.id = s.user_id
-             WHERE s.token_hash = ? AND u.disabled_at IS NULL AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+             WHERE s.token_hash = ? AND u.disabled_at IS NULL AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
         )
         .bind(hash_bearer(secret))
         .fetch_optional(self.pool())
@@ -122,7 +122,9 @@ impl SessionRepository for SqliteStore {
 
     async fn list_user_sessions(&self, user_id: UserId) -> Result<Vec<Session>, StoreError> {
         let rows: Vec<SessionRow> = sqlx::query_as(concat!(
-            "SELECT ", columns!(), " FROM sessions
+            "SELECT ",
+            columns!(),
+            " FROM sessions
              WHERE user_id = ? AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              ORDER BY id"
         ))
@@ -171,7 +173,7 @@ mod tests {
             user_id,
             expires_at: Timestamp::now() + expires_in,
             user_agent: Some("Firefox".to_string()),
-            ip_address: Some("203.0.113.7".to_string())
+            ip_address: Some("203.0.113.7".to_string()),
         }
     }
 
@@ -202,7 +204,10 @@ mod tests {
         assert_eq!(store.authenticate_session(expired.expose()).await.unwrap(), None);
         assert_eq!(store.authenticate_session(bobs.expose()).await.unwrap(), None);
         assert!(store.list_user_sessions(ada).await.unwrap().is_empty());
-        assert!(matches!(store.create_session(new_session(bob, SignedDuration::from_hours(1))).await, Err(StoreError::Rejected { .. })));
+        assert!(matches!(
+            store.create_session(new_session(bob, SignedDuration::from_hours(1))).await,
+            Err(StoreError::Rejected { .. })
+        ));
         assert_eq!(store.delete_expired_sessions().await.unwrap(), 1);
     }
 

@@ -27,7 +27,7 @@ pub struct User {
     pub updated_at: Timestamp,
     /// Disabled users cannot sign in. Users are disabled rather than deleted, so the audit
     /// log and deployment history keep pointing at them.
-    pub disabled_at: Option<Timestamp>
+    pub disabled_at: Option<Timestamp>,
 }
 
 impl User {
@@ -41,7 +41,7 @@ impl User {
 pub struct UserFields {
     pub email: Email,
     pub name: String,
-    pub admin: bool
+    pub admin: bool,
 }
 
 /// An email address, lowercased. Only checked loosely: one `@` with something on each side
@@ -53,7 +53,7 @@ pub struct Email(String);
 #[error("`{value}` is not a valid email address: {problem}")]
 pub struct EmailError {
     value: String,
-    problem: &'static str
+    problem: &'static str,
 }
 
 impl Email {
@@ -73,12 +73,12 @@ impl FromStr for Email {
             None => Some("it needs an @"),
             Some((local, domain)) if local.is_empty() || domain.is_empty() => Some("it needs text on both sides of the @"),
             Some((_, domain)) if domain.contains('@') => Some("it can only contain one @"),
-            Some(_) => None
+            Some(_) => None,
         };
 
         match problem {
             Some(problem) => Err(EmailError { value: value.to_string(), problem }),
-            None => Ok(Self(email))
+            None => Ok(Self(email)),
         }
     }
 }

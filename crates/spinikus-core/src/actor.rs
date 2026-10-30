@@ -14,7 +14,7 @@ pub enum Actor {
     /// A user, through the UI, the API or the CLI.
     User(UserId),
     /// The agent on a server, reporting a command's progress or result.
-    Server(ServerId)
+    Server(ServerId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -26,7 +26,7 @@ impl fmt::Display for Actor {
         match self {
             Self::System => f.write_str("system"),
             Self::User(id) => id.fmt(f),
-            Self::Server(id) => id.fmt(f)
+            Self::Server(id) => id.fmt(f),
         }
     }
 }
@@ -38,11 +38,7 @@ impl FromStr for Actor {
         if value == "system" {
             return Ok(Self::System);
         }
-        value
-            .parse()
-            .map(Self::User)
-            .or_else(|_| value.parse().map(Self::Server))
-            .map_err(|_| ActorError(value.to_string()))
+        value.parse().map(Self::User).or_else(|_| value.parse().map(Self::Server)).map_err(|_| ActorError(value.to_string()))
     }
 }
 

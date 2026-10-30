@@ -6,7 +6,7 @@ use serde::Deserialize;
 #[derive(Deserialize, Default)]
 pub struct LoggingConfig {
     pub level: String,
-    pub json: bool
+    pub json: bool,
 }
 
 /// Database settings from the `[database]` table of `spinikus.toml`.
@@ -14,7 +14,7 @@ pub struct LoggingConfig {
 pub struct DatabaseConfig {
     /// SQLite database file. Defaults to `spinikus.db` inside the data directory;
     /// a relative path is resolved against the data directory.
-    pub path: Option<PathBuf>
+    pub path: Option<PathBuf>,
 }
 
 /// Where the master encryption key comes from, from the `[secrets]` table of `spinikus.toml`.
@@ -25,7 +25,7 @@ pub struct SecretsConfig {
     pub master_key: Option<String>,
     /// File holding the base64 key. Defaults to `master.key` inside the data directory, which is
     /// generated on first start; a relative path is resolved against the data directory.
-    pub master_key_file: Option<PathBuf>
+    pub master_key_file: Option<PathBuf>,
 }
 
 /// Instance configuration, the schema of `spinikus.toml`.
@@ -38,7 +38,7 @@ pub struct SpinikusConfig {
     #[serde(default)]
     pub database: DatabaseConfig,
     #[serde(default)]
-    pub secrets: SecretsConfig
+    pub secrets: SecretsConfig,
 }
 
 impl SpinikusConfig {
@@ -46,7 +46,7 @@ impl SpinikusConfig {
     pub fn database_path(&self) -> PathBuf {
         match &self.database.path {
             Some(path) => self.data_dir.join(path),
-            None => self.data_dir.join("spinikus.db")
+            None => self.data_dir.join("spinikus.db"),
         }
     }
 
@@ -54,7 +54,7 @@ impl SpinikusConfig {
     pub fn master_key_path(&self) -> PathBuf {
         match &self.secrets.master_key_file {
             Some(path) => self.data_dir.join(path),
-            None => self.data_dir.join("master.key")
+            None => self.data_dir.join("master.key"),
         }
     }
 }
@@ -65,7 +65,7 @@ impl Default for SpinikusConfig {
             data_dir: default_data_dir(),
             logging: LoggingConfig::default(),
             database: DatabaseConfig::default(),
-            secrets: SecretsConfig::default()
+            secrets: SecretsConfig::default(),
         }
     }
 }

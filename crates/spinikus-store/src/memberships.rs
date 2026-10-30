@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     id::{MembershipId, UserId},
-    membership::{Membership, MembershipScope, Role}
+    membership::{Membership, MembershipScope, Role},
 };
 
 use crate::{EnvironmentRepository, ProjectRepository, SqliteStore, StoreError, UserRepository, error::parse_column};
@@ -39,7 +39,9 @@ macro_rules! insert_under {
     ($parent:literal) => {
         concat!(
             "INSERT INTO memberships (id, user_id, project_id, environment_id, role)
-             SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM ", $parent, " WHERE id = ? AND deleted_at IS NULL)
+             SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM ",
+            $parent,
+            " WHERE id = ? AND deleted_at IS NULL)
              RETURNING ",
             columns!()
         )
@@ -61,7 +63,7 @@ struct MembershipRow {
     role: String,
     revision: i64,
     created_at: String,
-    updated_at: String
+    updated_at: String,
 }
 
 impl TryFrom<MembershipRow> for Membership {
@@ -71,7 +73,13 @@ impl TryFrom<MembershipRow> for Membership {
         let scope = match (&row.project_id, &row.environment_id) {
             (Some(id), None) => MembershipScope::Project(parse_column(ENTITY, "project_id", id)?),
             (None, Some(id)) => MembershipScope::Environment(parse_column(ENTITY, "environment_id", id)?),
-            _ => return Err(StoreError::InvalidRow { entity: ENTITY, column: "scope", problem: "not exactly one scope".to_string() })
+            _ => {
+                return Err(StoreError::InvalidRow {
+                    entity: ENTITY,
+                    column: "scope",
+                    problem: "not exactly one scope".to_string(),
+                });
+            }
         };
         Ok(Membership {
             id: parse_column(ENTITY, "id", &row.id)?,
@@ -80,7 +88,7 @@ impl TryFrom<MembershipRow> for Membership {
             role: parse_column(ENTITY, "role", &row.role)?,
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
-            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?
+            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
         })
     }
 }
@@ -89,7 +97,7 @@ impl TryFrom<MembershipRow> for Membership {
 fn scope_columns(scope: MembershipScope) -> (Option<String>, Option<String>, String) {
     match scope {
         MembershipScope::Project(id) => (Some(id.to_string()), None, id.to_string()),
-        MembershipScope::Environment(id) => (None, Some(id.to_string()), id.to_string())
+        MembershipScope::Environment(id) => (None, Some(id.to_string()), id.to_string()),
     }
 }
 
@@ -102,7 +110,7 @@ impl SqliteStore {
     pub(crate) async fn check_membership_scope(&self, scope: MembershipScope) -> Result<(), StoreError> {
         match scope {
             MembershipScope::Project(id) => self.get_project(id).await.map(drop),
-            MembershipScope::Environment(id) => self.get_environment(id).await.map(drop)
+            MembershipScope::Environment(id) => self.get_environment(id).await.map(drop),
         }
     }
 }
@@ -112,7 +120,7 @@ impl MembershipRepository for SqliteStore {
     async fn create_membership(&self, user_id: UserId, scope: MembershipScope, role: Role) -> Result<Membership, StoreError> {
         let query = match scope {
             MembershipScope::Project(_) => insert_under!("projects"),
-            MembershipScope::Environment(_) => insert_under!("environments")
+            MembershipScope::Environment(_) => insert_under!("environments"),
         };
         let (project_id, environment_id, parent) = scope_columns(scope);
 
@@ -131,7 +139,7 @@ impl MembershipRepository for SqliteStore {
             Ok(None) => {
                 let entity = match scope {
                     MembershipScope::Project(_) => "project",
-                    MembershipScope::Environment(_) => "environment"
+                    MembershipScope::Environment(_) => "environment",
                 };
                 Err(StoreError::NotFound { entity, id: parent })
             }
@@ -142,8 +150,8 @@ impl MembershipRepository for SqliteStore {
             Err(error) => Err(StoreError::on_unique_violation(error, |_| StoreError::Conflict {
                 entity: ENTITY,
                 field: "scope",
-                value: format!("user {user_id} is already a member")
-            }))
+                value: format!("user {user_id} is already a member"),
+            })),
         }
     }
 
@@ -158,7 +166,7 @@ impl MembershipRepository for SqliteStore {
     async fn list_memberships(&self, scope: MembershipScope) -> Result<Vec<Membership>, StoreError> {
         let query = match scope {
             MembershipScope::Project(_) => select_by!("project_id"),
-            MembershipScope::Environment(_) => select_by!("environment_id")
+            MembershipScope::Environment(_) => select_by!("environment_id"),
         };
         let (_, _, parent_id) = scope_columns(scope);
         let rows: Vec<MembershipRow> = sqlx::query_as(query).bind(parent_id).fetch_all(self.pool()).await?;
@@ -171,7 +179,8 @@ impl MembershipRepository for SqliteStore {
     }
 
     async fn list_user_memberships(&self, user_id: UserId) -> Result<Vec<Membership>, StoreError> {
-        let rows: Vec<MembershipRow> = sqlx::query_as(select_by!("user_id")).bind(user_id.to_string()).fetch_all(self.pool()).await?;
+        let rows: Vec<MembershipRow> =
+            sqlx::query_as(select_by!("user_id")).bind(user_id.to_string()).fetch_all(self.pool()).await?;
 
         if rows.is_empty() {
             // Tell an empty list apart from a missing user.
@@ -199,7 +208,12 @@ impl MembershipRepository for SqliteStore {
             // Nothing matched: either the membership is gone or it has moved on to a newer revision.
             None => {
                 let current = self.get_membership(id).await?;
-                Err(StoreError::RevisionMismatch { entity: ENTITY, id: id.to_string(), expected: revision, actual: current.revision })
+                Err(StoreError::RevisionMismatch {
+                    entity: ENTITY,
+                    id: id.to_string(),
+                    expected: revision,
+                    actual: current.revision,
+                })
             }
         }
     }
@@ -221,7 +235,7 @@ mod tests {
         id::{EnvironmentId, ProjectId},
         membership::effective_role,
         project::ProjectFields,
-        user::UserFields
+        user::UserFields,
     };
 
     use super::*;

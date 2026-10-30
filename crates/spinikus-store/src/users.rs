@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     id::UserId,
-    user::{Email, PasswordHash, User, UserFields}
+    user::{Email, PasswordHash, User, UserFields},
 };
 use sqlx::SqliteConnection;
 
@@ -57,7 +57,7 @@ struct UserRow {
     revision: i64,
     created_at: String,
     updated_at: String,
-    disabled_at: Option<String>
+    disabled_at: Option<String>,
 }
 
 impl TryFrom<UserRow> for User {
@@ -73,7 +73,7 @@ impl TryFrom<UserRow> for User {
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
             updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
-            disabled_at: row.disabled_at.map(|at| parse_column(ENTITY, "disabled_at", &at)).transpose()?
+            disabled_at: row.disabled_at.map(|at| parse_column(ENTITY, "disabled_at", &at)).transpose()?,
         })
     }
 }
@@ -106,7 +106,11 @@ async fn keep_an_admin(conn: &mut SqliteConnection, user: &User) -> Result<(), S
         .fetch_one(conn)
         .await?;
     if others == 0 {
-        return Err(StoreError::Rejected { entity: ENTITY, id: user.id.to_string(), problem: "the last active instance admin must stay one" });
+        return Err(StoreError::Rejected {
+            entity: ENTITY,
+            id: user.id.to_string(),
+            problem: "the last active instance admin must stay one",
+        });
     }
     Ok(())
 }
@@ -160,7 +164,12 @@ impl UserRepository for SqliteStore {
         let mut tx = self.begin_write().await?;
         let current = fetch(&mut tx, id).await?;
         if current.revision != revision {
-            return Err(StoreError::RevisionMismatch { entity: ENTITY, id: id.to_string(), expected: revision, actual: current.revision });
+            return Err(StoreError::RevisionMismatch {
+                entity: ENTITY,
+                id: id.to_string(),
+                expected: revision,
+                actual: current.revision,
+            });
         }
         if !fields.admin {
             keep_an_admin(&mut tx, &current).await?;
@@ -245,7 +254,7 @@ impl UserRepository for SqliteStore {
         match row {
             Some(row) => row.try_into(),
             // Already enabled, or missing.
-            None => self.get_user(id).await
+            None => self.get_user(id).await,
         }
     }
 }
@@ -311,7 +320,10 @@ mod tests {
         let (_dir, store) = store().await;
         let user = store.create_user(fields("ada@example.com", false), None).await.unwrap();
 
-        let updated = store.update_user(user.id, 1, UserFields { name: "Ada".to_string(), ..fields("ada@example.org", false) }).await.unwrap();
+        let updated = store
+            .update_user(user.id, 1, UserFields { name: "Ada".to_string(), ..fields("ada@example.org", false) })
+            .await
+            .unwrap();
         let stale = store.update_user(user.id, 1, fields("x@example.com", false)).await;
 
         assert_eq!((updated.name.as_str(), updated.email.as_str(), updated.revision), ("Ada", "ada@example.org", 2));

@@ -23,7 +23,7 @@ pub fn load_master_key(config: &SpinikusConfig) -> anyhow::Result<MasterKey> {
         Err(error) if error.kind() == io::ErrorKind::NotFound && config.secrets.master_key_file.is_none() => {
             generate_key_file(&path)
         }
-        Err(error) => Err(error).with_context(|| format!("Failed to read master key from {}", path.display()))
+        Err(error) => Err(error).with_context(|| format!("Failed to read master key from {}", path.display())),
     }
 }
 

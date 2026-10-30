@@ -30,6 +30,8 @@ cargo run -- server migrate          # apply pending migrations and exit
 cargo clippy --workspace && cargo fmt
 ```
 
+Formatting is plain `cargo fmt` on stable, configured by `rustfmt.toml` (stable options only; don't add nightly-only ones such as `trailing_comma`).
+
 The binary loads `spinikus.toml` from the **current working directory** (required), overlaid by env vars with prefix `SPINIKUS` and `__` as the nesting separator (e.g. `SPINIKUS_LOGGING__LEVEL=info`). `RUST_LOG` overrides `logging.level` when set. Run it from the repo root. The database defaults to `<data_dir>/spinikus.db` (`data/` in dev, gitignored). The master encryption key comes from `SPINIKUS_SECRETS__MASTER_KEY` or `[secrets] master_key_file`; with neither, `<data_dir>/master.key` is generated on first start. `server run` refuses to start if the database's data keys were wrapped by a different master key.
 
 Migrations live in `crates/spinikus-store/migrations/` as `NNNN_<name>.sql`, are embedded with `sqlx::migrate!`, and run automatically on startup. Tables are `STRICT`; timestamps are `TEXT` in UTC RFC 3339 with milliseconds (`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`).

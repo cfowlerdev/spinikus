@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::{
     id::{ApiTokenId, EnvironmentId, ProjectId, SessionId, UserId},
-    membership::{MembershipScope, Role}
+    membership::{MembershipScope, Role},
 };
 
 /// Prefix of every API token, so secret scanners and people can recognize a leaked one.
@@ -29,7 +29,7 @@ pub struct ApiToken {
     /// Updated at most once a minute.
     pub last_used_at: Option<Timestamp>,
     pub created_at: Timestamp,
-    pub revoked_at: Option<Timestamp>
+    pub revoked_at: Option<Timestamp>,
 }
 
 impl ApiToken {
@@ -39,12 +39,12 @@ impl ApiToken {
         &self,
         user_role: Option<Role>,
         project: ProjectId,
-        environment: Option<EnvironmentId>
+        environment: Option<EnvironmentId>,
     ) -> Option<Role> {
         let in_scope = match self.scope {
             None => true,
             Some(MembershipScope::Project(id)) => id == project,
-            Some(MembershipScope::Environment(id)) => Some(id) == environment
+            Some(MembershipScope::Environment(id)) => Some(id) == environment,
         };
         if !in_scope {
             return None;
@@ -59,7 +59,7 @@ pub struct NewApiToken {
     pub name: String,
     pub role: Role,
     pub scope: Option<MembershipScope>,
-    pub expires_at: Option<Timestamp>
+    pub expires_at: Option<Timestamp>,
 }
 
 /// A signed-in web session, identified by a random cookie value.
@@ -73,7 +73,7 @@ pub struct Session {
     /// For the "active sessions" list, so users can recognize and end their sessions.
     pub user_agent: Option<String>,
     pub ip_address: Option<String>,
-    pub created_at: Timestamp
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +81,7 @@ pub struct NewSession {
     pub user_id: UserId,
     pub expires_at: Timestamp,
     pub user_agent: Option<String>,
-    pub ip_address: Option<String>
+    pub ip_address: Option<String>,
 }
 
 #[cfg(test)]
@@ -98,7 +98,7 @@ mod tests {
             expires_at: None,
             last_used_at: None,
             created_at: Timestamp::UNIX_EPOCH,
-            revoked_at: None
+            revoked_at: None,
         }
     }
 

@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     id::{ServiceId, VolumeId},
-    slug::Slug
+    slug::Slug,
 };
 
 /// Longest allowed mount path.
@@ -26,14 +26,14 @@ pub struct Volume {
     pub mount_path: MountPath,
     pub revision: i64,
     pub created_at: Timestamp,
-    pub updated_at: Timestamp
+    pub updated_at: Timestamp,
 }
 
 /// The fields a user sets when creating a volume, or replaces when updating one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeFields {
     pub name: Slug,
-    pub mount_path: MountPath
+    pub mount_path: MountPath,
 }
 
 /// An absolute path inside a container, such as `/var/lib/postgresql/data`. Parsing drops
@@ -45,7 +45,7 @@ pub struct MountPath(String);
 #[error("`{value}` is not a valid mount path: {problem}")]
 pub struct MountPathError {
     value: String,
-    problem: &'static str
+    problem: &'static str,
 }
 
 impl MountPath {
@@ -76,7 +76,7 @@ impl FromStr for MountPath {
 
         match problem {
             Some(problem) => Err(MountPathError { value: value.to_string(), problem }),
-            None => Ok(Self(path.to_string()))
+            None => Ok(Self(path.to_string())),
         }
     }
 }
@@ -106,7 +106,9 @@ mod tests {
 
     #[test]
     fn accepts_and_normalizes_paths() {
-        for (input, expected) in [("/data", "/data"), ("/var/lib/postgresql/data/", "/var/lib/postgresql/data"), ("/app/.cache", "/app/.cache")] {
+        for (input, expected) in
+            [("/data", "/data"), ("/var/lib/postgresql/data/", "/var/lib/postgresql/data"), ("/app/.cache", "/app/.cache")]
+        {
             assert_eq!(input.parse::<MountPath>().map(|path| path.to_string()), Ok(expected.to_string()));
         }
     }

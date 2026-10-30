@@ -13,12 +13,12 @@ pub struct Project {
     /// Incremented on every update, for optimistic concurrency (`If-Match`).
     pub revision: i64,
     pub created_at: Timestamp,
-    pub updated_at: Timestamp
+    pub updated_at: Timestamp,
 }
 
 /// The fields a user sets when creating a project, or replaces when updating one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectFields {
     pub name: String,
-    pub slug: Slug
+    pub slug: Slug,
 }

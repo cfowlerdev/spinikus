@@ -3,7 +3,7 @@ use spinikus_core::{
     id::{ApiTokenId, UserId},
     membership::MembershipScope,
     secret::Secret,
-    token::{API_TOKEN_PREFIX, ApiToken, NewApiToken}
+    token::{API_TOKEN_PREFIX, ApiToken, NewApiToken},
 };
 use sqlx::SqliteConnection;
 
@@ -11,7 +11,7 @@ use crate::{
     SqliteStore, StoreError,
     db::format_timestamp,
     error::parse_column,
-    secrets::{generate_bearer, hash_bearer}
+    secrets::{generate_bearer, hash_bearer},
 };
 
 const ENTITY: &str = "api token";
@@ -52,7 +52,7 @@ struct ApiTokenRow {
     expires_at: Option<String>,
     last_used_at: Option<String>,
     created_at: String,
-    revoked_at: Option<String>
+    revoked_at: Option<String>,
 }
 
 impl TryFrom<ApiTokenRow> for ApiToken {
@@ -77,7 +77,7 @@ impl TryFrom<ApiTokenRow> for ApiToken {
             expires_at: timestamp("expires_at", row.expires_at)?,
             last_used_at: timestamp("last_used_at", row.last_used_at)?,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
-            revoked_at: timestamp("revoked_at", row.revoked_at)?
+            revoked_at: timestamp("revoked_at", row.revoked_at)?,
         })
     }
 }
@@ -96,7 +96,7 @@ pub(crate) async fn check_user_active(conn: &mut SqliteConnection, user_id: User
     match disabled {
         None => Err(StoreError::NotFound { entity: "user", id: user_id.to_string() }),
         Some((true,)) => Err(StoreError::Rejected { entity: "user", id: user_id.to_string(), problem: "the user is disabled" }),
-        Some((false,)) => Ok(())
+        Some((false,)) => Ok(()),
     }
 }
 
@@ -112,7 +112,7 @@ impl ApiTokenRepository for SqliteStore {
         let (project_id, environment_id) = match new.scope {
             None => (None, None),
             Some(MembershipScope::Project(id)) => (Some(id.to_string()), None),
-            Some(MembershipScope::Environment(id)) => (None, Some(id.to_string()))
+            Some(MembershipScope::Environment(id)) => (None, Some(id.to_string())),
         };
         let row: ApiTokenRow = sqlx::query_as(concat!(
             "INSERT INTO api_tokens (id, user_id, name, token_hash, role, project_id, environment_id, expires_at)
@@ -143,7 +143,7 @@ impl ApiTokenRepository for SqliteStore {
                     t.created_at, t.revoked_at
              FROM api_tokens t JOIN users u ON u.id = t.user_id
              WHERE t.token_hash = ? AND t.revoked_at IS NULL AND u.disabled_at IS NULL
-               AND (t.expires_at IS NULL OR t.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+               AND (t.expires_at IS NULL OR t.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
         )
         .bind(hash_bearer(secret))
         .fetch_optional(self.pool())
@@ -182,10 +182,12 @@ impl ApiTokenRepository for SqliteStore {
     }
 
     async fn revoke_api_token(&self, id: ApiTokenId) -> Result<ApiToken, StoreError> {
-        sqlx::query("UPDATE api_tokens SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND revoked_at IS NULL")
-            .bind(id.to_string())
-            .execute(self.pool())
-            .await?;
+        sqlx::query(
+            "UPDATE api_tokens SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND revoked_at IS NULL",
+        )
+        .bind(id.to_string())
+        .execute(self.pool())
+        .await?;
         self.get_api_token(id).await
     }
 }
@@ -193,12 +195,7 @@ impl ApiTokenRepository for SqliteStore {
 #[cfg(test)]
 mod tests {
     use jiff::{SignedDuration, Timestamp};
-    use spinikus_core::{
-        id::ProjectId,
-        membership::Role,
-        project::ProjectFields,
-        user::UserFields
-    };
+    use spinikus_core::{id::ProjectId, membership::Role, project::ProjectFields, user::UserFields};
 
     use super::*;
     use crate::{ProjectRepository, UserRepository, test_support::store};
@@ -268,11 +265,8 @@ mod tests {
     async fn requires_an_active_user_and_scope() {
         let (_dir, store) = store().await;
         let ada = user(&store, "ada@example.com").await;
-        let project = store
-            .create_project(ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() })
-            .await
-            .unwrap()
-            .id;
+        let project =
+            store.create_project(ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() }).await.unwrap().id;
         let scoped = NewApiToken { scope: Some(MembershipScope::Project(project)), ..new_token(ada) };
         let (token, _) = store.create_api_token(scoped).await.unwrap();
         store.disable_user(ada).await.unwrap();
@@ -280,8 +274,9 @@ mod tests {
         let missing_user = store.create_api_token(new_token(UserId::new())).await;
         let disabled_user = store.create_api_token(new_token(ada)).await;
         store.enable_user(ada).await.unwrap();
-        let missing_scope =
-            store.create_api_token(NewApiToken { scope: Some(MembershipScope::Project(ProjectId::new())), ..new_token(ada) }).await;
+        let missing_scope = store
+            .create_api_token(NewApiToken { scope: Some(MembershipScope::Project(ProjectId::new())), ..new_token(ada) })
+            .await;
 
         assert_eq!(token.scope, Some(MembershipScope::Project(project)));
         assert!(matches!(missing_user, Err(StoreError::NotFound { entity: "user", .. })), "{missing_user:?}");

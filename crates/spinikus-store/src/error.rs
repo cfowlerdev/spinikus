@@ -26,7 +26,7 @@ pub enum StoreError {
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error(transparent)]
-    Migrate(#[from] sqlx::migrate::MigrateError)
+    Migrate(#[from] sqlx::migrate::MigrateError),
 }
 
 impl StoreError {
@@ -37,7 +37,7 @@ impl StoreError {
     pub(crate) fn on_unique_violation(error: sqlx::Error, conflict: impl FnOnce(&str) -> StoreError) -> StoreError {
         match error.as_database_error() {
             Some(db_error) if db_error.is_unique_violation() => conflict(db_error.message()),
-            _ => StoreError::Database(error)
+            _ => StoreError::Database(error),
         }
     }
 }
@@ -46,7 +46,7 @@ impl StoreError {
 pub(crate) fn parse_column<T>(entity: &'static str, column: &'static str, value: &str) -> Result<T, StoreError>
 where
     T: std::str::FromStr,
-    T::Err: std::fmt::Display
+    T::Err: std::fmt::Display,
 {
     value.parse().map_err(|error: T::Err| StoreError::InvalidRow { entity, column, problem: error.to_string() })
 }

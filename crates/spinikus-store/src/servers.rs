@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     id::ServerId,
-    server::{AgentInfo, Server, ServerFields, ServerStatus}
+    server::{AgentInfo, Server, ServerFields, ServerStatus},
 };
 
 use crate::{SqliteStore, StoreError, error::parse_column};
@@ -55,7 +55,7 @@ struct ServerRow {
     revoked_at: Option<String>,
     connected: Option<bool>,
     agent_info: Option<String>,
-    last_seen_at: Option<String>
+    last_seen_at: Option<String>,
 }
 
 impl TryFrom<ServerRow> for Server {
@@ -77,7 +77,7 @@ impl TryFrom<ServerRow> for Server {
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
             updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
-            revoked_at: row.revoked_at.map(|at| parse_column(ENTITY, "revoked_at", &at)).transpose()?
+            revoked_at: row.revoked_at.map(|at| parse_column(ENTITY, "revoked_at", &at)).transpose()?,
         })
     }
 }
@@ -131,7 +131,7 @@ impl ServerRepository for SqliteStore {
     async fn update_server(&self, id: ServerId, revision: i64, fields: ServerFields) -> Result<Server, StoreError> {
         let result = sqlx::query(
             "UPDATE servers SET name = ?, revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE id = ? AND revision = ? AND revoked_at IS NULL"
+             WHERE id = ? AND revision = ? AND revoked_at IS NULL",
         )
         .bind(&fields.name)
         .bind(id.to_string())
@@ -142,10 +142,13 @@ impl ServerRepository for SqliteStore {
         let current = self.get_server(id).await?;
         match (result.rows_affected(), current.status) {
             (0, ServerStatus::Revoked) => Err(not_found(id)),
-            (0, _) => {
-                Err(StoreError::RevisionMismatch { entity: ENTITY, id: id.to_string(), expected: revision, actual: current.revision })
-            }
-            _ => Ok(current)
+            (0, _) => Err(StoreError::RevisionMismatch {
+                entity: ENTITY,
+                id: id.to_string(),
+                expected: revision,
+                actual: current.revision,
+            }),
+            _ => Ok(current),
         }
     }
 
@@ -154,7 +157,7 @@ impl ServerRepository for SqliteStore {
             "UPDATE servers
              SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                  revision = revision + 1
-             WHERE id = ? AND revoked_at IS NULL"
+             WHERE id = ? AND revoked_at IS NULL",
         )
         .bind(id.to_string())
         .execute(self.pool())
@@ -167,7 +170,7 @@ impl ServerRepository for SqliteStore {
         let agent_info = serde_json::to_string(&agent).map_err(|error| StoreError::InvalidRow {
             entity: ENTITY,
             column: "agent_info",
-            problem: error.to_string()
+            problem: error.to_string(),
         })?;
         let result = sqlx::query(
             "INSERT INTO server_state (server_id, connected, agent_info, connected_at, last_seen_at)
@@ -175,7 +178,7 @@ impl ServerRepository for SqliteStore {
              FROM servers WHERE id = ? AND revoked_at IS NULL
              ON CONFLICT (server_id) DO UPDATE SET
                  connected = 1, agent_info = excluded.agent_info, connected_at = excluded.connected_at,
-                 last_seen_at = excluded.last_seen_at"
+                 last_seen_at = excluded.last_seen_at",
         )
         .bind(agent_info)
         .bind(id.to_string())
@@ -188,7 +191,7 @@ impl ServerRepository for SqliteStore {
     async fn record_heartbeat(&self, id: ServerId) -> Result<(), StoreError> {
         let result = sqlx::query(
             "UPDATE server_state SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE server_id = ? AND EXISTS (SELECT 1 FROM servers WHERE id = ? AND revoked_at IS NULL)"
+             WHERE server_id = ? AND EXISTS (SELECT 1 FROM servers WHERE id = ? AND revoked_at IS NULL)",
         )
         .bind(id.to_string())
         .bind(id.to_string())
@@ -228,8 +231,8 @@ mod tests {
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
                 cpu_count: 4,
-                memory_bytes: 8 << 30
-            }
+                memory_bytes: 8 << 30,
+            },
         }
     }
 

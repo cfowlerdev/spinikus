@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     domain::{Domain, DomainFields, Hostname},
-    id::{CertificateId, DomainId, ServiceId}
+    id::{CertificateId, DomainId, ServiceId},
 };
 use sqlx::SqliteConnection;
 
@@ -51,7 +51,7 @@ struct DomainRow {
     certificate_id: Option<String>,
     revision: i64,
     created_at: String,
-    updated_at: String
+    updated_at: String,
 }
 
 impl TryFrom<DomainRow> for Domain {
@@ -66,7 +66,7 @@ impl TryFrom<DomainRow> for Domain {
             certificate_id: row.certificate_id.map(|id| parse_column(ENTITY, "certificate_id", &id)).transpose()?,
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
-            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?
+            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
         })
     }
 }
@@ -100,7 +100,7 @@ async fn check_redirect(
     conn: &mut SqliteConnection,
     id: DomainId,
     service_id: ServiceId,
-    target: Option<DomainId>
+    target: Option<DomainId>,
 ) -> Result<(), StoreError> {
     let Some(target) = target else { return Ok(()) };
     if target == id {
@@ -172,7 +172,9 @@ impl DomainRepository for SqliteStore {
 
     async fn list_domains(&self, service_id: ServiceId) -> Result<Vec<Domain>, StoreError> {
         let rows: Vec<DomainRow> = sqlx::query_as(concat!(
-            "SELECT ", columns!(), " FROM domains WHERE service_id = ? AND deleted_at IS NULL ORDER BY hostname"
+            "SELECT ",
+            columns!(),
+            " FROM domains WHERE service_id = ? AND deleted_at IS NULL ORDER BY hostname"
         ))
         .bind(service_id.to_string())
         .fetch_all(self.pool())
@@ -195,7 +197,12 @@ impl DomainRepository for SqliteStore {
         let mut tx = self.begin_write().await?;
         let current = fetch(&mut tx, id).await?;
         if current.revision != revision {
-            return Err(StoreError::RevisionMismatch { entity: ENTITY, id: id.to_string(), expected: revision, actual: current.revision });
+            return Err(StoreError::RevisionMismatch {
+                entity: ENTITY,
+                id: id.to_string(),
+                expected: revision,
+                actual: current.revision,
+            });
         }
         check_redirect(&mut tx, id, current.service_id, fields.redirect_to).await?;
 
@@ -224,7 +231,7 @@ impl DomainRepository for SqliteStore {
              SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                  certificate_id = NULL, revision = revision + 1
              WHERE id = ? AND deleted_at IS NULL
-               AND NOT EXISTS (SELECT 1 FROM domains AS other WHERE other.redirect_to = domains.id AND other.deleted_at IS NULL)"
+               AND NOT EXISTS (SELECT 1 FROM domains AS other WHERE other.redirect_to = domains.id AND other.deleted_at IS NULL)",
         )
         .bind(id.to_string())
         .execute(self.pool())
@@ -269,7 +276,7 @@ mod tests {
         environment::{EnvironmentFields, EnvironmentKind},
         project::ProjectFields,
         secret::Secret,
-        service::{ServiceFields, ServiceKind}
+        service::{ServiceFields, ServiceKind},
     };
 
     use super::*;
@@ -303,7 +310,7 @@ mod tests {
             private_key_pem: Secret::new("key"),
             not_before: "2026-10-01T00:00:00Z".parse().unwrap(),
             not_after: "2027-01-01T00:00:00Z".parse().unwrap(),
-            acme_account_id: None
+            acme_account_id: None,
         };
         store.create_certificate(new).await.unwrap().id
     }

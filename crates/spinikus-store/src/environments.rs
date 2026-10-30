@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     environment::{Environment, EnvironmentFields, EnvironmentKind},
-    id::{EnvironmentId, ProjectId}
+    id::{EnvironmentId, ProjectId},
 };
 
 use crate::{ProjectRepository, SqliteStore, StoreError, error::parse_column};
@@ -15,7 +15,7 @@ pub trait EnvironmentRepository: Send + Sync {
         &self,
         project_id: ProjectId,
         kind: EnvironmentKind,
-        fields: EnvironmentFields
+        fields: EnvironmentFields,
     ) -> Result<Environment, StoreError>;
 
     /// Fails with `NotFound` for deleted environments too.
@@ -26,7 +26,7 @@ pub trait EnvironmentRepository: Send + Sync {
         &self,
         project_id: ProjectId,
         after: Option<EnvironmentId>,
-        limit: u32
+        limit: u32,
     ) -> Result<Vec<Environment>, StoreError>;
 
     /// Replaces the environment's fields if it is still at `revision`.
@@ -34,7 +34,7 @@ pub trait EnvironmentRepository: Send + Sync {
         &self,
         id: EnvironmentId,
         revision: i64,
-        fields: EnvironmentFields
+        fields: EnvironmentFields,
     ) -> Result<Environment, StoreError>;
 
     /// Soft-deletes the environment, which frees its slug. Refused while it has services.
@@ -51,7 +51,7 @@ struct EnvironmentRow {
     pr_number: Option<u32>,
     revision: i64,
     created_at: String,
-    updated_at: String
+    updated_at: String,
 }
 
 impl TryFrom<EnvironmentRow> for Environment {
@@ -66,11 +66,11 @@ impl TryFrom<EnvironmentRow> for Environment {
             kind: EnvironmentKind::from_parts(&row.kind, row.pr_number).map_err(|error| StoreError::InvalidRow {
                 entity: ENTITY,
                 column: "kind",
-                problem: error.to_string()
+                problem: error.to_string(),
             })?,
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
-            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?
+            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
         })
     }
 }
@@ -85,7 +85,7 @@ fn conflict(kind: Option<EnvironmentKind>, fields: &EnvironmentFields) -> impl F
         Some(EnvironmentKind::Production) if !message.contains("slug") => {
             StoreError::Conflict { entity: ENTITY, field: "kind", value: "production".to_string() }
         }
-        _ => StoreError::Conflict { entity: ENTITY, field: "slug", value: slug }
+        _ => StoreError::Conflict { entity: ENTITY, field: "slug", value: slug },
     }
 }
 
@@ -99,12 +99,12 @@ impl EnvironmentRepository for SqliteStore {
         &self,
         project_id: ProjectId,
         kind: EnvironmentKind,
-        fields: EnvironmentFields
+        fields: EnvironmentFields,
     ) -> Result<Environment, StoreError> {
         let row: Option<EnvironmentRow> = sqlx::query_as(
             "INSERT INTO environments (id, project_id, name, slug, kind, pr_number)
              SELECT ?, id, ?, ?, ?, ? FROM projects WHERE id = ? AND deleted_at IS NULL
-             RETURNING id, project_id, name, slug, kind, pr_number, revision, created_at, updated_at"
+             RETURNING id, project_id, name, slug, kind, pr_number, revision, created_at, updated_at",
         )
         .bind(EnvironmentId::new().to_string())
         .bind(&fields.name)
@@ -118,14 +118,14 @@ impl EnvironmentRepository for SqliteStore {
 
         match row {
             Some(row) => row.try_into(),
-            None => Err(StoreError::NotFound { entity: "project", id: project_id.to_string() })
+            None => Err(StoreError::NotFound { entity: "project", id: project_id.to_string() }),
         }
     }
 
     async fn get_environment(&self, id: EnvironmentId) -> Result<Environment, StoreError> {
         let row: Option<EnvironmentRow> = sqlx::query_as(
             "SELECT id, project_id, name, slug, kind, pr_number, revision, created_at, updated_at
-             FROM environments WHERE id = ? AND deleted_at IS NULL"
+             FROM environments WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(id.to_string())
         .fetch_optional(self.pool())
@@ -138,11 +138,11 @@ impl EnvironmentRepository for SqliteStore {
         &self,
         project_id: ProjectId,
         after: Option<EnvironmentId>,
-        limit: u32
+        limit: u32,
     ) -> Result<Vec<Environment>, StoreError> {
         let rows: Vec<EnvironmentRow> = sqlx::query_as(
             "SELECT id, project_id, name, slug, kind, pr_number, revision, created_at, updated_at
-             FROM environments WHERE project_id = ? AND deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?"
+             FROM environments WHERE project_id = ? AND deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?",
         )
         .bind(project_id.to_string())
         .bind(after.map(|id| id.to_string()).unwrap_or_default())
@@ -161,13 +161,13 @@ impl EnvironmentRepository for SqliteStore {
         &self,
         id: EnvironmentId,
         revision: i64,
-        fields: EnvironmentFields
+        fields: EnvironmentFields,
     ) -> Result<Environment, StoreError> {
         let row: Option<EnvironmentRow> = sqlx::query_as(
             "UPDATE environments
              SET name = ?, slug = ?, revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ? AND revision = ? AND deleted_at IS NULL
-             RETURNING id, project_id, name, slug, kind, pr_number, revision, created_at, updated_at"
+             RETURNING id, project_id, name, slug, kind, pr_number, revision, created_at, updated_at",
         )
         .bind(&fields.name)
         .bind(fields.slug.as_str())
@@ -182,7 +182,12 @@ impl EnvironmentRepository for SqliteStore {
             // Nothing matched: either the environment is gone or it has moved on to a newer revision.
             None => {
                 let current = self.get_environment(id).await?;
-                Err(StoreError::RevisionMismatch { entity: ENTITY, id: id.to_string(), expected: revision, actual: current.revision })
+                Err(StoreError::RevisionMismatch {
+                    entity: ENTITY,
+                    id: id.to_string(),
+                    expected: revision,
+                    actual: current.revision,
+                })
             }
         }
     }
@@ -193,7 +198,7 @@ impl EnvironmentRepository for SqliteStore {
              SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                  revision = revision + 1
              WHERE id = ? AND deleted_at IS NULL
-               AND NOT EXISTS (SELECT 1 FROM services WHERE environment_id = environments.id AND deleted_at IS NULL)"
+               AND NOT EXISTS (SELECT 1 FROM services WHERE environment_id = environments.id AND deleted_at IS NULL)",
         )
         .bind(id.to_string())
         .execute(self.pool())

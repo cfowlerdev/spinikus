@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     id::ProjectId,
-    project::{Project, ProjectFields}
+    project::{Project, ProjectFields},
 };
 
 use crate::{SqliteStore, StoreError, error::parse_column};
@@ -32,7 +32,7 @@ struct ProjectRow {
     slug: String,
     revision: i64,
     created_at: String,
-    updated_at: String
+    updated_at: String,
 }
 
 impl TryFrom<ProjectRow> for Project {
@@ -45,7 +45,7 @@ impl TryFrom<ProjectRow> for Project {
             slug: parse_column(ENTITY, "slug", &row.slug)?,
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
-            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?
+            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
         })
     }
 }
@@ -64,7 +64,7 @@ impl ProjectRepository for SqliteStore {
     async fn create_project(&self, fields: ProjectFields) -> Result<Project, StoreError> {
         let row: ProjectRow = sqlx::query_as(
             "INSERT INTO projects (id, name, slug) VALUES (?, ?, ?)
-             RETURNING id, name, slug, revision, created_at, updated_at"
+             RETURNING id, name, slug, revision, created_at, updated_at",
         )
         .bind(ProjectId::new().to_string())
         .bind(&fields.name)
@@ -79,7 +79,7 @@ impl ProjectRepository for SqliteStore {
     async fn get_project(&self, id: ProjectId) -> Result<Project, StoreError> {
         let row: Option<ProjectRow> = sqlx::query_as(
             "SELECT id, name, slug, revision, created_at, updated_at
-             FROM projects WHERE id = ? AND deleted_at IS NULL"
+             FROM projects WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(id.to_string())
         .fetch_optional(self.pool())
@@ -91,7 +91,7 @@ impl ProjectRepository for SqliteStore {
     async fn list_projects(&self, after: Option<ProjectId>, limit: u32) -> Result<Vec<Project>, StoreError> {
         let rows: Vec<ProjectRow> = sqlx::query_as(
             "SELECT id, name, slug, revision, created_at, updated_at
-             FROM projects WHERE deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?"
+             FROM projects WHERE deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?",
         )
         .bind(after.map(|id| id.to_string()).unwrap_or_default())
         .bind(limit)
@@ -106,7 +106,7 @@ impl ProjectRepository for SqliteStore {
             "UPDATE projects
              SET name = ?, slug = ?, revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ? AND revision = ? AND deleted_at IS NULL
-             RETURNING id, name, slug, revision, created_at, updated_at"
+             RETURNING id, name, slug, revision, created_at, updated_at",
         )
         .bind(&fields.name)
         .bind(fields.slug.as_str())
@@ -121,7 +121,12 @@ impl ProjectRepository for SqliteStore {
             // Nothing matched: either the project is gone or it has moved on to a newer revision.
             None => {
                 let current = self.get_project(id).await?;
-                Err(StoreError::RevisionMismatch { entity: ENTITY, id: id.to_string(), expected: revision, actual: current.revision })
+                Err(StoreError::RevisionMismatch {
+                    entity: ENTITY,
+                    id: id.to_string(),
+                    expected: revision,
+                    actual: current.revision,
+                })
             }
         }
     }
@@ -132,7 +137,7 @@ impl ProjectRepository for SqliteStore {
              SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                  revision = revision + 1
              WHERE id = ? AND deleted_at IS NULL
-               AND NOT EXISTS (SELECT 1 FROM environments WHERE project_id = projects.id AND deleted_at IS NULL)"
+               AND NOT EXISTS (SELECT 1 FROM environments WHERE project_id = projects.id AND deleted_at IS NULL)",
         )
         .bind(id.to_string())
         .execute(self.pool())
@@ -232,10 +237,7 @@ mod tests {
 
         let result = store.update_project(project.id, 1, fields("Stale", "web")).await;
 
-        assert!(
-            matches!(result, Err(StoreError::RevisionMismatch { expected: 1, actual: 2, .. })),
-            "{result:?}"
-        );
+        assert!(matches!(result, Err(StoreError::RevisionMismatch { expected: 1, actual: 2, .. })), "{result:?}");
     }
 
     #[tokio::test]

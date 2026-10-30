@@ -4,7 +4,7 @@ use spinikus_core::{
     certificate::{AcmeAccount, Certificate, NewAcmeAccount, NewCertificate},
     domain::Hostname,
     id::{AcmeAccountId, CertificateId},
-    secret::Secret
+    secret::Secret,
 };
 use sqlx::SqliteConnection;
 
@@ -54,7 +54,7 @@ struct CertificateRow {
     not_before: String,
     not_after: String,
     acme_account_id: Option<String>,
-    created_at: String
+    created_at: String,
 }
 
 impl TryFrom<CertificateRow> for Certificate {
@@ -66,13 +66,13 @@ impl TryFrom<CertificateRow> for Certificate {
             hostnames: serde_json::from_str::<Vec<Hostname>>(&row.hostnames).map_err(|error| StoreError::InvalidRow {
                 entity: ENTITY,
                 column: "hostnames",
-                problem: error.to_string()
+                problem: error.to_string(),
             })?,
             chain_pem: row.chain_pem,
             not_before: parse_column(ENTITY, "not_before", &row.not_before)?,
             not_after: parse_column(ENTITY, "not_after", &row.not_after)?,
             acme_account_id: row.acme_account_id.map(|id| parse_column(ENTITY, "acme_account_id", &id)).transpose()?,
-            created_at: parse_column(ENTITY, "created_at", &row.created_at)?
+            created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
         })
     }
 }
@@ -82,7 +82,7 @@ struct AccountRow {
     id: String,
     directory_url: String,
     email: String,
-    created_at: String
+    created_at: String,
 }
 
 impl TryFrom<AccountRow> for AcmeAccount {
@@ -93,19 +93,14 @@ impl TryFrom<AccountRow> for AcmeAccount {
             id: parse_column(ACCOUNT, "id", &row.id)?,
             directory_url: row.directory_url,
             email: row.email,
-            created_at: parse_column(ACCOUNT, "created_at", &row.created_at)?
+            created_at: parse_column(ACCOUNT, "created_at", &row.created_at)?,
         })
     }
 }
 
 /// Runs `query` (selecting a sealed column and its data key ID) for row `id`, and decrypts the value,
 /// which was sealed with the row's ID as context.
-async fn open_sealed(
-    store: &SqliteStore,
-    query: &'static str,
-    entity: &'static str,
-    id: String
-) -> Result<Secret, StoreError> {
+async fn open_sealed(store: &SqliteStore, query: &'static str, entity: &'static str, id: String) -> Result<Secret, StoreError> {
     let row: Option<(Vec<u8>, String)> = sqlx::query_as(query).bind(&id).fetch_optional(store.pool()).await?;
     let (ciphertext, key_id) = row.ok_or_else(|| StoreError::NotFound { entity, id: id.clone() })?;
     let sealed = Sealed { key_id: parse_column(entity, "data_key_id", &key_id)?, ciphertext };
@@ -114,8 +109,11 @@ async fn open_sealed(
 
 fn secret_from(keyring: &Keyring, sealed: &Sealed, entity: &'static str, id: &str) -> Result<Secret, StoreError> {
     let plaintext = keyring.open(sealed, id.as_bytes())?;
-    let text = std::str::from_utf8(&plaintext)
-        .map_err(|_| StoreError::InvalidRow { entity, column: "secret", problem: "not UTF-8".to_string() })?;
+    let text = std::str::from_utf8(&plaintext).map_err(|_| StoreError::InvalidRow {
+        entity,
+        column: "secret",
+        problem: "not UTF-8".to_string(),
+    })?;
     Ok(Secret::new(text))
 }
 
@@ -134,7 +132,7 @@ impl CertificateRepository for SqliteStore {
         let sealed = self.keyring().seal(new.credentials.expose().as_bytes(), id.to_string().as_bytes());
         let row: AccountRow = sqlx::query_as(
             "INSERT INTO acme_accounts (id, directory_url, email, credentials, data_key_id) VALUES (?, ?, ?, ?, ?)
-             RETURNING id, directory_url, email, created_at"
+             RETURNING id, directory_url, email, created_at",
         )
         .bind(id.to_string())
         .bind(&new.directory_url)
@@ -144,7 +142,11 @@ impl CertificateRepository for SqliteStore {
         .fetch_one(self.pool())
         .await
         .map_err(|error| {
-            StoreError::on_unique_violation(error, |_| StoreError::Conflict { entity: ACCOUNT, field: "email", value: new.email.clone() })
+            StoreError::on_unique_violation(error, |_| StoreError::Conflict {
+                entity: ACCOUNT,
+                field: "email",
+                value: new.email.clone(),
+            })
         })?;
 
         row.try_into()
@@ -152,7 +154,7 @@ impl CertificateRepository for SqliteStore {
 
     async fn find_acme_account(&self, directory_url: &str, email: &str) -> Result<Option<AcmeAccount>, StoreError> {
         let row: Option<AccountRow> = sqlx::query_as(
-            "SELECT id, directory_url, email, created_at FROM acme_accounts WHERE directory_url = ? AND email = ?"
+            "SELECT id, directory_url, email, created_at FROM acme_accounts WHERE directory_url = ? AND email = ?",
         )
         .bind(directory_url)
         .bind(email)
@@ -208,9 +210,8 @@ impl CertificateRepository for SqliteStore {
     }
 
     async fn list_certificates(&self) -> Result<Vec<Certificate>, StoreError> {
-        let rows: Vec<CertificateRow> = sqlx::query_as(concat!("SELECT ", columns!(), " FROM certificates ORDER BY id"))
-            .fetch_all(self.pool())
-            .await?;
+        let rows: Vec<CertificateRow> =
+            sqlx::query_as(concat!("SELECT ", columns!(), " FROM certificates ORDER BY id")).fetch_all(self.pool()).await?;
         rows.into_iter().map(Certificate::try_from).collect()
     }
 
@@ -229,7 +230,7 @@ impl CertificateRepository for SqliteStore {
 
     async fn delete_certificate(&self, id: CertificateId) -> Result<(), StoreError> {
         let result = sqlx::query(
-            "DELETE FROM certificates WHERE id = ? AND NOT EXISTS (SELECT 1 FROM domains WHERE certificate_id = certificates.id)"
+            "DELETE FROM certificates WHERE id = ? AND NOT EXISTS (SELECT 1 FROM domains WHERE certificate_id = certificates.id)",
         )
         .bind(id.to_string())
         .execute(self.pool())
@@ -258,7 +259,7 @@ mod tests {
             private_key_pem: Secret::new("-----BEGIN PRIVATE KEY-----\nsecret"),
             not_before: "2026-10-01T00:00:00Z".parse().unwrap(),
             not_after: not_after.parse().unwrap(),
-            acme_account_id: None
+            acme_account_id: None,
         }
     }
 
@@ -266,7 +267,7 @@ mod tests {
         NewAcmeAccount {
             directory_url: LETS_ENCRYPT.to_string(),
             email: email.to_string(),
-            credentials: Secret::new(r#"{"id":"https://acme/acct/1","key_pkcs8":"..."}"#)
+            credentials: Secret::new(r#"{"id":"https://acme/acct/1","key_pkcs8":"..."}"#),
         }
     }
 

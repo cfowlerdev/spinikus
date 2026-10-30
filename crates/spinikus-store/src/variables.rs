@@ -2,12 +2,11 @@ use async_trait::async_trait;
 use spinikus_core::{
     id::{ServiceId, VariableId},
     secret::Secret,
-    variable::{self, ResolvedVariable, Variable, VariableFields, VariableScope}
+    variable::{self, ResolvedVariable, Variable, VariableFields, VariableScope},
 };
 
 use crate::{
-    EnvironmentRepository, Keyring, ProjectRepository, Sealed, ServiceRepository, SqliteStore, StoreError,
-    error::parse_column
+    EnvironmentRepository, Keyring, ProjectRepository, Sealed, ServiceRepository, SqliteStore, StoreError, error::parse_column,
 };
 
 const ENTITY: &str = "variable";
@@ -30,7 +29,7 @@ pub trait VariableRepository: Send + Sync {
         id: VariableId,
         revision: i64,
         fields: VariableFields,
-        value: Option<Secret>
+        value: Option<Secret>,
     ) -> Result<Variable, StoreError>;
 
     async fn delete_variable(&self, id: VariableId) -> Result<(), StoreError>;
@@ -55,7 +54,9 @@ macro_rules! insert_under {
         concat!(
             "INSERT INTO variables (id, project_id, environment_id, service_id, name, value, data_key_id, availability, secret)
              SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
-             WHERE EXISTS (SELECT 1 FROM ", $parent, " WHERE id = ? AND deleted_at IS NULL)
+             WHERE EXISTS (SELECT 1 FROM ",
+            $parent,
+            " WHERE id = ? AND deleted_at IS NULL)
              RETURNING ",
             columns!()
         )
@@ -81,7 +82,7 @@ struct VariableRow {
     secret: bool,
     revision: i64,
     created_at: String,
-    updated_at: String
+    updated_at: String,
 }
 
 impl VariableRow {
@@ -94,15 +95,18 @@ impl VariableRow {
             (Some(id), None, None) => Ok(VariableScope::Project(parse_column(ENTITY, "project_id", id)?)),
             (None, Some(id), None) => Ok(VariableScope::Environment(parse_column(ENTITY, "environment_id", id)?)),
             (None, None, Some(id)) => Ok(VariableScope::Service(parse_column(ENTITY, "service_id", id)?)),
-            _ => Err(StoreError::InvalidRow { entity: ENTITY, column: "scope", problem: "not exactly one scope".to_string() })
+            _ => Err(StoreError::InvalidRow { entity: ENTITY, column: "scope", problem: "not exactly one scope".to_string() }),
         }
     }
 
     fn decrypt(&self, keyring: &Keyring) -> Result<Secret, StoreError> {
         let sealed = Sealed { key_id: parse_column(ENTITY, "data_key_id", &self.data_key_id)?, ciphertext: self.value.clone() };
         let plaintext = keyring.open(&sealed, self.id.as_bytes())?;
-        let value = std::str::from_utf8(&plaintext)
-            .map_err(|_| StoreError::InvalidRow { entity: ENTITY, column: "value", problem: "not UTF-8".to_string() })?;
+        let value = std::str::from_utf8(&plaintext).map_err(|_| StoreError::InvalidRow {
+            entity: ENTITY,
+            column: "value",
+            problem: "not UTF-8".to_string(),
+        })?;
         Ok(Secret::new(value))
     }
 
@@ -117,7 +121,7 @@ impl VariableRow {
             secret: self.secret,
             revision: self.revision,
             created_at: parse_column(ENTITY, "created_at", &self.created_at)?,
-            updated_at: parse_column(ENTITY, "updated_at", &self.updated_at)?
+            updated_at: parse_column(ENTITY, "updated_at", &self.updated_at)?,
         })
     }
 
@@ -128,7 +132,7 @@ impl VariableRow {
             variable_id: self.id()?,
             name: parse_column(ENTITY, "name", &self.name)?,
             availability: parse_column(ENTITY, "availability", &self.availability)?,
-            secret: self.secret
+            secret: self.secret,
         })
     }
 }
@@ -138,7 +142,7 @@ fn scope_columns(scope: VariableScope) -> [Option<String>; 3] {
     match scope {
         VariableScope::Project(id) => [Some(id.to_string()), None, None],
         VariableScope::Environment(id) => [None, Some(id.to_string()), None],
-        VariableScope::Service(id) => [None, None, Some(id.to_string())]
+        VariableScope::Service(id) => [None, None, Some(id.to_string())],
     }
 }
 
@@ -151,7 +155,7 @@ fn scope_not_found(scope: VariableScope) -> StoreError {
     let id = match scope {
         VariableScope::Project(id) => id.to_string(),
         VariableScope::Environment(id) => id.to_string(),
-        VariableScope::Service(id) => id.to_string()
+        VariableScope::Service(id) => id.to_string(),
     };
     StoreError::NotFound { entity: scope.level().as_str(), id }
 }
@@ -170,7 +174,7 @@ impl SqliteStore {
         match scope {
             VariableScope::Project(id) => self.get_project(id).await.map(drop),
             VariableScope::Environment(id) => self.get_environment(id).await.map(drop),
-            VariableScope::Service(id) => self.get_service(id).await.map(drop)
+            VariableScope::Service(id) => self.get_service(id).await.map(drop),
         }
     }
 
@@ -189,7 +193,7 @@ impl VariableRepository for SqliteStore {
         let query = match scope {
             VariableScope::Project(_) => insert_under!("projects"),
             VariableScope::Environment(_) => insert_under!("environments"),
-            VariableScope::Service(_) => insert_under!("services")
+            VariableScope::Service(_) => insert_under!("services"),
         };
         let id = VariableId::new();
         let sealed = seal(self.keyring(), id, &value);
@@ -213,7 +217,7 @@ impl VariableRepository for SqliteStore {
 
         match row {
             Some(row) => row.into_variable(self.keyring()),
-            None => Err(scope_not_found(scope))
+            None => Err(scope_not_found(scope)),
         }
     }
 
@@ -225,13 +229,11 @@ impl VariableRepository for SqliteStore {
         let query = match scope {
             VariableScope::Project(_) => select_by!("project_id"),
             VariableScope::Environment(_) => select_by!("environment_id"),
-            VariableScope::Service(_) => select_by!("service_id")
+            VariableScope::Service(_) => select_by!("service_id"),
         };
         let [project_id, environment_id, service_id] = scope_columns(scope);
-        let rows: Vec<VariableRow> = sqlx::query_as(query)
-            .bind(project_id.or(environment_id).or(service_id))
-            .fetch_all(self.pool())
-            .await?;
+        let rows: Vec<VariableRow> =
+            sqlx::query_as(query).bind(project_id.or(environment_id).or(service_id)).fetch_all(self.pool()).await?;
 
         if rows.is_empty() {
             // Tell an empty list apart from a missing or deleted scope.
@@ -245,7 +247,7 @@ impl VariableRepository for SqliteStore {
         id: VariableId,
         revision: i64,
         fields: VariableFields,
-        value: Option<Secret>
+        value: Option<Secret>,
     ) -> Result<Variable, StoreError> {
         let mut tx = self.begin_write().await?;
         let current: Option<(i64, bool)> = sqlx::query_as("SELECT revision, secret FROM variables WHERE id = ?")
@@ -254,10 +256,19 @@ impl VariableRepository for SqliteStore {
             .await?;
         let (current_revision, was_secret) = current.ok_or_else(|| not_found(id))?;
         if current_revision != revision {
-            return Err(StoreError::RevisionMismatch { entity: ENTITY, id: id.to_string(), expected: revision, actual: current_revision });
+            return Err(StoreError::RevisionMismatch {
+                entity: ENTITY,
+                id: id.to_string(),
+                expected: revision,
+                actual: current_revision,
+            });
         }
         if was_secret && !fields.secret {
-            return Err(StoreError::Rejected { entity: ENTITY, id: id.to_string(), problem: "a secret cannot be made non-secret" });
+            return Err(StoreError::Rejected {
+                entity: ENTITY,
+                id: id.to_string(),
+                problem: "a secret cannot be made non-secret",
+            });
         }
 
         let sealed = value.map(|value| seal(self.keyring(), id, &value));
@@ -301,9 +312,15 @@ impl VariableRepository for SqliteStore {
         let environment = self.get_environment(service.environment_id).await?;
 
         let rows: Vec<VariableRow> = sqlx::query_as(concat!(
-            "SELECT ", columns!(), " FROM variables WHERE service_id = ?
-             UNION ALL SELECT ", columns!(), " FROM variables WHERE environment_id = ?
-             UNION ALL SELECT ", columns!(), " FROM variables WHERE project_id = ?"
+            "SELECT ",
+            columns!(),
+            " FROM variables WHERE service_id = ?
+             UNION ALL SELECT ",
+            columns!(),
+            " FROM variables WHERE environment_id = ?
+             UNION ALL SELECT ",
+            columns!(),
+            " FROM variables WHERE project_id = ?"
         ))
         .bind(service_id.to_string())
         .bind(environment.id.to_string())
@@ -323,7 +340,7 @@ mod tests {
         id::{EnvironmentId, ProjectId},
         project::ProjectFields,
         service::{ServiceFields, ServiceKind},
-        variable::{ScopeLevel, VariableAvailability}
+        variable::{ScopeLevel, VariableAvailability},
     };
 
     use super::*;
@@ -332,20 +349,17 @@ mod tests {
     struct Tree {
         project: ProjectId,
         environment: EnvironmentId,
-        service: ServiceId
+        service: ServiceId,
     }
 
     async fn tree(store: &SqliteStore) -> Tree {
-        let project = store
-            .create_project(ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() })
-            .await
-            .unwrap()
-            .id;
+        let project =
+            store.create_project(ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() }).await.unwrap().id;
         let environment = store
             .create_environment(
                 project,
                 EnvironmentKind::Production,
-                EnvironmentFields { name: "Production".to_string(), slug: "production".parse().unwrap() }
+                EnvironmentFields { name: "Production".to_string(), slug: "production".parse().unwrap() },
             )
             .await
             .unwrap()
@@ -354,7 +368,7 @@ mod tests {
             .create_service(
                 environment,
                 ServiceKind::App,
-                ServiceFields { name: "App".to_string(), slug: "app".parse().unwrap(), config: Default::default() }
+                ServiceFields { name: "App".to_string(), slug: "app".parse().unwrap(), config: Default::default() },
             )
             .await
             .unwrap()
@@ -424,8 +438,10 @@ mod tests {
         let tree = tree(&store).await;
         store.create_variable(VariableScope::Service(tree.service), fields("PORT", false), Secret::new("1")).await.unwrap();
 
-        let duplicate = store.create_variable(VariableScope::Service(tree.service), fields("PORT", false), Secret::new("2")).await;
-        let other_scope = store.create_variable(VariableScope::Environment(tree.environment), fields("PORT", false), Secret::new("3")).await;
+        let duplicate =
+            store.create_variable(VariableScope::Service(tree.service), fields("PORT", false), Secret::new("2")).await;
+        let other_scope =
+            store.create_variable(VariableScope::Environment(tree.environment), fields("PORT", false), Secret::new("3")).await;
 
         assert!(matches!(duplicate, Err(StoreError::Conflict { field: "name", .. })), "{duplicate:?}");
         other_scope.unwrap();
@@ -438,7 +454,8 @@ mod tests {
         store.delete_service(tree.service).await.unwrap();
 
         let deleted = store.create_variable(VariableScope::Service(tree.service), fields("PORT", false), Secret::new("1")).await;
-        let missing = store.create_variable(VariableScope::Project(ProjectId::new()), fields("PORT", false), Secret::new("1")).await;
+        let missing =
+            store.create_variable(VariableScope::Project(ProjectId::new()), fields("PORT", false), Secret::new("1")).await;
         let listed = store.list_variables(VariableScope::Service(tree.service)).await;
 
         assert!(matches!(deleted, Err(StoreError::NotFound { entity: "service", .. })), "{deleted:?}");
@@ -522,10 +539,8 @@ mod tests {
     async fn deletes_a_variable() {
         let (_dir, store) = store().await;
         let tree = tree(&store).await;
-        let created = store
-            .create_variable(VariableScope::Service(tree.service), fields("PORT", false), Secret::new("1"))
-            .await
-            .unwrap();
+        let created =
+            store.create_variable(VariableScope::Service(tree.service), fields("PORT", false), Secret::new("1")).await.unwrap();
 
         store.delete_variable(created.id).await.unwrap();
 
@@ -547,7 +562,10 @@ mod tests {
         set(VariableScope::Environment(tree.environment), "LOG_LEVEL", "warn").await;
         set(VariableScope::Service(tree.service), "LOG_LEVEL", "debug").await;
         set(VariableScope::Service(other), "ONLY_OTHER", "x").await;
-        store.create_variable(VariableScope::Service(tree.service), fields("API_KEY", true), Secret::new("hunter2")).await.unwrap();
+        store
+            .create_variable(VariableScope::Service(tree.service), fields("API_KEY", true), Secret::new("hunter2"))
+            .await
+            .unwrap();
 
         let resolved: Vec<_> = store
             .resolve_service_variables(tree.service)
@@ -573,7 +591,7 @@ mod tests {
             .create_service(
                 environment,
                 ServiceKind::App,
-                ServiceFields { name: "Worker".to_string(), slug: "worker".parse().unwrap(), config: Default::default() }
+                ServiceFields { name: "Worker".to_string(), slug: "worker".parse().unwrap(), config: Default::default() },
             )
             .await
             .unwrap()

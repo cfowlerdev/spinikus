@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     audit::{AuditDetails, AuditEntry, NewAuditEntry},
-    id::{AuditEntryId, ProjectId}
+    id::{AuditEntryId, ProjectId},
 };
 
 use crate::{SqliteStore, StoreError, error::parse_column};
@@ -20,7 +20,7 @@ pub trait AuditLogRepository: Send + Sync {
         project_id: Option<ProjectId>,
         target_id: Option<&str>,
         before: Option<AuditEntryId>,
-        limit: u32
+        limit: u32,
     ) -> Result<Vec<AuditEntry>, StoreError>;
 }
 
@@ -39,7 +39,7 @@ struct AuditRow {
     target_id: Option<String>,
     project_id: Option<String>,
     details: String,
-    created_at: String
+    created_at: String,
 }
 
 impl TryFrom<AuditRow> for AuditEntry {
@@ -56,9 +56,9 @@ impl TryFrom<AuditRow> for AuditEntry {
             details: serde_json::from_str::<AuditDetails>(&row.details).map_err(|error| StoreError::InvalidRow {
                 entity: ENTITY,
                 column: "details",
-                problem: error.to_string()
+                problem: error.to_string(),
             })?,
-            created_at: parse_column(ENTITY, "created_at", &row.created_at)?
+            created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
         })
     }
 }
@@ -90,11 +90,13 @@ impl AuditLogRepository for SqliteStore {
         project_id: Option<ProjectId>,
         target_id: Option<&str>,
         before: Option<AuditEntryId>,
-        limit: u32
+        limit: u32,
     ) -> Result<Vec<AuditEntry>, StoreError> {
         // `~` sorts after every character used in IDs, so no cursor means "from the newest".
         let rows: Vec<AuditRow> = sqlx::query_as(concat!(
-            "SELECT ", columns!(), " FROM audit_log
+            "SELECT ",
+            columns!(),
+            " FROM audit_log
              WHERE (?1 IS NULL OR project_id = ?1) AND (?2 IS NULL OR target_id = ?2) AND id < ?3
              ORDER BY id DESC LIMIT ?4"
         ))
@@ -124,18 +126,15 @@ mod tests {
             action: action.parse().unwrap(),
             target_id: target_id.map(str::to_string),
             project_id,
-            details: json!({ "name": "API_KEY" }).as_object().unwrap().clone()
+            details: json!({ "name": "API_KEY" }).as_object().unwrap().clone(),
         }
     }
 
     #[tokio::test]
     async fn records_and_filters_entries_newest_first() {
         let (_dir, store) = store().await;
-        let project = store
-            .create_project(ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() })
-            .await
-            .unwrap()
-            .id;
+        let project =
+            store.create_project(ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() }).await.unwrap().id;
 
         let reveal = store.record_audit_entry(entry("variable.reveal", Some("var_1"), Some(project))).await.unwrap();
         let login = store.record_audit_entry(entry("session.create", None, None)).await.unwrap();

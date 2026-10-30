@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     id::{ServiceId, SourceId},
-    source::{GitSource, ImageSource, Source, SourceSpec}
+    source::{GitSource, ImageSource, Source, SourceSpec},
 };
 
 use crate::{SqliteStore, StoreError, error::parse_column};
@@ -36,7 +36,7 @@ struct SourceRow {
     image: Option<String>,
     revision: i64,
     created_at: String,
-    updated_at: String
+    updated_at: String,
 }
 
 impl TryFrom<SourceRow> for Source {
@@ -52,7 +52,7 @@ impl TryFrom<SourceRow> for Source {
                 return Err(StoreError::InvalidRow {
                     entity: ENTITY,
                     column: "type",
-                    problem: format!("columns do not match type `{other}`")
+                    problem: format!("columns do not match type `{other}`"),
                 });
             }
         };
@@ -63,7 +63,7 @@ impl TryFrom<SourceRow> for Source {
             spec,
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
-            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?
+            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
         })
     }
 }
@@ -71,10 +71,8 @@ impl TryFrom<SourceRow> for Source {
 /// The values for the type-specific columns: type, repo_url, branch, root_directory, image.
 fn columns(spec: &SourceSpec) -> (&'static str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
     match spec {
-        SourceSpec::Git(git) => {
-            ("git", Some(&git.repo_url), Some(&git.branch), git.root_directory.as_deref(), None)
-        }
-        SourceSpec::Image(image) => ("image", None, None, None, Some(&image.image))
+        SourceSpec::Git(git) => ("git", Some(&git.repo_url), Some(&git.branch), git.root_directory.as_deref(), None),
+        SourceSpec::Image(image) => ("image", None, None, None, Some(&image.image)),
     }
 }
 
@@ -89,7 +87,7 @@ impl SourceRepository for SqliteStore {
             "SELECT sources.id, sources.service_id, sources.type, repo_url, branch, root_directory, image,
                     sources.revision, sources.created_at, sources.updated_at
              FROM sources JOIN services ON services.id = sources.service_id
-             WHERE sources.service_id = ? AND services.deleted_at IS NULL"
+             WHERE sources.service_id = ? AND services.deleted_at IS NULL",
         )
         .bind(service_id.to_string())
         .fetch_optional(self.pool())
@@ -103,7 +101,7 @@ impl SourceRepository for SqliteStore {
         let row: Option<SourceRow> = sqlx::query_as(
             "INSERT INTO sources (id, service_id, type, repo_url, branch, root_directory, image)
              SELECT ?, id, ?, ?, ?, ?, ? FROM services WHERE id = ? AND deleted_at IS NULL
-             RETURNING id, service_id, type, repo_url, branch, root_directory, image, revision, created_at, updated_at"
+             RETURNING id, service_id, type, repo_url, branch, root_directory, image, revision, created_at, updated_at",
         )
         .bind(SourceId::new().to_string())
         .bind(kind)
@@ -118,13 +116,13 @@ impl SourceRepository for SqliteStore {
             StoreError::on_unique_violation(error, |_| StoreError::Conflict {
                 entity: ENTITY,
                 field: "service_id",
-                value: service_id.to_string()
+                value: service_id.to_string(),
             })
         })?;
 
         match row {
             Some(row) => row.try_into(),
-            None => Err(StoreError::NotFound { entity: "service", id: service_id.to_string() })
+            None => Err(StoreError::NotFound { entity: "service", id: service_id.to_string() }),
         }
     }
 
@@ -136,7 +134,7 @@ impl SourceRepository for SqliteStore {
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE service_id = ? AND revision = ?
                AND EXISTS (SELECT 1 FROM services WHERE id = sources.service_id AND deleted_at IS NULL)
-             RETURNING id, service_id, type, repo_url, branch, root_directory, image, revision, created_at, updated_at"
+             RETURNING id, service_id, type, repo_url, branch, root_directory, image, revision, created_at, updated_at",
         )
         .bind(kind)
         .bind(repo_url)
@@ -157,7 +155,7 @@ impl SourceRepository for SqliteStore {
                     entity: ENTITY,
                     id: service_id.to_string(),
                     expected: revision,
-                    actual: current.revision
+                    actual: current.revision,
                 })
             }
         }
@@ -167,7 +165,7 @@ impl SourceRepository for SqliteStore {
         let result = sqlx::query(
             "DELETE FROM sources
              WHERE service_id = ?
-               AND EXISTS (SELECT 1 FROM services WHERE id = sources.service_id AND deleted_at IS NULL)"
+               AND EXISTS (SELECT 1 FROM services WHERE id = sources.service_id AND deleted_at IS NULL)",
         )
         .bind(service_id.to_string())
         .execute(self.pool())
@@ -186,7 +184,7 @@ mod tests {
     use spinikus_core::{
         environment::{EnvironmentFields, EnvironmentKind},
         project::ProjectFields,
-        service::{ServiceFields, ServiceKind}
+        service::{ServiceFields, ServiceKind},
     };
 
     use super::*;
@@ -196,7 +194,7 @@ mod tests {
         SourceSpec::Git(GitSource {
             repo_url: "https://github.com/acme/web.git".to_string(),
             branch: branch.to_string(),
-            root_directory: root_directory.map(str::to_string)
+            root_directory: root_directory.map(str::to_string),
         })
     }
 

@@ -18,7 +18,7 @@ pub struct Source {
     pub spec: SourceSpec,
     pub revision: i64,
     pub created_at: Timestamp,
-    pub updated_at: Timestamp
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,7 +27,7 @@ pub enum SourceSpec {
     /// Build from a Git repository.
     Git(GitSource),
     /// Deploy a prebuilt image.
-    Image(ImageSource)
+    Image(ImageSource),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,13 +36,13 @@ pub struct GitSource {
     pub repo_url: String,
     pub branch: String,
     /// Directory inside the repo to build from, for monorepos. `None` means the repo root.
-    pub root_directory: Option<String>
+    pub root_directory: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageSource {
     /// Image reference, such as `ghcr.io/acme/web:1.4` or `postgres:17`.
-    pub image: String
+    pub image: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -50,14 +50,14 @@ pub struct ImageSource {
 pub struct SourceError {
     pub field: &'static str,
     pub value: String,
-    pub problem: &'static str
+    pub problem: &'static str,
 }
 
 impl SourceSpec {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Git(_) => "git",
-            Self::Image(_) => "image"
+            Self::Image(_) => "image",
         }
     }
 
@@ -70,10 +70,10 @@ impl SourceSpec {
                 check("branch", &git.branch, branch_problem)?;
                 match &git.root_directory {
                     Some(dir) => check("root_directory", dir, root_directory_problem),
-                    None => Ok(())
+                    None => Ok(()),
                 }
             }
-            Self::Image(image) => check("image", &image.image, image_problem)
+            Self::Image(image) => check("image", &image.image, image_problem),
         }
     }
 }
@@ -91,7 +91,7 @@ fn check(field: &'static str, value: &str, problem: fn(&str) -> Option<&'static 
 
     match problem {
         Some(problem) => Err(SourceError { field, value: value.to_string(), problem }),
-        None => Ok(())
+        None => Ok(()),
     }
 }
 
@@ -149,7 +149,7 @@ mod tests {
         SourceSpec::Git(GitSource {
             repo_url: repo_url.to_string(),
             branch: branch.to_string(),
-            root_directory: root_directory.map(str::to_string)
+            root_directory: root_directory.map(str::to_string),
         })
     }
 
@@ -167,7 +167,7 @@ mod tests {
             "https://github.com/acme/web.git",
             "http://gitea.lan/acme/web",
             "ssh://git@gitlab.com:2222/acme/web.git",
-            "git@github.com:acme/web.git"
+            "git@github.com:acme/web.git",
         ] {
             assert_eq!(git(url, "main", None).validate(), Ok(()), "{url}");
         }
@@ -175,7 +175,9 @@ mod tests {
 
     #[test]
     fn rejects_bad_repo_urls() {
-        for url in ["", "github.com/acme/web", "https://github.com", "ftp://host/repo", "@host:repo", "git@host:", "https://host/a b"] {
+        for url in
+            ["", "github.com/acme/web", "https://github.com", "ftp://host/repo", "@host:repo", "git@host:", "https://host/a b"]
+        {
             assert_eq!(invalid_field(git(url, "main", None)), "repo_url", "{url}");
         }
     }
@@ -215,7 +217,10 @@ mod tests {
         let spec = git("https://h/r", "main", None);
         let json = serde_json::to_value(&spec).unwrap();
 
-        assert_eq!(json, serde_json::json!({ "type": "git", "repo_url": "https://h/r", "branch": "main", "root_directory": null }));
+        assert_eq!(
+            json,
+            serde_json::json!({ "type": "git", "repo_url": "https://h/r", "branch": "main", "root_directory": null })
+        );
         assert_eq!(serde_json::from_value::<SourceSpec>(json).unwrap(), spec);
     }
 }

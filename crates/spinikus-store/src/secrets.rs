@@ -12,11 +12,11 @@ use std::collections::HashMap;
 
 use base64::{
     Engine,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
-    aead::{Aead, Generate, Payload}
+    aead::{Aead, Generate, Payload},
 };
 use sha2::{Digest, Sha256};
 use spinikus_core::{id::DataKeyId, secret::Secret};
@@ -39,14 +39,14 @@ pub enum SecretsError {
     UnknownDataKey(DataKeyId),
     /// Authentication failed: the wrong key or context, or a tampered ciphertext.
     #[error("failed to decrypt a value sealed with data key `{0}`")]
-    Decrypt(DataKeyId)
+    Decrypt(DataKeyId),
 }
 
 /// The key that wraps every data key. It comes from `spinikus.toml`, an environment variable
 /// or a key file, never from the database.
 pub struct MasterKey {
     key: Zeroizing<[u8; KEY_LEN]>,
-    id: String
+    id: String,
 }
 
 impl MasterKey {
@@ -91,14 +91,14 @@ impl std::fmt::Debug for MasterKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sealed {
     pub key_id: DataKeyId,
-    pub ciphertext: Vec<u8>
+    pub ciphertext: Vec<u8>,
 }
 
 /// The unwrapped data keys, held in memory for the life of the process.
 pub struct Keyring {
     /// The newest data key, used to seal new values.
     active: DataKeyId,
-    keys: HashMap<DataKeyId, XChaCha20Poly1305>
+    keys: HashMap<DataKeyId, XChaCha20Poly1305>,
 }
 
 impl Keyring {

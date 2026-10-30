@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use jiff::Timestamp;
 use spinikus_core::{
     id::JobId,
-    job::{self, Job, JobKind, JobPayload, JobStatus, NewJob}
+    job::{self, Job, JobKind, JobPayload, JobStatus, NewJob},
 };
 use sqlx::SqliteConnection;
 
@@ -74,7 +74,7 @@ struct JobRow {
     last_error: Option<String>,
     created_at: String,
     updated_at: String,
-    finished_at: Option<String>
+    finished_at: Option<String>,
 }
 
 impl TryFrom<JobRow> for Job {
@@ -87,7 +87,7 @@ impl TryFrom<JobRow> for Job {
             payload: serde_json::from_str::<JobPayload>(&row.payload).map_err(|error| StoreError::InvalidRow {
                 entity: ENTITY,
                 column: "payload",
-                problem: error.to_string()
+                problem: error.to_string(),
             })?,
             status: parse_column(ENTITY, "status", &row.status)?,
             attempts: row.attempts,
@@ -99,7 +99,7 @@ impl TryFrom<JobRow> for Job {
             last_error: row.last_error,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
             updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
-            finished_at: row.finished_at.map(|at| parse_column(ENTITY, "finished_at", &at)).transpose()?
+            finished_at: row.finished_at.map(|at| parse_column(ENTITY, "finished_at", &at)).transpose()?,
         })
     }
 }
@@ -129,7 +129,7 @@ async fn fetch(conn: &mut SqliteConnection, id: JobId) -> Result<Job, StoreError
 async fn explain_miss(conn: &mut SqliteConnection, id: JobId, otherwise: StoreError) -> StoreError {
     match fetch(conn, id).await {
         Ok(_) => otherwise,
-        Err(error) => error
+        Err(error) => error,
     }
 }
 
@@ -139,7 +139,9 @@ impl JobRepository for SqliteStore {
         let mut tx = self.begin_write().await?;
         let row: Option<JobRow> = sqlx::query_as(concat!(
             "INSERT INTO jobs (id, kind, payload, status, max_attempts, run_at, dedupe_key)
-             VALUES (?, ?, ?, 'queued', ?, coalesce(?, ", now!(), "), ?)
+             VALUES (?, ?, ?, 'queued', ?, coalesce(?, ",
+            now!(),
+            "), ?)
              ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'running') DO NOTHING
              RETURNING ",
             columns!()
@@ -157,7 +159,9 @@ impl JobRepository for SqliteStore {
             Some(row) => row,
             None => {
                 sqlx::query_as(concat!(
-                    "SELECT ", columns!(), " FROM jobs WHERE dedupe_key = ? AND status IN ('queued', 'running')"
+                    "SELECT ",
+                    columns!(),
+                    " FROM jobs WHERE dedupe_key = ? AND status IN ('queued', 'running')"
                 ))
                 .bind(&new.dedupe_key)
                 .fetch_one(&mut *tx)
@@ -175,7 +179,9 @@ impl JobRepository for SqliteStore {
     async fn list_jobs(&self, status: Option<JobStatus>, before: Option<JobId>, limit: u32) -> Result<Vec<Job>, StoreError> {
         // `~` sorts after every character used in IDs, so no cursor means "from the newest".
         let rows: Vec<JobRow> = sqlx::query_as(concat!(
-            "SELECT ", columns!(), " FROM jobs WHERE (?1 IS NULL OR status = ?1) AND id < ?2 ORDER BY id DESC LIMIT ?3"
+            "SELECT ",
+            columns!(),
+            " FROM jobs WHERE (?1 IS NULL OR status = ?1) AND id < ?2 ORDER BY id DESC LIMIT ?3"
         ))
         .bind(status.map(JobStatus::as_str))
         .bind(before.map(|id| id.to_string()).unwrap_or_else(|| "~".to_string()))
@@ -193,8 +199,14 @@ impl JobRepository for SqliteStore {
         sqlx::query(concat!(
             "UPDATE jobs
              SET status = 'failed', last_error = 'the lease ran out on the last attempt', locked_by = NULL,
-                 locked_until = NULL, finished_at = ", now!(), ", updated_at = ", now!(), "
-             WHERE status = 'running' AND locked_until < ", now!(), " AND attempts >= max_attempts"
+                 locked_until = NULL, finished_at = ",
+            now!(),
+            ", updated_at = ",
+            now!(),
+            "
+             WHERE status = 'running' AND locked_until < ",
+            now!(),
+            " AND attempts >= max_attempts"
         ))
         .execute(&mut *tx)
         .await?;
@@ -203,11 +215,17 @@ impl JobRepository for SqliteStore {
             "UPDATE jobs
              SET last_error = CASE WHEN status = 'running' THEN 'the lease ran out' ELSE last_error END,
                  status = 'running', attempts = attempts + 1, locked_by = ?,
-                 locked_until = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?), updated_at = ", now!(), "
+                 locked_until = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?), updated_at = ",
+            now!(),
+            "
              WHERE id = (
                  SELECT id FROM jobs
                  WHERE kind IN (SELECT value FROM json_each(?))
-                   AND ((status = 'queued' AND run_at <= ", now!(), ") OR (status = 'running' AND locked_until < ", now!(), "))
+                   AND ((status = 'queued' AND run_at <= ",
+            now!(),
+            ") OR (status = 'running' AND locked_until < ",
+            now!(),
+            "))
                  ORDER BY run_at, id
                  LIMIT 1
              )
@@ -227,7 +245,9 @@ impl JobRepository for SqliteStore {
     async fn extend_job_lease(&self, id: JobId, worker: &str, lease: Duration) -> Result<Job, StoreError> {
         let mut conn = self.pool().acquire().await?;
         let row: Option<JobRow> = sqlx::query_as(concat!(
-            "UPDATE jobs SET locked_until = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?), updated_at = ", now!(), "
+            "UPDATE jobs SET locked_until = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?), updated_at = ",
+            now!(),
+            "
              WHERE id = ? AND status = 'running' AND locked_by = ?
              RETURNING ",
             columns!()
@@ -240,7 +260,7 @@ impl JobRepository for SqliteStore {
 
         match row {
             Some(row) => row.try_into(),
-            None => Err(explain_miss(&mut conn, id, lease_not_held(id)).await)
+            None => Err(explain_miss(&mut conn, id, lease_not_held(id)).await),
         }
     }
 
@@ -248,8 +268,12 @@ impl JobRepository for SqliteStore {
         let mut conn = self.pool().acquire().await?;
         let row: Option<JobRow> = sqlx::query_as(concat!(
             "UPDATE jobs
-             SET status = 'succeeded', locked_by = NULL, locked_until = NULL, finished_at = ", now!(), ",
-                 updated_at = ", now!(), "
+             SET status = 'succeeded', locked_by = NULL, locked_until = NULL, finished_at = ",
+            now!(),
+            ",
+                 updated_at = ",
+            now!(),
+            "
              WHERE id = ? AND status = 'running' AND locked_by = ?
              RETURNING ",
             columns!()
@@ -261,7 +285,7 @@ impl JobRepository for SqliteStore {
 
         match row {
             Some(row) => row.try_into(),
-            None => Err(explain_miss(&mut conn, id, lease_not_held(id)).await)
+            None => Err(explain_miss(&mut conn, id, lease_not_held(id)).await),
         }
     }
 
@@ -276,7 +300,9 @@ impl JobRepository for SqliteStore {
             sqlx::query(concat!(
                 "UPDATE jobs
                  SET status = 'queued', run_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?), last_error = ?,
-                     locked_by = NULL, locked_until = NULL, updated_at = ", now!(), "
+                     locked_by = NULL, locked_until = NULL, updated_at = ",
+                now!(),
+                "
                  WHERE id = ?"
             ))
             .bind(plus(job::retry_delay(job.attempts)))
@@ -288,7 +314,11 @@ impl JobRepository for SqliteStore {
             sqlx::query(concat!(
                 "UPDATE jobs
                  SET status = 'failed', last_error = ?, locked_by = NULL, locked_until = NULL,
-                     finished_at = ", now!(), ", updated_at = ", now!(), "
+                     finished_at = ",
+                now!(),
+                ", updated_at = ",
+                now!(),
+                "
                  WHERE id = ?"
             ))
             .bind(error)
@@ -305,7 +335,11 @@ impl JobRepository for SqliteStore {
     async fn cancel_job(&self, id: JobId) -> Result<Job, StoreError> {
         let mut conn = self.pool().acquire().await?;
         let row: Option<JobRow> = sqlx::query_as(concat!(
-            "UPDATE jobs SET status = 'canceled', finished_at = ", now!(), ", updated_at = ", now!(), "
+            "UPDATE jobs SET status = 'canceled', finished_at = ",
+            now!(),
+            ", updated_at = ",
+            now!(),
+            "
              WHERE id = ? AND status = 'queued'
              RETURNING ",
             columns!()
@@ -317,17 +351,16 @@ impl JobRepository for SqliteStore {
         match row {
             Some(row) => row.try_into(),
             None => {
-                let rejected = StoreError::Rejected { entity: ENTITY, id: id.to_string(), problem: "only a queued job can be canceled" };
+                let rejected =
+                    StoreError::Rejected { entity: ENTITY, id: id.to_string(), problem: "only a queued job can be canceled" };
                 Err(explain_miss(&mut conn, id, rejected).await)
             }
         }
     }
 
     async fn delete_finished_jobs(&self, before: Timestamp) -> Result<u64, StoreError> {
-        let result = sqlx::query("DELETE FROM jobs WHERE finished_at < ?")
-            .bind(format_timestamp(before))
-            .execute(self.pool())
-            .await?;
+        let result =
+            sqlx::query("DELETE FROM jobs WHERE finished_at < ?").bind(format_timestamp(before)).execute(self.pool()).await?;
         Ok(result.rows_affected())
     }
 }
@@ -354,7 +387,7 @@ mod tests {
         let query = match column {
             "run_at" => "UPDATE jobs SET run_at = '2000-01-01T00:00:00.000Z' WHERE id = ?",
             "locked_until" => "UPDATE jobs SET locked_until = '2000-01-01T00:00:00.000Z' WHERE id = ?",
-            _ => unreachable!()
+            _ => unreachable!(),
         };
         sqlx::query(query).bind(id.to_string()).execute(store.pool()).await.unwrap();
     }

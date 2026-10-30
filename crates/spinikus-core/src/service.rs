@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     id::{EnvironmentId, ServiceId},
     slug::Slug,
-    text::impl_text
+    text::impl_text,
 };
 
 /// Kind-specific settings, stored as a JSON object. Typed configs per kind come later.
@@ -23,7 +23,7 @@ pub struct Service {
     pub config: ServiceConfig,
     pub revision: i64,
     pub created_at: Timestamp,
-    pub updated_at: Timestamp
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -31,7 +31,7 @@ pub struct Service {
 pub enum ServiceKind {
     App,
     Database,
-    Template
+    Template,
 }
 
 impl ServiceKind {
@@ -41,7 +41,7 @@ impl ServiceKind {
         match self {
             Self::App => "app",
             Self::Database => "database",
-            Self::Template => "template"
+            Self::Template => "template",
         }
     }
 }
@@ -53,7 +53,7 @@ impl_text!(ServiceKind, "service kind");
 pub struct ServiceFields {
     pub name: String,
     pub slug: Slug,
-    pub config: ServiceConfig
+    pub config: ServiceConfig,
 }
 
 #[cfg(test)]

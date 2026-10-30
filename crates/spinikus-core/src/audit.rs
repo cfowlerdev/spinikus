@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::{
     actor::Actor,
     id::{ApiTokenId, AuditEntryId, ProjectId},
-    text::dotted_name_problem
+    text::dotted_name_problem,
 };
 
 /// Extra facts about an action, as a JSON object. Never secret values.
@@ -27,7 +27,7 @@ pub struct AuditEntry {
     /// The project the action happened in, so a project's admins can read its part of the log.
     pub project_id: Option<ProjectId>,
     pub details: AuditDetails,
-    pub created_at: Timestamp
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub struct NewAuditEntry {
     pub action: AuditAction,
     pub target_id: Option<String>,
     pub project_id: Option<ProjectId>,
-    pub details: AuditDetails
+    pub details: AuditDetails,
 }
 
 /// What was done, as `entity.verb`: lowercase letters, digits and underscores in dot-separated
@@ -49,7 +49,7 @@ pub struct AuditAction(String);
 #[error("`{value}` is not a valid audit action: {problem}")]
 pub struct AuditActionError {
     value: String,
-    problem: &'static str
+    problem: &'static str,
 }
 
 impl AuditAction {
@@ -64,7 +64,7 @@ impl FromStr for AuditAction {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match dotted_name_problem(value) {
             Some(problem) => Err(AuditActionError { value: value.to_string(), problem }),
-            None => Ok(Self(value.to_string()))
+            None => Ok(Self(value.to_string())),
         }
     }
 }

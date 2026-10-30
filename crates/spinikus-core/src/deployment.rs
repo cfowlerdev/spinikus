@@ -13,7 +13,7 @@ use crate::{
     service::{ServiceConfig, ServiceKind},
     source::SourceSpec,
     text::impl_text,
-    variable::ResolvedVariable
+    variable::ResolvedVariable,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -33,7 +33,7 @@ pub struct Deployment {
     /// The image that runs, once known: the source image, or the result of the build.
     pub image: Option<String>,
     pub created_at: Timestamp,
-    pub updated_at: Timestamp
+    pub updated_at: Timestamp,
 }
 
 /// What a new deployment starts from. The ID, status and timestamps are set by the store.
@@ -49,7 +49,7 @@ pub struct NewDeployment {
     /// The service's variables, resolved when the deployment is created (or copied from the
     /// target of a rollback). Stored encrypted, apart from the deployment, and read back with
     /// `DeploymentRepository::deployment_variables`.
-    pub variables: Vec<ResolvedVariable>
+    pub variables: Vec<ResolvedVariable>,
 }
 
 /// The service's settings as they were when the deployment was created, so later
@@ -57,7 +57,7 @@ pub struct NewDeployment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentSnapshot {
     pub source: SourceSpec,
-    pub config: ServiceConfig
+    pub config: ServiceConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -68,7 +68,7 @@ pub enum DeploymentTrigger {
     /// Started by a Git webhook.
     GitPush,
     /// Redeploys an earlier deployment's image and snapshot.
-    Rollback
+    Rollback,
 }
 
 impl DeploymentTrigger {
@@ -78,7 +78,7 @@ impl DeploymentTrigger {
         match self {
             Self::Manual => "manual",
             Self::GitPush => "git_push",
-            Self::Rollback => "rollback"
+            Self::Rollback => "rollback",
         }
     }
 }
@@ -91,7 +91,7 @@ pub enum DeploymentStrategy {
     BlueGreen,
     /// Stop the old containers before starting the new ones, accepting brief downtime.
     /// Used when two containers must not share a volume.
-    Recreate
+    Recreate,
 }
 
 impl DeploymentStrategy {
@@ -100,7 +100,7 @@ impl DeploymentStrategy {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BlueGreen => "blue_green",
-            Self::Recreate => "recreate"
+            Self::Recreate => "recreate",
         }
     }
 
@@ -110,7 +110,7 @@ impl DeploymentStrategy {
         match kind {
             ServiceKind::Database => Self::Recreate,
             ServiceKind::App | ServiceKind::Template if has_volumes => Self::Recreate,
-            ServiceKind::App | ServiceKind::Template => Self::BlueGreen
+            ServiceKind::App | ServiceKind::Template => Self::BlueGreen,
         }
     }
 }
@@ -128,7 +128,7 @@ pub struct DeploymentEvent {
     pub to: DeploymentStatus,
     pub reason: Option<EndReason>,
     pub actor: Actor,
-    pub created_at: Timestamp
+    pub created_at: Timestamp,
 }
 
 #[cfg(test)]

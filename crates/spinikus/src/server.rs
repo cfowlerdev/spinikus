@@ -25,9 +25,7 @@ pub async fn migrate(config: &SpinikusConfig) -> anyhow::Result<()> {
 /// Connects to the database and applies any pending migrations.
 async fn open_database(config: &SpinikusConfig) -> anyhow::Result<SqlitePool> {
     let path = config.database_path();
-    let pool = spinikus_store::connect(&path)
-        .await
-        .with_context(|| format!("Failed to open database at {}", path.display()))?;
+    let pool = spinikus_store::connect(&path).await.with_context(|| format!("Failed to open database at {}", path.display()))?;
 
     spinikus_store::migrate(&pool).await.context("Failed to apply database migrations")?;
     tracing::info!(path = %path.display(), "Database ready");

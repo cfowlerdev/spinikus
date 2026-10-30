@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     id::{DeploymentId, InstanceId, ServerId, ServiceId},
-    text::impl_text
+    text::impl_text,
 };
 
 /// A machine managed by Spinikus. Its name is set by users; everything under
@@ -21,7 +21,7 @@ pub struct Server {
     pub revision: i64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
-    pub revoked_at: Option<Timestamp>
+    pub revoked_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -33,7 +33,7 @@ pub enum ServerStatus {
     /// The agent connected before but is not connected now.
     Disconnected,
     /// Blocked: its agent can no longer connect, even with an unexpired certificate.
-    Revoked
+    Revoked,
 }
 
 impl ServerStatus {
@@ -44,7 +44,7 @@ impl ServerStatus {
             Self::Pending => "pending",
             Self::Connected => "connected",
             Self::Disconnected => "disconnected",
-            Self::Revoked => "revoked"
+            Self::Revoked => "revoked",
         }
     }
 
@@ -55,7 +55,7 @@ impl ServerStatus {
             (true, _) => Self::Revoked,
             (false, None) => Self::Pending,
             (false, Some(true)) => Self::Connected,
-            (false, Some(false)) => Self::Disconnected
+            (false, Some(false)) => Self::Disconnected,
         }
     }
 }
@@ -63,7 +63,7 @@ impl ServerStatus {
 /// The fields a user sets when creating a server, or replaces when updating one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerFields {
-    pub name: String
+    pub name: String,
 }
 
 /// Sent by the agent in `Hello` each time it connects.
@@ -71,7 +71,7 @@ pub struct ServerFields {
 pub struct AgentInfo {
     pub agent_version: String,
     pub protocol_version: u32,
-    pub facts: ServerFacts
+    pub facts: ServerFacts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ pub struct ServerFacts {
     pub os: String,
     pub arch: String,
     pub cpu_count: u32,
-    pub memory_bytes: u64
+    pub memory_bytes: u64,
 }
 
 /// A container as last reported by the agent on its server. Observed state only:
@@ -92,7 +92,7 @@ pub struct Instance {
     #[serde(flatten)]
     pub observed: ObservedInstance,
     /// When the agent last reported this container.
-    pub reported_at: Timestamp
+    pub reported_at: Timestamp,
 }
 
 /// One container in an agent's `StateReport`. The service and deployment come from
@@ -107,7 +107,7 @@ pub struct ObservedInstance {
     pub health: InstanceHealth,
     /// How often the runtime has restarted the container, for spotting crash loops.
     pub restart_count: u32,
-    pub started_at: Option<Timestamp>
+    pub started_at: Option<Timestamp>,
 }
 
 /// Container states, following Docker's.
@@ -120,7 +120,7 @@ pub enum InstanceStatus {
     Restarting,
     Removing,
     Exited,
-    Dead
+    Dead,
 }
 
 impl InstanceStatus {
@@ -135,7 +135,7 @@ impl InstanceStatus {
             Self::Restarting => "restarting",
             Self::Removing => "removing",
             Self::Exited => "exited",
-            Self::Dead => "dead"
+            Self::Dead => "dead",
         }
     }
 }
@@ -147,7 +147,7 @@ pub enum InstanceHealth {
     None,
     Starting,
     Healthy,
-    Unhealthy
+    Unhealthy,
 }
 
 impl InstanceHealth {
@@ -158,7 +158,7 @@ impl InstanceHealth {
             Self::None => "none",
             Self::Starting => "starting",
             Self::Healthy => "healthy",
-            Self::Unhealthy => "unhealthy"
+            Self::Unhealthy => "unhealthy",
         }
     }
 }

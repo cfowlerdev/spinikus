@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::{
     domain::Hostname,
     id::{AcmeAccountId, CertificateId},
-    secret::Secret
+    secret::Secret,
 };
 
 /// A certificate and its chain. The private key is stored encrypted and read separately.
@@ -21,7 +21,7 @@ pub struct Certificate {
     pub not_after: Timestamp,
     /// The ACME account that issued it; `None` for an uploaded certificate.
     pub acme_account_id: Option<AcmeAccountId>,
-    pub created_at: Timestamp
+    pub created_at: Timestamp,
 }
 
 impl Certificate {
@@ -39,7 +39,7 @@ pub struct NewCertificate {
     pub private_key_pem: Secret,
     pub not_before: Timestamp,
     pub not_after: Timestamp,
-    pub acme_account_id: Option<AcmeAccountId>
+    pub acme_account_id: Option<AcmeAccountId>,
 }
 
 /// An account with an ACME certificate authority, such as Let's Encrypt. Its credentials
@@ -49,7 +49,7 @@ pub struct AcmeAccount {
     pub id: AcmeAccountId,
     pub directory_url: String,
     pub email: String,
-    pub created_at: Timestamp
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +57,7 @@ pub struct NewAcmeAccount {
     pub directory_url: String,
     pub email: String,
     /// The ACME client's serialized account credentials.
-    pub credentials: Secret
+    pub credentials: Secret,
 }
 
 #[cfg(test)]
@@ -73,7 +73,7 @@ mod tests {
             not_before: Timestamp::UNIX_EPOCH,
             not_after: Timestamp::MAX,
             acme_account_id: None,
-            created_at: Timestamp::UNIX_EPOCH
+            created_at: Timestamp::UNIX_EPOCH,
         };
 
         for covered in ["example.com", "www.example.com", "*.example.com"] {

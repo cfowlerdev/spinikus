@@ -26,14 +26,14 @@ pub struct Domain {
     pub certificate_id: Option<CertificateId>,
     pub revision: i64,
     pub created_at: Timestamp,
-    pub updated_at: Timestamp
+    pub updated_at: Timestamp,
 }
 
 /// The fields a user sets when creating a domain, or replaces when updating one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainFields {
     pub hostname: Hostname,
-    pub redirect_to: Option<DomainId>
+    pub redirect_to: Option<DomainId>,
 }
 
 /// A DNS hostname, such as `app.example.com`, or a wildcard covering one level of
@@ -46,7 +46,7 @@ pub struct Hostname(String);
 #[error("`{value}` is not a valid hostname: {problem}")]
 pub struct HostnameError {
     value: String,
-    problem: &'static str
+    problem: &'static str,
 }
 
 impl Hostname {
@@ -67,7 +67,7 @@ impl Hostname {
         }
         match (self.0.strip_prefix("*."), hostname.0.split_once('.')) {
             (Some(suffix), Some((label, rest))) => label != "*" && rest == suffix,
-            _ => false
+            _ => false,
         }
     }
 }
@@ -79,7 +79,7 @@ impl FromStr for Hostname {
         let normalized = value.strip_suffix('.').unwrap_or(value).to_ascii_lowercase();
         let (wildcard, name) = match normalized.strip_prefix("*.") {
             Some(name) => (true, name),
-            None => (false, normalized.as_str())
+            None => (false, normalized.as_str()),
         };
         let labels: Vec<&str> = name.split('.').collect();
 
@@ -108,7 +108,7 @@ impl FromStr for Hostname {
         match problem {
             Some(problem) => Err(HostnameError { value: value.to_string(), problem }),
             None if wildcard => Ok(Self(format!("*.{name}"))),
-            None => Ok(Self(name.to_string()))
+            None => Ok(Self(name.to_string())),
         }
     }
 }
@@ -147,7 +147,7 @@ mod tests {
             ("App.Example.COM.", "app.example.com"),
             ("*.example.com", "*.example.com"),
             ("xn--bcher-kva.example", "xn--bcher-kva.example"),
-            ("a-1.b2.co", "a-1.b2.co")
+            ("a-1.b2.co", "a-1.b2.co"),
         ];
         for (input, expected) in cases {
             assert_eq!(input.parse::<Hostname>().map(|host| host.to_string()), Ok(expected.to_string()), "{input}");
@@ -158,9 +158,23 @@ mod tests {
     fn rejects_invalid_hostnames() {
         let too_long = format!("{}.com", vec!["a".repeat(63); 4].join("."));
         for input in [
-            "", ".", "localhost", "*.com", "a..com", ".example.com", "-a.com", "a-.com", "a_b.com", "a b.com",
-            "*foo.example.com", "app.*.example.com", "*.*.example.com", "192.168.1.1", "bücher.example",
-            &format!("{}.com", "a".repeat(64)), &too_long
+            "",
+            ".",
+            "localhost",
+            "*.com",
+            "a..com",
+            ".example.com",
+            "-a.com",
+            "a-.com",
+            "a_b.com",
+            "a b.com",
+            "*foo.example.com",
+            "app.*.example.com",
+            "*.*.example.com",
+            "192.168.1.1",
+            "bücher.example",
+            &format!("{}.com", "a".repeat(64)),
+            &too_long,
         ] {
             assert!(input.parse::<Hostname>().is_err(), "{input:?} should be rejected");
         }

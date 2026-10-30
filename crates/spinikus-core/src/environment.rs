@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     id::{EnvironmentId, ProjectId},
-    slug::Slug
+    slug::Slug,
 };
 
 /// A stage of a project, such as production or the preview for one pull request.
@@ -20,7 +20,7 @@ pub struct Environment {
     pub kind: EnvironmentKind,
     pub revision: i64,
     pub created_at: Timestamp,
-    pub updated_at: Timestamp
+    pub updated_at: Timestamp,
 }
 
 /// What the environment is for. A project has at most one production environment
@@ -30,7 +30,7 @@ pub struct Environment {
 pub enum EnvironmentKind {
     Production,
     Staging,
-    Preview { pr_number: u32 }
+    Preview { pr_number: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -40,7 +40,7 @@ pub enum EnvironmentKindError {
     #[error("a preview environment needs a pull request number")]
     MissingPrNumber,
     #[error("only preview environments have a pull request number")]
-    UnexpectedPrNumber
+    UnexpectedPrNumber,
 }
 
 impl EnvironmentKind {
@@ -48,14 +48,14 @@ impl EnvironmentKind {
         match self {
             Self::Production => "production",
             Self::Staging => "staging",
-            Self::Preview { .. } => "preview"
+            Self::Preview { .. } => "preview",
         }
     }
 
     pub fn pr_number(self) -> Option<u32> {
         match self {
             Self::Preview { pr_number } => Some(pr_number),
-            _ => None
+            _ => None,
         }
     }
 
@@ -67,7 +67,7 @@ impl EnvironmentKind {
             ("production" | "staging", Some(_)) => Err(EnvironmentKindError::UnexpectedPrNumber),
             ("production", None) => Ok(Self::Production),
             ("staging", None) => Ok(Self::Staging),
-            (other, _) => Err(EnvironmentKindError::Unknown(other.to_string()))
+            (other, _) => Err(EnvironmentKindError::Unknown(other.to_string())),
         }
     }
 }
@@ -76,7 +76,7 @@ impl EnvironmentKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvironmentFields {
     pub name: String,
-    pub slug: Slug
+    pub slug: Slug,
 }
 
 #[cfg(test)]

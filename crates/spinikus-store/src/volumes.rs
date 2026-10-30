@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     id::{ServiceId, VolumeId},
-    volume::{Volume, VolumeFields}
+    volume::{Volume, VolumeFields},
 };
 
 use crate::{ServiceRepository, SqliteStore, StoreError, error::parse_column};
@@ -40,7 +40,7 @@ struct VolumeRow {
     mount_path: String,
     revision: i64,
     created_at: String,
-    updated_at: String
+    updated_at: String,
 }
 
 impl TryFrom<VolumeRow> for Volume {
@@ -54,7 +54,7 @@ impl TryFrom<VolumeRow> for Volume {
             mount_path: parse_column(ENTITY, "mount_path", &row.mount_path)?,
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
-            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?
+            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
         })
     }
 }
@@ -94,7 +94,7 @@ impl VolumeRepository for SqliteStore {
 
         match row {
             Some(row) => row.try_into(),
-            None => Err(StoreError::NotFound { entity: "service", id: service_id.to_string() })
+            None => Err(StoreError::NotFound { entity: "service", id: service_id.to_string() }),
         }
     }
 
@@ -141,7 +141,12 @@ impl VolumeRepository for SqliteStore {
             // Nothing matched: either the volume is gone or it has moved on to a newer revision.
             None => {
                 let current = self.get_volume(id).await?;
-                Err(StoreError::RevisionMismatch { entity: ENTITY, id: id.to_string(), expected: revision, actual: current.revision })
+                Err(StoreError::RevisionMismatch {
+                    entity: ENTITY,
+                    id: id.to_string(),
+                    expected: revision,
+                    actual: current.revision,
+                })
             }
         }
     }
@@ -162,7 +167,7 @@ mod tests {
     use spinikus_core::{
         environment::{EnvironmentFields, EnvironmentKind},
         project::ProjectFields,
-        service::{ServiceFields, ServiceKind}
+        service::{ServiceFields, ServiceKind},
     };
 
     use super::*;
@@ -231,7 +236,10 @@ mod tests {
         let stale = store.update_volume(volume.id, 1, fields("x", "/x")).await;
         let missing = store.update_volume(VolumeId::new(), 1, fields("x", "/x")).await;
 
-        assert_eq!((updated.name.as_str(), updated.mount_path.as_str(), updated.revision), ("pgdata", "/var/lib/postgresql/data", 2));
+        assert_eq!(
+            (updated.name.as_str(), updated.mount_path.as_str(), updated.revision),
+            ("pgdata", "/var/lib/postgresql/data", 2)
+        );
         assert!(matches!(stale, Err(StoreError::RevisionMismatch { expected: 1, actual: 2, .. })), "{stale:?}");
         assert!(matches!(missing, Err(StoreError::NotFound { .. })), "{missing:?}");
     }

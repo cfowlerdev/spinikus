@@ -15,11 +15,11 @@ pub mod servers;
 pub mod services;
 pub mod sessions;
 pub mod sources;
+#[cfg(test)]
+mod test_support;
 pub mod users;
 pub mod variables;
 pub mod volumes;
-#[cfg(test)]
-mod test_support;
 
 pub use api_tokens::ApiTokenRepository;
 pub use audit_log::AuditLogRepository;

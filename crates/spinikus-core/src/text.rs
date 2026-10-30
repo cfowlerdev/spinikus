@@ -6,7 +6,7 @@ use thiserror::Error;
 #[error("unknown {what} `{value}`")]
 pub struct UnknownValue {
     what: &'static str,
-    value: String
+    value: String,
 }
 
 impl UnknownValue {
