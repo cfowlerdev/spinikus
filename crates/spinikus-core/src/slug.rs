@@ -23,6 +23,22 @@ impl Slug {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// A slug made from a display name, such as `my-app` from "My App!": ASCII letters and
+    /// digits are kept and lowercased, and every run of anything else becomes one hyphen.
+    /// `None` if the name has no ASCII letters or digits.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let mut slug = String::new();
+        for word in name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|word| !word.is_empty()) {
+            if !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push_str(&word.to_ascii_lowercase());
+        }
+        slug.truncate(MAX_LEN);
+        let slug = slug.trim_end_matches('-');
+        slug.parse().ok()
+    }
 }
 
 impl FromStr for Slug {
@@ -86,6 +102,17 @@ mod tests {
         for value in ["", "My-App", "my_app", "my app", "-web", "web-", "my--app", "café", &too_long] {
             assert!(value.parse::<Slug>().is_err(), "accepted `{value}`");
         }
+    }
+
+    #[test]
+    fn makes_slugs_from_names() {
+        let long = "word ".repeat(20);
+        for (name, slug) in [("My App!", "my-app"), ("  API -- v2 ", "api-v2"), ("Café Paris", "caf-paris")] {
+            assert_eq!(Slug::from_name(name).unwrap().as_str(), slug);
+        }
+        assert!(Slug::from_name(&long).unwrap().as_str().len() <= MAX_LEN);
+        assert_eq!(Slug::from_name("日本"), None);
+        assert_eq!(Slug::from_name(""), None);
     }
 
     #[test]

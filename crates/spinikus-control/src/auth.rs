@@ -11,7 +11,7 @@ use spinikus_core::{
     token::{ApiToken, NewSession, Session},
     user::{Email, User},
 };
-use spinikus_store::{ApiTokenRepository, AuditLogRepository, SessionRepository, UserRepository};
+use spinikus_store::{ApiTokenRepository, SessionRepository, UserRepository};
 
 use crate::{Control, ControlError, password};
 
@@ -133,11 +133,6 @@ impl Control {
         let token = self.store().authenticate_api_token(bearer).await?.ok_or(ControlError::Unauthenticated)?;
         let user = self.store().get_user(token.user_id).await?;
         Ok(Principal { user, credential: Credential::ApiToken(token) })
-    }
-
-    pub(crate) async fn audit(&self, entry: NewAuditEntry) -> Result<(), ControlError> {
-        self.store().record_audit_entry(entry).await?;
-        Ok(())
     }
 }
 
