@@ -12,7 +12,8 @@ use crate::{
     id::{DeploymentEventId, DeploymentId, ServiceId},
     service::{ServiceConfig, ServiceKind},
     source::SourceSpec,
-    text::impl_text
+    text::impl_text,
+    variable::ResolvedVariable
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -44,7 +45,11 @@ pub struct NewDeployment {
     pub rollback_of: Option<DeploymentId>,
     pub snapshot: DeploymentSnapshot,
     pub commit_sha: Option<String>,
-    pub image: Option<String>
+    pub image: Option<String>,
+    /// The service's variables, resolved when the deployment is created (or copied from the
+    /// target of a rollback). Stored encrypted, apart from the deployment, and read back with
+    /// `DeploymentRepository::deployment_variables`.
+    pub variables: Vec<ResolvedVariable>
 }
 
 /// The service's settings as they were when the deployment was created, so later

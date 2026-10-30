@@ -1,12 +1,16 @@
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use spinikus_core::{
     actor::Actor,
     deployment::{Deployment, DeploymentEvent, DeploymentSnapshot, DeploymentStatus, EndReason, NewDeployment, Transition},
-    id::{DeploymentEventId, DeploymentId, ServiceId}
+    id::{DataKeyId, DeploymentEventId, DeploymentId, ServiceId, VariableId},
+    secret::Secret,
+    variable::{ResolvedVariable, ScopeLevel, VariableAvailability, VariableName}
 };
 use sqlx::SqliteConnection;
+use zeroize::Zeroizing;
 
-use crate::{SqliteStore, StoreError, error::parse_column};
+use crate::{Keyring, Sealed, SqliteStore, StoreError, error::parse_column};
 
 const ENTITY: &str = "deployment";
 
@@ -50,6 +54,9 @@ pub trait DeploymentRepository: Send + Sync {
         commit_sha: Option<String>,
         image: Option<String>
     ) -> Result<Deployment, StoreError>;
+
+    /// The variables the deployment was created with, decrypted, secrets included.
+    async fn deployment_variables(&self, id: DeploymentId) -> Result<Vec<ResolvedVariable>, StoreError>;
 }
 
 /// The deployment columns, in the order `DeploymentRow` reads them.
@@ -125,6 +132,54 @@ impl TryFrom<EventRow> for DeploymentEvent {
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?
         })
     }
+}
+
+/// One resolved variable inside the sealed `deployment_variables` JSON.
+#[derive(Serialize, Deserialize)]
+struct StoredVariable<'a> {
+    name: VariableName,
+    #[serde(borrow)]
+    value: std::borrow::Cow<'a, str>,
+    availability: VariableAvailability,
+    secret: bool,
+    level: ScopeLevel,
+    variable_id: VariableId
+}
+
+fn seal_variables(keyring: &Keyring, id: DeploymentId, variables: &[ResolvedVariable]) -> Sealed {
+    let stored: Vec<StoredVariable> = variables
+        .iter()
+        .map(|variable| StoredVariable {
+            name: variable.name.clone(),
+            value: variable.value.expose().into(),
+            availability: variable.availability,
+            secret: variable.secret,
+            level: variable.level,
+            variable_id: variable.variable_id
+        })
+        .collect();
+    let json = Zeroizing::new(serde_json::to_vec(&stored).expect("variables serialize to JSON"));
+    keyring.seal(&json, id.to_string().as_bytes())
+}
+
+fn open_variables(keyring: &Keyring, id: DeploymentId, sealed: &Sealed) -> Result<Vec<ResolvedVariable>, StoreError> {
+    let json = keyring.open(sealed, id.to_string().as_bytes())?;
+    let stored: Vec<StoredVariable> = serde_json::from_slice(&json).map_err(|error| StoreError::InvalidRow {
+        entity: "deployment variables",
+        column: "variables",
+        problem: error.to_string()
+    })?;
+    Ok(stored
+        .into_iter()
+        .map(|variable| ResolvedVariable {
+            name: variable.name,
+            value: Secret::new(variable.value.into_owned()),
+            availability: variable.availability,
+            secret: variable.secret,
+            level: variable.level,
+            variable_id: variable.variable_id
+        })
+        .collect())
 }
 
 fn not_found(id: DeploymentId) -> StoreError {
@@ -244,6 +299,14 @@ impl DeploymentRepository for SqliteStore {
         .await?;
         insert_event(&mut tx, id, None, DeploymentStatus::Queued, None, actor).await?;
 
+        let sealed = seal_variables(self.keyring(), id, &new.variables);
+        sqlx::query("INSERT INTO deployment_variables (deployment_id, variables, data_key_id) VALUES (?, ?, ?)")
+            .bind(id.to_string())
+            .bind(sealed.ciphertext)
+            .bind(sealed.key_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+
         let deployment = fetch(&mut tx, id).await?;
         tx.commit().await?;
         Ok(deployment)
@@ -351,6 +414,18 @@ impl DeploymentRepository for SqliteStore {
         tx.commit().await?;
         Ok(deployment)
     }
+
+    async fn deployment_variables(&self, id: DeploymentId) -> Result<Vec<ResolvedVariable>, StoreError> {
+        let row: Option<(Vec<u8>, String)> =
+            sqlx::query_as("SELECT variables, data_key_id FROM deployment_variables WHERE deployment_id = ?")
+                .bind(id.to_string())
+                .fetch_optional(self.pool())
+                .await?;
+        let (ciphertext, key_id) = row.ok_or_else(|| not_found(id))?;
+        let key_id: DataKeyId = parse_column("deployment variables", "data_key_id", &key_id)?;
+
+        open_variables(self.keyring(), id, &Sealed { key_id, ciphertext })
+    }
 }
 
 #[cfg(test)]
@@ -365,8 +440,10 @@ mod tests {
         source::{ImageSource, SourceSpec}
     };
 
+    use spinikus_core::variable::{VariableFields, VariableScope};
+
     use super::*;
-    use crate::{EnvironmentRepository, ProjectRepository, ServiceRepository, test_support::store};
+    use crate::{EnvironmentRepository, ProjectRepository, ServiceRepository, VariableRepository, test_support::store};
 
     async fn service(store: &SqliteStore) -> ServiceId {
         let project = ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() };
@@ -388,7 +465,8 @@ mod tests {
                 config: Map::new()
             },
             commit_sha: None,
-            image: None
+            image: None,
+            variables: Vec::new()
         }
     }
 
@@ -558,5 +636,36 @@ mod tests {
 
         let live = store.live_deployment(service_id).await.unwrap().unwrap();
         assert_eq!((live.id, live.rollback_of, live.image.as_deref()), (rollback.id, Some(first.id), Some("web@sha256:1")));
+    }
+
+    #[tokio::test]
+    async fn keeps_the_variables_resolved_at_creation() {
+        let (_dir, store) = store().await;
+        let service_id = service(&store).await;
+        let scope = VariableScope::Service(service_id);
+        let fields = |name: &str, secret| VariableFields { name: name.parse().unwrap(), availability: VariableAvailability::Both, secret };
+        let api_key = store.create_variable(scope, fields("API_KEY", true), Secret::new("hunter\"2")).await.unwrap();
+        store.create_variable(scope, fields("PORT", false), Secret::new("8080")).await.unwrap();
+
+        let resolved = store.resolve_service_variables(service_id).await.unwrap();
+        let deployment =
+            store.create_deployment(NewDeployment { variables: resolved.clone(), ..new_deployment(service_id) }, Actor::System).await.unwrap();
+        // Later edits do not reach the existing deployment.
+        store.update_variable(api_key.id, 1, fields("API_KEY", true), Some(Secret::new("rotated"))).await.unwrap();
+
+        let stored = store.deployment_variables(deployment.id).await.unwrap();
+        assert_eq!(stored, resolved);
+        assert_eq!(stored[0].value.expose(), "hunter\"2");
+        let ciphertext: Vec<u8> = sqlx::query_scalar("SELECT variables FROM deployment_variables").fetch_one(store.pool()).await.unwrap();
+        assert!(!ciphertext.windows(4).any(|window| window == b"8080"));
+    }
+
+    #[tokio::test]
+    async fn deployment_variables_of_an_unknown_deployment() {
+        let (_dir, store) = store().await;
+
+        let result = store.deployment_variables(DeploymentId::new()).await;
+
+        assert!(matches!(result, Err(StoreError::NotFound { .. })), "{result:?}");
     }
 }
