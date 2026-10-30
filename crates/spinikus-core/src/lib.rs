@@ -3,6 +3,7 @@ pub mod config;
 pub mod deployment;
 pub mod environment;
 pub mod id;
+pub mod job;
 pub mod project;
 pub mod secret;
 pub mod server;
