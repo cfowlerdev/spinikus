@@ -14,3 +14,4 @@ pub mod slug;
 pub mod source;
 pub mod text;
 pub mod variable;
+pub mod volume;

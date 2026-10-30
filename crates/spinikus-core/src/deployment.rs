@@ -104,11 +104,12 @@ impl DeploymentStrategy {
         }
     }
 
-    /// Databases are recreated; everything else is blue-green. Services with persistent
-    /// volumes will be recreated too, once volumes exist.
-    pub fn default_for(kind: ServiceKind) -> Self {
+    /// Databases and services with persistent volumes are recreated, since two containers
+    /// must not share a volume; everything else is blue-green.
+    pub fn default_for(kind: ServiceKind, has_volumes: bool) -> Self {
         match kind {
             ServiceKind::Database => Self::Recreate,
+            ServiceKind::App | ServiceKind::Template if has_volumes => Self::Recreate,
             ServiceKind::App | ServiceKind::Template => Self::BlueGreen
         }
     }
@@ -147,8 +148,10 @@ mod tests {
     }
 
     #[test]
-    fn databases_default_to_recreate() {
-        assert_eq!(DeploymentStrategy::default_for(ServiceKind::Database), DeploymentStrategy::Recreate);
-        assert_eq!(DeploymentStrategy::default_for(ServiceKind::App), DeploymentStrategy::BlueGreen);
+    fn databases_and_services_with_volumes_default_to_recreate() {
+        assert_eq!(DeploymentStrategy::default_for(ServiceKind::Database, false), DeploymentStrategy::Recreate);
+        assert_eq!(DeploymentStrategy::default_for(ServiceKind::App, true), DeploymentStrategy::Recreate);
+        assert_eq!(DeploymentStrategy::default_for(ServiceKind::App, false), DeploymentStrategy::BlueGreen);
+        assert_eq!(DeploymentStrategy::default_for(ServiceKind::Template, false), DeploymentStrategy::BlueGreen);
     }
 }

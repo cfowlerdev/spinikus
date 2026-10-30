@@ -12,6 +12,7 @@ pub mod servers;
 pub mod services;
 pub mod sources;
 pub mod variables;
+pub mod volumes;
 #[cfg(test)]
 mod test_support;
 
@@ -29,3 +30,4 @@ pub use servers::ServerRepository;
 pub use services::ServiceRepository;
 pub use sources::SourceRepository;
 pub use variables::VariableRepository;
+pub use volumes::VolumeRepository;
