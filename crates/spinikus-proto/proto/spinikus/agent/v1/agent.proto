@@ -1,0 +1,437 @@
+// The protocol between agents and the control plane.
+//
+// Agents dial out to the control plane over mTLS; the control plane never calls into an
+// agent. Everything it wants an agent to do travels down the `Connect` stream the agent
+// opened. Changes within v1 are additive only: never renumber or reuse a field.
+syntax = "proto3";
+
+package spinikus.agent.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+service AgentService {
+  // Exchanges a one-time join token and a CSR for a client certificate. The only RPC
+  // callable without a client certificate.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
+  // Rotates the agent's client certificate before it expires.
+  rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
+
+  // The control channel. The agent's first message is `Hello`, then a full `StateReport`.
+  rpc Connect(stream AgentMessage) returns (stream ControlMessage);
+
+  // An on-demand session (web terminal, live log tail), opened by the agent after an
+  // `OpenSession` command. The agent's first frame carries the session ID.
+  rpc OpenSession(stream SessionFrame) returns (stream SessionFrame);
+
+  // Metrics samples, kept off the control channel so a burst never delays a command.
+  rpc PushStats(stream StatsBatch) returns (PushStatsResponse);
+}
+
+// ---------------------------------------------------------------------------------------
+// Enrollment
+
+message EnrollRequest {
+  string join_token = 1;
+  // PKCS#10 certificate signing request for a key the agent generated locally, DER-encoded.
+  bytes csr_der = 2;
+  string agent_version = 3;
+  ServerFacts facts = 4;
+}
+
+message EnrollResponse {
+  // The server ID (`srv_…`), also in the certificate's subject.
+  string server_id = 1;
+  // The client certificate followed by any intermediates, PEM-encoded.
+  string certificate_chain_pem = 2;
+  // The control plane's CA, to verify the control plane from now on.
+  string ca_certificate_pem = 3;
+}
+
+message RenewCertificateRequest {
+  bytes csr_der = 1;
+}
+
+message RenewCertificateResponse {
+  string certificate_chain_pem = 1;
+}
+
+// ---------------------------------------------------------------------------------------
+// The control channel: agent to control plane
+
+message AgentMessage {
+  oneof message {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    StateReport state_report = 3;
+    CommandProgress command_progress = 4;
+    CommandResult command_result = 5;
+    SnapshotApplied snapshot_applied = 6;
+  }
+}
+
+message Hello {
+  uint32 protocol_version = 1;
+  string agent_version = 2;
+  ServerFacts facts = 3;
+  // The snapshot revisions the agent has applied from disk, so the control plane only
+  // resends snapshots that changed.
+  uint64 routes_revision = 4;
+  uint64 certificates_revision = 5;
+  // Commands the agent was working on before it restarted or reconnected, and resumes.
+  repeated string in_flight_command_ids = 6;
+}
+
+message ServerFacts {
+  string hostname = 1;
+  string os = 2;
+  string arch = 3;
+  uint32 cpu_count = 4;
+  uint64 memory_bytes = 5;
+}
+
+message Heartbeat {
+  google.protobuf.Timestamp sent_at = 1;
+}
+
+// Containers Spinikus manages on this server. The first report after connecting is full;
+// later ones carry only changes.
+message StateReport {
+  // When set, `instances` is everything on the server and replaces what the control
+  // plane knew; otherwise it is the changed instances, plus `removed_container_ids`.
+  bool full = 1;
+  repeated Instance instances = 2;
+  repeated string removed_container_ids = 3;
+}
+
+message Instance {
+  string container_id = 1;
+  // From the labels Spinikus puts on the containers it starts.
+  string service_id = 2;
+  string deployment_id = 3;
+  InstanceStatus status = 4;
+  InstanceHealth health = 5;
+  uint32 restart_count = 6;
+  google.protobuf.Timestamp started_at = 7;
+}
+
+enum InstanceStatus {
+  INSTANCE_STATUS_UNSPECIFIED = 0;
+  INSTANCE_STATUS_CREATED = 1;
+  INSTANCE_STATUS_RUNNING = 2;
+  INSTANCE_STATUS_PAUSED = 3;
+  INSTANCE_STATUS_RESTARTING = 4;
+  INSTANCE_STATUS_REMOVING = 5;
+  INSTANCE_STATUS_EXITED = 6;
+  INSTANCE_STATUS_DEAD = 7;
+}
+
+enum InstanceHealth {
+  INSTANCE_HEALTH_UNSPECIFIED = 0;
+  // The container has no health check.
+  INSTANCE_HEALTH_NONE = 1;
+  INSTANCE_HEALTH_STARTING = 2;
+  INSTANCE_HEALTH_HEALTHY = 3;
+  INSTANCE_HEALTH_UNHEALTHY = 4;
+}
+
+// Progress of a command, such as the phase it is in and build log lines.
+message CommandProgress {
+  string command_id = 1;
+  // A short description of the current step, such as "pulling image".
+  string phase = 2;
+  repeated LogLine log_lines = 3;
+}
+
+message LogLine {
+  google.protobuf.Timestamp at = 1;
+  LogStream stream = 2;
+  // Already redacted: secret variable values never leave the agent in logs.
+  string text = 3;
+}
+
+enum LogStream {
+  LOG_STREAM_UNSPECIFIED = 0;
+  LOG_STREAM_STDOUT = 1;
+  LOG_STREAM_STDERR = 2;
+}
+
+// The end of a command. Sent once per command ID; the control plane ignores repeats,
+// since delivery is at-least-once.
+message CommandResult {
+  string command_id = 1;
+  oneof outcome {
+    CommandSucceeded succeeded = 2;
+    CommandFailed failed = 3;
+  }
+}
+
+message CommandSucceeded {
+  // Set for `PrepareDeployment`: what was built or pulled.
+  PreparedImage prepared = 1;
+}
+
+message PreparedImage {
+  // The image reference to run, pinned by digest.
+  string image = 1;
+  // The commit that was built, for Git sources.
+  string commit_sha = 2;
+}
+
+message CommandFailed {
+  FailureReason reason = 1;
+  string message = 2;
+}
+
+// Why a command failed. Maps onto deployment end reasons.
+enum FailureReason {
+  FAILURE_REASON_UNSPECIFIED = 0;
+  FAILURE_REASON_BUILD_FAILED = 1;
+  FAILURE_REASON_RELEASE_FAILED = 2;
+  FAILURE_REASON_START_FAILED = 3;
+  FAILURE_REASON_HEALTH_CHECK_FAILED = 4;
+  FAILURE_REASON_TIMEOUT = 5;
+  FAILURE_REASON_CANCELED = 6;
+  // A failure in the agent itself, such as the container runtime being unreachable.
+  FAILURE_REASON_INTERNAL = 7;
+}
+
+// Acknowledges that the agent applied (and saved) a routes or certificates snapshot.
+message SnapshotApplied {
+  SnapshotKind kind = 1;
+  uint64 revision = 2;
+}
+
+enum SnapshotKind {
+  SNAPSHOT_KIND_UNSPECIFIED = 0;
+  SNAPSHOT_KIND_ROUTES = 1;
+  SNAPSHOT_KIND_CERTIFICATES = 2;
+}
+
+// ---------------------------------------------------------------------------------------
+// The control channel: control plane to agent
+
+message ControlMessage {
+  oneof message {
+    Welcome welcome = 1;
+    Command command = 2;
+    SetRoutes set_routes = 3;
+    SetCertificates set_certificates = 4;
+  }
+}
+
+// The reply to `Hello`. An agent whose protocol version is not supported is refused with
+// a FAILED_PRECONDITION status instead.
+message Welcome {
+  string server_id = 1;
+  google.protobuf.Duration heartbeat_interval = 2;
+}
+
+// Work for the agent. Command IDs make delivery idempotent: the agent persists in-flight
+// commands and ignores an ID it has already finished, replying with the stored result.
+message Command {
+  string command_id = 1;
+  oneof kind {
+    PrepareDeployment prepare_deployment = 2;
+    RunRelease run_release = 3;
+    StartDeployment start_deployment = 4;
+    StopDeployment stop_deployment = 5;
+    RestartInstance restart_instance = 6;
+    OpenSession open_session = 7;
+    CancelCommand cancel_command = 8;
+  }
+}
+
+// Clone and build, or pull, the image for a deployment.
+message PrepareDeployment {
+  string deployment_id = 1;
+  string service_id = 2;
+  oneof source {
+    GitSource git = 3;
+    ImageSource image = 4;
+  }
+  // The service's kind-specific settings as JSON, until they get typed messages.
+  string config_json = 5;
+  // Variables available to the build.
+  repeated Variable build_variables = 6;
+}
+
+message GitSource {
+  string repo_url = 1;
+  string branch = 2;
+  // Build from this commit; empty means the branch's latest.
+  string commit_sha = 3;
+  // Subdirectory to build from, for monorepos; empty means the repository root.
+  string root_directory = 4;
+  // A short-lived credential for private repositories; empty for public ones.
+  string access_token = 5;
+}
+
+message ImageSource {
+  string image = 1;
+}
+
+message Variable {
+  string name = 1;
+  string value = 2;
+  // Redact the value from logs.
+  bool secret = 3;
+}
+
+// Run the release command (such as migrations) once, in a one-off container.
+message RunRelease {
+  string deployment_id = 1;
+  string image = 2;
+  string command = 3;
+  repeated Variable variables = 4;
+  google.protobuf.Duration timeout = 5;
+}
+
+// Start a deployment's containers and verify them; the result reports the health check.
+message StartDeployment {
+  string deployment_id = 1;
+  string service_id = 2;
+  string image = 3;
+  repeated Variable variables = 4;
+  DeploymentStrategy strategy = 5;
+  // The port the app listens on inside the container.
+  uint32 port = 6;
+  repeated VolumeMount volumes = 7;
+  HealthCheck health_check = 8;
+  // For `recreate`: the deployment whose containers to stop first.
+  string replaces_deployment_id = 9;
+}
+
+enum DeploymentStrategy {
+  DEPLOYMENT_STRATEGY_UNSPECIFIED = 0;
+  DEPLOYMENT_STRATEGY_BLUE_GREEN = 1;
+  DEPLOYMENT_STRATEGY_RECREATE = 2;
+}
+
+message VolumeMount {
+  // The volume's ID (`vol_…`), which names the runtime volume holding the data.
+  string volume_id = 1;
+  string mount_path = 2;
+}
+
+message HealthCheck {
+  // HTTP path to probe; empty means the container only has to stay running.
+  string path = 1;
+  google.protobuf.Duration interval = 2;
+  google.protobuf.Duration timeout = 3;
+  uint32 retries = 4;
+  google.protobuf.Duration start_period = 5;
+}
+
+// Stop and remove a deployment's containers, such as when draining it.
+message StopDeployment {
+  string deployment_id = 1;
+  google.protobuf.Duration grace_period = 2;
+}
+
+message RestartInstance {
+  string container_id = 1;
+}
+
+// Open a session stream (`AgentService.OpenSession`) tagged with `session_id`.
+message OpenSession {
+  string session_id = 1;
+  oneof kind {
+    TerminalSession terminal = 2;
+    LogTailSession log_tail = 3;
+  }
+}
+
+message TerminalSession {
+  string container_id = 1;
+  uint32 rows = 2;
+  uint32 columns = 3;
+}
+
+message LogTailSession {
+  string container_id = 1;
+  // Start from logs written at or after this time; unset means only new lines.
+  google.protobuf.Timestamp since = 2;
+}
+
+// Stop working on another command. The canceled command still ends with a result.
+message CancelCommand {
+  string target_command_id = 1;
+}
+
+// The full route table for this server's proxy. Replaces the previous one.
+message SetRoutes {
+  uint64 revision = 1;
+  repeated Route routes = 2;
+}
+
+message Route {
+  string hostname = 1;
+  oneof action {
+    ProxyTarget proxy = 2;
+    // Redirect to this hostname, keeping the path and query.
+    string redirect_to = 3;
+  }
+}
+
+message ProxyTarget {
+  string service_id = 1;
+  // The live deployment, whose containers the agent resolves locally.
+  string deployment_id = 2;
+  uint32 port = 3;
+}
+
+// All certificates this server's proxy serves. Replaces the previous set.
+message SetCertificates {
+  uint64 revision = 1;
+  repeated Certificate certificates = 2;
+}
+
+message Certificate {
+  string certificate_id = 1;
+  repeated string hostnames = 2;
+  string chain_pem = 3;
+  string private_key_pem = 4;
+}
+
+// ---------------------------------------------------------------------------------------
+// Sessions and stats
+
+// One frame of a session stream, in either direction.
+message SessionFrame {
+  // Set on the agent's first frame, to say which session the stream is for.
+  string session_id = 1;
+  oneof frame {
+    // Terminal input or output, or log text.
+    bytes data = 2;
+    TerminalSize resize = 3;
+    // The session ended, with a reason if it failed.
+    SessionClosed closed = 4;
+  }
+}
+
+message TerminalSize {
+  uint32 rows = 1;
+  uint32 columns = 2;
+}
+
+message SessionClosed {
+  string error = 1;
+}
+
+message StatsBatch {
+  repeated StatSample samples = 1;
+}
+
+message StatSample {
+  google.protobuf.Timestamp at = 1;
+  // Empty for the server as a whole.
+  string container_id = 2;
+  double cpu_percent = 3;
+  uint64 memory_bytes = 4;
+  uint64 network_rx_bytes = 5;
+  uint64 network_tx_bytes = 6;
+}
+
+message PushStatsResponse {}
