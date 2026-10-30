@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
+};
 
 use serde::Deserialize;
 
@@ -28,6 +31,24 @@ pub struct SecretsConfig {
     pub master_key_file: Option<PathBuf>,
 }
 
+/// HTTP settings from the `[http]` table of `spinikus.toml`: where the API and web UI listen.
+#[derive(Deserialize)]
+pub struct HttpConfig {
+    /// Defaults to `127.0.0.1:8080`, reachable from this machine only.
+    #[serde(default = "default_http_listen")]
+    pub listen: SocketAddr,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self { listen: default_http_listen() }
+    }
+}
+
+fn default_http_listen() -> SocketAddr {
+    (Ipv4Addr::LOCALHOST, 8080).into()
+}
+
 /// Instance configuration, the schema of `spinikus.toml`.
 #[derive(Deserialize)]
 pub struct SpinikusConfig {
@@ -39,6 +60,8 @@ pub struct SpinikusConfig {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub secrets: SecretsConfig,
+    #[serde(default)]
+    pub http: HttpConfig,
 }
 
 impl SpinikusConfig {
@@ -66,6 +89,7 @@ impl Default for SpinikusConfig {
             logging: LoggingConfig::default(),
             database: DatabaseConfig::default(),
             secrets: SecretsConfig::default(),
+            http: HttpConfig::default(),
         }
     }
 }

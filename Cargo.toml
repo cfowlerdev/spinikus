@@ -8,8 +8,10 @@ members = [
 anyhow = "1.0.104"
 argon2 = { version = "0.6.0", features = ["zeroize"] }
 async-trait = "0.1.92"
+axum = "0.8.9"
 base64 = "0.23.1"
 chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
+http-body-util = "0.1.5"
 jiff = { version = "0.2.38", features = ["serde"] }
 prost = "0.14.4"
 prost-types = "0.14.4"
@@ -28,6 +30,8 @@ tokio-stream = "0.1.19"
 tonic = "0.14.9"
 tonic-prost = "0.14.9"
 tonic-prost-build = "0.14.9"
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["trace"] }
 ulid = "3.0.0"
 zeroize = "1.9.1"
 

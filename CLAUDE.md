@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Spinikus is a Rust, self-hosted PaaS (a lighter Coolify/Dokploy, "self-hosted Vercel"). It is early: `spinikus-core` (domain types, IDs, deployment state machine) and `spinikus-store` (SQLite repositories, migrations, envelope encryption) cover the data model in the design doc, except backups and integrations (storage destinations, notification channels, Git connections), which come with their features, `spinikus-control` has the start of the service layer (`Control`: first-run setup, sign-in, sessions and API token authentication, `ControlError` with stable codes, and projects, environments and services with permission checks and audit entries), `spinikus-proto` defines the agent protocol (`proto/spinikus/agent/v1/agent.proto`, compiled by `protox` in `build.rs`, so no `protoc` is needed), and the `spinikus` binary has the CLI, config and startup. The other crates are still `cargo new` placeholders. The design is in `docs/spinikus.md` — read it before building any feature; it records decisions (with the alternatives that were rejected) that the code is expected to follow.
+Spinikus is a Rust, self-hosted PaaS (a lighter Coolify/Dokploy, "self-hosted Vercel"). It is early: `spinikus-core` (domain types, IDs, deployment state machine) and `spinikus-store` (SQLite repositories, migrations, envelope encryption) cover the data model in the design doc, except backups and integrations (storage destinations, notification channels, Git connections), which come with their features, `spinikus-control` has the start of the service layer (`Control`: first-run setup, sign-in, sessions and API token authentication, `ControlError` with stable codes, and projects, environments and services with permission checks and audit entries), `spinikus-api` serves the JSON API under `/api/v1` (setup, login for an API token, `me`, projects, environments, services), `spinikus-proto` defines the agent protocol (`proto/spinikus/agent/v1/agent.proto`, compiled by `protox` in `build.rs`, so no `protoc` is needed), and the `spinikus` binary has the CLI, config and startup. The other crates are still `cargo new` placeholders. The design is in `docs/spinikus.md` — read it before building any feature; it records decisions (with the alternatives that were rejected) that the code is expected to follow.
 
 ### Service layer conventions
 
@@ -14,6 +14,10 @@ Spinikus is a Rust, self-hosted PaaS (a lighter Coolify/Dokploy, "self-hosted Ve
 - Roles: instance admins create projects; project admins update and delete them and create and delete environments; environment admins rename environments; developers create and edit services; admins delete them; viewers read.
 - Operations take raw input (`NewProject`, `ProjectChanges`, …), validate it (`input::name`, `input::slug`, which derives a slug from the name when none is given), and record an audit entry with `Control::audit_by` (`audit::changed` lists updated fields, never values).
 - Lists return `Page<T>` (`has_more`; the next cursor is the last item's ID), with limits clamped to `page::MAX_PAGE_SIZE`.
+
+### API conventions
+
+`spinikus-api` handlers stay thin: extract, call one `Control` method, shape the response. Use the crate's own extractors (`Body`, `Path`, `Query`, `Authenticated`, `IfMatch`, `Client` in `extract.rs`) rather than axum's, so every rejection is a problem detail (`ApiError`, `application/problem+json` with a stable `code`). Request bodies are API-specific structs with `deny_unknown_fields`; responses serialize the core types. Single resources return their revision as `ETag` (`response::tagged`/`created`), updates require it in `If-Match` (428 without, 412 if stale), and lists use `PageParams`/`PageBody` (`?after=&limit=`, `next_cursor`). Authentication is bearer API tokens only; session cookies belong to the web UI. Tests in `crates/spinikus-api/tests/` drive the router with `tower::ServiceExt::oneshot`.
 
 ### Store conventions
 
@@ -34,7 +38,7 @@ cargo check --workspace
 cargo test --workspace               # all tests
 cargo test -p spinikus-core          # one crate
 cargo test -p spinikus-core it_works # one test by name filter
-cargo run -- server run              # start the control plane (connects to SQLite, applies migrations)
+cargo run -- server run              # start the control plane (applies migrations, serves the API on [http] listen, default 127.0.0.1:8080)
 cargo run -- server migrate          # apply pending migrations and exit
 cargo run -- admin create-user --email you@example.com --name You   # first admin; password from SPINIKUS_ADMIN_PASSWORD or a prompt
 cargo clippy --workspace && cargo fmt

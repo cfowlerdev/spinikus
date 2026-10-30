@@ -8,15 +8,18 @@ use spinikus_core::{
     id::{ApiTokenId, EnvironmentId, ProjectId, SessionId},
     membership::{self, Membership, Role},
     secret::Secret,
-    token::{ApiToken, NewSession, Session},
+    token::{ApiToken, NewApiToken, NewSession, Session},
     user::{Email, User},
 };
 use spinikus_store::{ApiTokenRepository, SessionRepository, UserRepository};
 
-use crate::{Control, ControlError, password};
+use crate::{Control, ControlError, input, password};
 
 /// How long a web session lasts after signing in.
 pub const SESSION_LIFETIME: SignedDuration = SignedDuration::from_hours(14 * 24);
+
+/// How long an API token from [`Control::create_login_token`] lasts.
+pub const LOGIN_TOKEN_LIFETIME: SignedDuration = SignedDuration::from_hours(90 * 24);
 
 /// Who is making a request: a signed-in user, through a web session or an API token.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,21 +80,7 @@ impl Control {
     /// Checks the email and password and starts a web session. Returns the session and the
     /// cookie value. Every failure is `InvalidCredentials`, whatever the reason.
     pub async fn sign_in(&self, email: &str, password: Secret, client: ClientInfo) -> Result<(Session, Secret), ControlError> {
-        let user = match email.parse::<Email>() {
-            Ok(email) => self.store().find_user_by_email(&email).await?.filter(User::is_active),
-            Err(_) => None,
-        };
-        let hash = match &user {
-            Some(user) => self.store().user_password_hash(user.id).await?,
-            None => None,
-        };
-        // Verify even without a user, so timing does not reveal which emails have accounts.
-        let matches = password::verify(password, hash).await;
-        let Some(user) = user.filter(|_| matches) else {
-            tracing::info!("sign-in failed");
-            return Err(ControlError::InvalidCredentials);
-        };
-
+        let user = self.check_password(email, password).await?;
         let (session, secret) = self
             .store()
             .create_session(NewSession {
@@ -111,6 +100,59 @@ impl Control {
         })
         .await?;
         Ok((session, secret))
+    }
+
+    /// Checks the email and password and creates an API token for the user, as `spinikus login`
+    /// does. The token has the user's own access (an unscoped admin token, capped by their
+    /// role) and expires after [`LOGIN_TOKEN_LIFETIME`]. Every failure is `InvalidCredentials`.
+    pub async fn create_login_token(
+        &self,
+        email: &str,
+        password: Secret,
+        token_name: &str,
+        client: ClientInfo,
+    ) -> Result<(ApiToken, Secret), ControlError> {
+        let name = input::name(token_name)?;
+        let user = self.check_password(email, password).await?;
+        let new = NewApiToken {
+            user_id: user.id,
+            name,
+            role: Role::Admin,
+            scope: None,
+            expires_at: Some(Timestamp::now() + LOGIN_TOKEN_LIFETIME),
+        };
+        let (token, secret) = self.store().create_api_token(new).await?;
+        self.audit(NewAuditEntry {
+            actor: Actor::User(user.id),
+            token_id: None,
+            action: "api_token.create".parse().expect("valid audit action"),
+            target_id: Some(token.id.to_string()),
+            project_id: None,
+            details: json!({ "via": "login", "ip_address": client.ip_address }).as_object().cloned().unwrap_or_default(),
+        })
+        .await?;
+        Ok((token, secret))
+    }
+
+    /// The active user with this email and password, or `InvalidCredentials`.
+    async fn check_password(&self, email: &str, password: Secret) -> Result<User, ControlError> {
+        let user = match email.parse::<Email>() {
+            Ok(email) => self.store().find_user_by_email(&email).await?.filter(User::is_active),
+            Err(_) => None,
+        };
+        let hash = match &user {
+            Some(user) => self.store().user_password_hash(user.id).await?,
+            None => None,
+        };
+        // Verify even without a user, so timing does not reveal which emails have accounts.
+        let matches = password::verify(password, hash).await;
+        match user.filter(|_| matches) {
+            Some(user) => Ok(user),
+            None => {
+                tracing::info!("sign-in failed");
+                Err(ControlError::InvalidCredentials)
+            }
+        }
     }
 
     /// Ends the principal's web session. Does nothing for API tokens, which are revoked instead.
@@ -202,6 +244,24 @@ mod tests {
 
         assert_eq!(principal.token_id(), Some(token.id));
         assert!(matches!(control.authenticate_api_token("spk_nope").await, Err(ControlError::Unauthenticated)));
+    }
+
+    #[tokio::test]
+    async fn logging_in_creates_an_expiring_api_token() {
+        let (_dir, control) = control().await;
+        let ada = user(&control, "ada@example.com", false).await;
+
+        let (token, secret) =
+            control.create_login_token("ada@example.com", Secret::new(PASSWORD), "CLI on laptop", client()).await.unwrap();
+        let wrong = control.create_login_token("ada@example.com", Secret::new("nope nope nope"), "CLI", client()).await;
+        let principal = control.authenticate_api_token(secret.expose()).await.unwrap();
+
+        assert_eq!((token.user_id, token.role, token.scope), (ada.id, Role::Admin, None));
+        assert!(token.expires_at.unwrap() > Timestamp::now() + SignedDuration::from_hours(89 * 24));
+        assert!(matches!(wrong, Err(ControlError::InvalidCredentials)), "{wrong:?}");
+        assert_eq!(principal.token_id(), Some(token.id));
+        let audit = control.store().list_audit_entries(None, None, None, 10).await.unwrap();
+        assert_eq!(audit[0].action.as_str(), "api_token.create");
     }
 
     fn principal(admin: bool, credential: Credential) -> Principal {

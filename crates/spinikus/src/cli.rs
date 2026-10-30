@@ -31,8 +31,9 @@ pub enum ServerCommand {
 
 #[derive(clap::Args)]
 pub struct ServerRunArgs {
+    /// Address for the API and web UI, overriding `[http] listen`, e.g. 0.0.0.0:8080
     #[arg(long)]
-    pub host: Option<String>,
+    pub listen: Option<std::net::SocketAddr>,
 }
 
 #[derive(clap::Args)]

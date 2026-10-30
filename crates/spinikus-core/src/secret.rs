@@ -5,7 +5,8 @@ use std::fmt;
 use zeroize::Zeroizing;
 
 /// A secret string. `Debug` never shows it, it has no `Display` or `Serialize`, and
-/// its memory is wiped when dropped. Read it with [`Secret::expose`].
+/// its memory is wiped when dropped. Read it with [`Secret::expose`]. It deserializes from
+/// a string, so request bodies can carry passwords straight into it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(Zeroizing<String>);
 
@@ -22,6 +23,12 @@ impl Secret {
 impl From<String> for Secret {
     fn from(value: String) -> Self {
         Self::new(value)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::new)
     }
 }
 

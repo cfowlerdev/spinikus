@@ -1,21 +1,34 @@
+use std::net::SocketAddr;
+
 use anyhow::Context;
 use spinikus_control::Control;
 use spinikus_core::config::SpinikusConfig;
 use spinikus_store::SqliteStore;
 use sqlx::SqlitePool;
+use tokio::net::TcpListener;
 
 use crate::{cli::ServerRunArgs, secrets};
 
-pub async fn run(config: &SpinikusConfig, _args: ServerRunArgs) -> anyhow::Result<()> {
+pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result<()> {
     let control = open_control(config).await?;
     if control.needs_setup().await? {
         tracing::warn!("No users yet: create the first admin with `spinikus admin create-user`");
     }
 
-    tracing::info!("Server started, press Ctrl+C to stop");
-    tokio::signal::ctrl_c().await.context("Failed to listen for shutdown signal")?;
-    tracing::info!("Shutting down");
+    let address = args.listen.unwrap_or(config.http.listen);
+    let listener = TcpListener::bind(address).await.with_context(|| format!("Failed to listen on {address}"))?;
+    let app = spinikus_api::router(control).into_make_service_with_connect_info::<SocketAddr>();
+    tracing::info!(%address, "Server started, press Ctrl+C to stop");
+    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await.context("HTTP server failed")?;
+    tracing::info!("Shut down");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => tracing::info!("Shutting down"),
+        Err(error) => tracing::error!(%error, "Failed to listen for the shutdown signal"),
+    }
 }
 
 pub async fn migrate(config: &SpinikusConfig) -> anyhow::Result<()> {

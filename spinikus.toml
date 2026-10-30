@@ -4,6 +4,10 @@ data_dir = "data"
 level = "debug"
 json = false
 
+[http]
+# Where the API and web UI listen. 127.0.0.1 is this machine only.
+listen = "127.0.0.1:8080"
+
 [database]
 # path = "spinikus.db"   # relative paths resolve against data_dir
 
