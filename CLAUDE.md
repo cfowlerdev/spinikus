@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Spinikus is a Rust, self-hosted PaaS (a lighter Coolify/Dokploy, "self-hosted Vercel"). It is early: `spinikus-core` (domain types, IDs, deployment state machine) and `spinikus-store` (SQLite repositories, migrations, envelope encryption) cover the data model in the design doc, except backups and integrations (storage destinations, notification channels, Git connections), which come with their features, and the `spinikus` binary has the CLI, config and database startup. The other crates are still `cargo new` placeholders. The design is in `docs/spinikus.md` — read it before building any feature; it records decisions (with the alternatives that were rejected) that the code is expected to follow.
+Spinikus is a Rust, self-hosted PaaS (a lighter Coolify/Dokploy, "self-hosted Vercel"). It is early: `spinikus-core` (domain types, IDs, deployment state machine) and `spinikus-store` (SQLite repositories, migrations, envelope encryption) cover the data model in the design doc, except backups and integrations (storage destinations, notification channels, Git connections), which come with their features, `spinikus-control` has the start of the service layer (`Control`: first-run setup, sign-in, sessions and API token authentication, `ControlError` with stable codes), and the `spinikus` binary has the CLI, config and startup. The other crates are still `cargo new` placeholders. The design is in `docs/spinikus.md` — read it before building any feature; it records decisions (with the alternatives that were rejected) that the code is expected to follow.
+
+### Service layer conventions
+
+`spinikus-control`'s `Control` is the one entry point for the API, web UI, CLI and webhooks: input validation, permission checks (via `Principal::role_in` / `is_instance_admin`) and audit entries (`Control::audit`) happen there, not in the store or the HTTP layers. Errors are `ControlError`; never expose `Internal` details to clients.
 
 ### Store conventions
 
@@ -27,6 +31,7 @@ cargo test -p spinikus-core          # one crate
 cargo test -p spinikus-core it_works # one test by name filter
 cargo run -- server run              # start the control plane (connects to SQLite, applies migrations)
 cargo run -- server migrate          # apply pending migrations and exit
+cargo run -- admin create-user --email you@example.com --name You   # first admin; password from SPINIKUS_ADMIN_PASSWORD or a prompt
 cargo clippy --workspace && cargo fmt
 ```
 

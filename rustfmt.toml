@@ -1,0 +1,3 @@
+# Stable options only, so plain `cargo fmt` works on the stable toolchain.
+max_width = 130
+use_small_heuristics = "Max"

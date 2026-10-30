@@ -14,6 +14,14 @@ pub trait UserRepository: Send + Sync {
     /// Fails with `Conflict` if another user has the email.
     async fn create_user(&self, fields: UserFields, password_hash: Option<PasswordHash>) -> Result<User, StoreError>;
 
+    /// Creates the first user, as an instance admin, but only while there are no users at all.
+    /// Returns `None` if a user already exists. Atomic, so two concurrent setups cannot both succeed.
+    async fn create_first_admin(
+        &self,
+        fields: UserFields,
+        password_hash: Option<PasswordHash>,
+    ) -> Result<Option<User>, StoreError>;
+
     /// Disabled users included.
     async fn get_user(&self, id: UserId) -> Result<User, StoreError>;
 
@@ -132,6 +140,27 @@ impl UserRepository for SqliteStore {
         .map_err(|error| StoreError::on_unique_violation(error, email_conflict(&fields)))?;
 
         row.try_into()
+    }
+
+    async fn create_first_admin(
+        &self,
+        fields: UserFields,
+        password_hash: Option<PasswordHash>,
+    ) -> Result<Option<User>, StoreError> {
+        let row: Option<UserRow> = sqlx::query_as(concat!(
+            "INSERT INTO users (id, email, name, admin, password_hash)
+             SELECT ?, ?, ?, 1, ? WHERE NOT EXISTS (SELECT 1 FROM users)
+             RETURNING ",
+            columns!()
+        ))
+        .bind(UserId::new().to_string())
+        .bind(fields.email.as_str())
+        .bind(&fields.name)
+        .bind(password_hash.as_ref().map(PasswordHash::as_str))
+        .fetch_optional(self.pool())
+        .await?;
+
+        row.map(User::try_from).transpose()
     }
 
     async fn get_user(&self, id: UserId) -> Result<User, StoreError> {
@@ -284,6 +313,18 @@ mod tests {
         assert_eq!(store.find_user_by_email(&"bob@example.com".parse().unwrap()).await.unwrap(), None);
         assert_eq!(store.count_users().await.unwrap(), 1);
         assert_eq!(store.user_password_hash(user.id).await.unwrap().unwrap().as_str(), HASH);
+    }
+
+    #[tokio::test]
+    async fn only_the_first_user_is_created_by_setup() {
+        let (_dir, store) = store().await;
+
+        let first = store.create_first_admin(fields("ada@example.com", false), None).await.unwrap().unwrap();
+        let second = store.create_first_admin(fields("bob@example.com", false), None).await.unwrap();
+
+        assert!(first.admin, "the first user is always an admin");
+        assert_eq!(second, None);
+        assert_eq!(store.count_users().await.unwrap(), 1);
     }
 
     #[tokio::test]

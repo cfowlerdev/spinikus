@@ -6,10 +6,12 @@ members = [
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+argon2 = { version = "0.6.0", features = ["zeroize"] }
 async-trait = "0.1.92"
 base64 = "0.23.1"
 chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
 jiff = { version = "0.2.38", features = ["serde"] }
+rpassword = "7.5.4"
 serde = {version = "1.0.229", features=["derive"]}
 serde_json = "1"
 sha2 = "0.11.1"
@@ -30,3 +32,10 @@ spinikus-proto = { path = "crates/spinikus-proto" }
 spinikus-proxy = { path = "crates/spinikus-proxy" }
 spinikus-store = { path = "crates/spinikus-store" }
 spinikus-web = { path = "crates/spinikus-web" }
+
+# Password hashing is deliberately slow; unoptimized, sign-ins and tests take seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

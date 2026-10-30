@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+argon2.workspace = true
+jiff.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+spinikus-core.workspace = true
+spinikus-store.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

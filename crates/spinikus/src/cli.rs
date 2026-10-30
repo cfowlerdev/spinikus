@@ -37,8 +37,22 @@ pub struct ServerRunArgs {
 
 #[derive(clap::Args)]
 pub struct AdminArgs {
+    #[command(subcommand)]
+    pub command: AdminCommand,
+}
+
+#[derive(Subcommand)]
+pub enum AdminCommand {
+    /// Create the first admin account. Reads the password from SPINIKUS_ADMIN_PASSWORD, or prompts for it
+    CreateUser(CreateUserArgs),
+}
+
+#[derive(clap::Args)]
+pub struct CreateUserArgs {
     #[arg(long)]
-    pub command: Option<String>,
+    pub email: String,
+    #[arg(long)]
+    pub name: String,
 }
 
 #[derive(clap::Args)]

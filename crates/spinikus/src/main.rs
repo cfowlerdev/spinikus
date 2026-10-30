@@ -1,14 +1,17 @@
 use anyhow::Context;
 use clap::Parser;
 use spinikus::{
-    cli::{Cli, Commands, ServerCommand},
+    admin,
+    cli::{AdminCommand, Cli, Commands, ServerCommand},
     config, server,
 };
 use spinikus_core::config::SpinikusConfig;
 
 async fn run_command(command: Commands, config: &SpinikusConfig) -> anyhow::Result<()> {
     match command {
-        Commands::Admin(_args) => tracing::info!("Running in ADMIN mode"),
+        Commands::Admin(args) => match args.command {
+            AdminCommand::CreateUser(args) => admin::create_user(config, args).await?,
+        },
         Commands::Agent(_args) => tracing::info!("Running in AGENT mode"),
         Commands::Server(args) => match args.command {
             ServerCommand::Run(args) => server::run(config, args).await?,

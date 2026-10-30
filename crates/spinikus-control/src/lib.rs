@@ -1,14 +1,29 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+//! The control plane. This crate holds the service layer that the API, the web UI, the CLI
+//! and webhooks all go through, so they share one set of rules.
+
+pub mod auth;
+pub mod error;
+pub mod password;
+pub mod setup;
+#[cfg(test)]
+mod test_support;
+
+pub use auth::{ClientInfo, Credential, Principal};
+pub use error::ControlError;
+use spinikus_store::SqliteStore;
+
+/// The service layer. Cheap to clone; clones share the database pool.
+#[derive(Clone)]
+pub struct Control {
+    store: SqliteStore,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl Control {
+    pub fn new(store: SqliteStore) -> Self {
+        Self { store }
+    }
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    pub fn store(&self) -> &SqliteStore {
+        &self.store
     }
 }

@@ -7,12 +7,14 @@ edition = "2024"
 anyhow.workspace = true
 clap = {version = "4.6.7", features = ["derive"]}
 config = "0.15.27"
+rpassword.workspace = true
 serde.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+spinikus-control.workspace = true
 spinikus-core.workspace = true
 spinikus-store.workspace = true
 
