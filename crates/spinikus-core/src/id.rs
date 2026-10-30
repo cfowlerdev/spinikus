@@ -99,6 +99,7 @@ define_id!(UserId, "usr");
 define_id!(MembershipId, "mem");
 define_id!(ApiTokenId, "tok");
 define_id!(SessionId, "ses");
+define_id!(AuditEntryId, "aud");
 define_id!(
     /// A data key for envelope encryption of secrets.
     DataKeyId,

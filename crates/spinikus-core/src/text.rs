@@ -38,3 +38,23 @@ macro_rules! impl_text {
 }
 
 pub(crate) use impl_text;
+
+/// Longest allowed dotted name.
+pub const MAX_DOTTED_NAME_LEN: usize = 64;
+
+/// What is wrong with a dotted name such as `deployment.prepare`, if anything: lowercase
+/// letters, digits and underscores, in non-empty dot-separated parts. Used for job kinds
+/// and audit actions.
+pub(crate) fn dotted_name_problem(value: &str) -> Option<&'static str> {
+    if value.is_empty() {
+        Some("it is empty")
+    } else if value.len() > MAX_DOTTED_NAME_LEN {
+        Some("it is longer than 64 characters")
+    } else if !value.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.')) {
+        Some("only lowercase letters, digits, underscores and dots are allowed")
+    } else if value.split('.').any(str::is_empty) {
+        Some("it cannot start or end with a dot, or contain consecutive dots")
+    } else {
+        None
+    }
+}

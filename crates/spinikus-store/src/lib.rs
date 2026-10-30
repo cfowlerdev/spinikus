@@ -1,3 +1,5 @@
+pub mod api_tokens;
+pub mod audit_log;
 pub mod certificates;
 pub mod db;
 pub mod deployments;
@@ -11,6 +13,7 @@ pub mod projects;
 pub mod secrets;
 pub mod servers;
 pub mod services;
+pub mod sessions;
 pub mod sources;
 pub mod users;
 pub mod variables;
@@ -18,6 +21,8 @@ pub mod volumes;
 #[cfg(test)]
 mod test_support;
 
+pub use api_tokens::ApiTokenRepository;
+pub use audit_log::AuditLogRepository;
 pub use certificates::CertificateRepository;
 pub use db::{SqliteStore, connect, migrate};
 pub use deployments::DeploymentRepository;
@@ -31,6 +36,7 @@ pub use projects::ProjectRepository;
 pub use secrets::{Keyring, MasterKey, Sealed, SecretsError};
 pub use servers::ServerRepository;
 pub use services::ServiceRepository;
+pub use sessions::SessionRepository;
 pub use sources::SourceRepository;
 pub use users::UserRepository;
 pub use variables::VariableRepository;

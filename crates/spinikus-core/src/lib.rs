@@ -1,4 +1,5 @@
 pub mod actor;
+pub mod audit;
 pub mod certificate;
 pub mod config;
 pub mod deployment;
@@ -14,6 +15,7 @@ pub mod service;
 pub mod slug;
 pub mod source;
 pub mod text;
+pub mod token;
 pub mod user;
 pub mod variable;
 pub mod volume;

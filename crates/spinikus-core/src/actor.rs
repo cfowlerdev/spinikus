@@ -1,4 +1,4 @@
-//! Who caused a change, for deployment events and later the audit log.
+//! Who caused a change, for deployment events and the audit log.
 
 use std::{fmt, str::FromStr};
 

@@ -99,7 +99,7 @@ fn not_found(id: MembershipId) -> StoreError {
 
 impl SqliteStore {
     /// Fails with `NotFound` unless the scope's project or environment exists and is not deleted.
-    async fn check_membership_scope(&self, scope: MembershipScope) -> Result<(), StoreError> {
+    pub(crate) async fn check_membership_scope(&self, scope: MembershipScope) -> Result<(), StoreError> {
         match scope {
             MembershipScope::Project(id) => self.get_project(id).await.map(drop),
             MembershipScope::Environment(id) => self.get_environment(id).await.map(drop)

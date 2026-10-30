@@ -10,13 +10,16 @@
 
 use std::collections::HashMap;
 
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}
+};
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Generate, Payload}
 };
 use sha2::{Digest, Sha256};
-use spinikus_core::id::DataKeyId;
+use spinikus_core::{id::DataKeyId, secret::Secret};
 use sqlx::SqlitePool;
 use zeroize::Zeroizing;
 
@@ -151,6 +154,18 @@ impl Keyring {
         let cipher = self.keys.get(&sealed.key_id).ok_or(SecretsError::UnknownDataKey(sealed.key_id))?;
         open_with(cipher, &sealed.ciphertext, context).ok_or(SecretsError::Decrypt(sealed.key_id))
     }
+}
+
+/// A new random bearer secret (API token or session cookie value): `prefix` followed by
+/// 256 random bits, base64url-encoded.
+pub(crate) fn generate_bearer(prefix: &str) -> Secret {
+    let bytes = Zeroizing::new(<[u8; 32]>::generate());
+    Secret::new(format!("{prefix}{}", URL_SAFE_NO_PAD.encode(bytes.as_slice())))
+}
+
+/// The SHA-256 hash a bearer secret is stored and looked up by.
+pub(crate) fn hash_bearer(secret: &str) -> Vec<u8> {
+    Sha256::digest(secret.as_bytes()).to_vec()
 }
 
 fn cipher_from(key: &[u8]) -> XChaCha20Poly1305 {

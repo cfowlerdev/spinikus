@@ -11,13 +11,16 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{id::JobId, text::impl_text};
+use crate::{
+    id::JobId,
+    text::{MAX_DOTTED_NAME_LEN, dotted_name_problem, impl_text}
+};
 
 /// Job input, stored as a JSON object. Each kind's handler defines its shape.
 pub type JobPayload = serde_json::Map<String, serde_json::Value>;
 
 /// Longest allowed job kind.
-pub const MAX_KIND_LEN: usize = 64;
+pub const MAX_KIND_LEN: usize = MAX_DOTTED_NAME_LEN;
 
 /// The delay before the second attempt; it doubles for each attempt after that.
 pub const FIRST_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -130,19 +133,7 @@ impl FromStr for JobKind {
     type Err = JobKindError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let problem = if value.is_empty() {
-            Some("it is empty")
-        } else if value.len() > MAX_KIND_LEN {
-            Some("it is longer than 64 characters")
-        } else if !value.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.')) {
-            Some("only lowercase letters, digits, underscores and dots are allowed")
-        } else if value.split('.').any(str::is_empty) {
-            Some("it cannot start or end with a dot, or contain consecutive dots")
-        } else {
-            None
-        };
-
-        match problem {
+        match dotted_name_problem(value) {
             Some(problem) => Err(JobKindError { value: value.to_string(), problem }),
             None => Ok(Self(value.to_string()))
         }
