@@ -1,11 +1,15 @@
 use anyhow::Context;
 use spinikus_core::config::SpinikusConfig;
+use spinikus_store::SqliteStore;
 use sqlx::SqlitePool;
 
-use crate::cli::ServerRunArgs;
+use crate::{cli::ServerRunArgs, secrets};
 
 pub async fn run(config: &SpinikusConfig, _args: ServerRunArgs) -> anyhow::Result<()> {
-    let _pool = open_database(config).await?;
+    let pool = open_database(config).await?;
+    let master_key = secrets::load_master_key(config)?;
+    let _store = SqliteStore::open(pool, &master_key).await.context("Failed to load the secrets keyring")?;
+    tracing::info!(master_key = master_key.id(), "Secrets keyring ready");
 
     tracing::info!("Server started, press Ctrl+C to stop");
     tokio::signal::ctrl_c().await.context("Failed to listen for shutdown signal")?;

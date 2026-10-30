@@ -6,3 +6,9 @@ json = false
 
 [database]
 # path = "spinikus.db"   # relative paths resolve against data_dir
+
+[secrets]
+# Master encryption key, kept outside the database. Without either setting it is
+# <data_dir>/master.key, generated on first start.
+# master_key_file = "/etc/spinikus/master.key"   # relative paths resolve against data_dir
+# Or set SPINIKUS_SECRETS__MASTER_KEY to a base64 key (openssl rand -base64 32).

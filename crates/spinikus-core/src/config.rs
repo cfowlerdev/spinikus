@@ -17,6 +17,17 @@ pub struct DatabaseConfig {
     pub path: Option<PathBuf>
 }
 
+/// Where the master encryption key comes from, from the `[secrets]` table of `spinikus.toml`.
+/// The key never goes in the database, so encrypted secrets stay usable after a restore.
+#[derive(Deserialize, Default)]
+pub struct SecretsConfig {
+    /// The base64 key itself, meant for `SPINIKUS_SECRETS__MASTER_KEY`. Takes precedence over the key file.
+    pub master_key: Option<String>,
+    /// File holding the base64 key. Defaults to `master.key` inside the data directory, which is
+    /// generated on first start; a relative path is resolved against the data directory.
+    pub master_key_file: Option<PathBuf>
+}
+
 /// Instance configuration, the schema of `spinikus.toml`.
 #[derive(Deserialize)]
 pub struct SpinikusConfig {
@@ -25,7 +36,9 @@ pub struct SpinikusConfig {
     pub data_dir: PathBuf,
     pub logging: LoggingConfig,
     #[serde(default)]
-    pub database: DatabaseConfig
+    pub database: DatabaseConfig,
+    #[serde(default)]
+    pub secrets: SecretsConfig
 }
 
 impl SpinikusConfig {
@@ -36,6 +49,14 @@ impl SpinikusConfig {
             None => self.data_dir.join("spinikus.db")
         }
     }
+
+    /// The master key file, resolved against the data directory.
+    pub fn master_key_path(&self) -> PathBuf {
+        match &self.secrets.master_key_file {
+            Some(path) => self.data_dir.join(path),
+            None => self.data_dir.join("master.key")
+        }
+    }
 }
 
 impl Default for SpinikusConfig {
@@ -43,7 +64,8 @@ impl Default for SpinikusConfig {
         Self {
             data_dir: default_data_dir(),
             logging: LoggingConfig::default(),
-            database: DatabaseConfig::default()
+            database: DatabaseConfig::default(),
+            secrets: SecretsConfig::default()
         }
     }
 }
@@ -80,5 +102,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.database_path(), PathBuf::from("/srv/spinikus.db"));
+    }
+
+    #[test]
+    fn master_key_path_defaults_to_data_dir() {
+        let default = SpinikusConfig { data_dir: "/var/lib/spinikus".into(), ..Default::default() };
+        let configured = SpinikusConfig {
+            data_dir: "/var/lib/spinikus".into(),
+            secrets: SecretsConfig { master_key: None, master_key_file: Some("/etc/spinikus/master.key".into()) },
+            ..Default::default()
+        };
+
+        assert_eq!(default.master_key_path(), PathBuf::from("/var/lib/spinikus/master.key"));
+        assert_eq!(configured.master_key_path(), PathBuf::from("/etc/spinikus/master.key"));
     }
 }

@@ -1,11 +1,14 @@
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use sqlx::{
     ConnectOptions, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous}
 };
 
-use crate::StoreError;
+use crate::{
+    StoreError,
+    secrets::{Keyring, MasterKey}
+};
 
 /// How long a connection waits on a locked database before giving up.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,16 +44,24 @@ pub(crate) fn format_timestamp(at: jiff::Timestamp) -> String {
 /// The SQLite implementation of every repository trait.
 #[derive(Clone)]
 pub struct SqliteStore {
-    pool: SqlitePool
+    pool: SqlitePool,
+    keyring: Arc<Keyring>
 }
 
 impl SqliteStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    /// Wraps a migrated pool, unwrapping the data keys with `master_key` (and creating the
+    /// first one on a new database). Fails if the database was set up with another master key.
+    pub async fn open(pool: SqlitePool, master_key: &MasterKey) -> Result<Self, StoreError> {
+        let keyring = Keyring::load(&pool, master_key).await?;
+        Ok(Self { pool, keyring: Arc::new(keyring) })
     }
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub fn keyring(&self) -> &Keyring {
+        &self.keyring
     }
 
     /// Starts a write transaction up front, so reads inside it see the state the writes are based on.

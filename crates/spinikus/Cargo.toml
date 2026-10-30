@@ -15,3 +15,6 @@ tracing-subscriber.workspace = true
 
 spinikus-core.workspace = true
 spinikus-store.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

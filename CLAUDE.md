@@ -14,6 +14,7 @@ Each entity gets a repository trait in `spinikus-store` (methods named after the
 - cursor pagination by ID; IDs come from a process-wide monotonic ULID generator, so they sort in creation order;
 - multi-statement writes in `SqliteStore::begin_write` (`BEGIN IMMEDIATE`), and timestamps written from Rust via `db::format_timestamp`;
 - input validation (slugs aside) left to the service layer; the store keeps rows consistent with `CHECK` constraints and unique indexes.
+- secrets sealed with `SqliteStore::keyring()` (`secrets.rs`): envelope encryption with XChaCha20-Poly1305, data keys in `data_keys` wrapped by the master key. Store the `Sealed` key ID next to the ciphertext, and pass the owning row's ID as the `context` so a ciphertext can't be moved to another row.
 
 ## Commands
 
@@ -28,7 +29,7 @@ cargo run -- server migrate          # apply pending migrations and exit
 cargo clippy --workspace && cargo fmt
 ```
 
-The binary loads `spinikus.toml` from the **current working directory** (required), overlaid by env vars with prefix `SPINIKUS` and `__` as the nesting separator (e.g. `SPINIKUS_LOGGING__LEVEL=info`). `RUST_LOG` overrides `logging.level` when set. Run it from the repo root. The database defaults to `<data_dir>/spinikus.db` (`data/` in dev, gitignored).
+The binary loads `spinikus.toml` from the **current working directory** (required), overlaid by env vars with prefix `SPINIKUS` and `__` as the nesting separator (e.g. `SPINIKUS_LOGGING__LEVEL=info`). `RUST_LOG` overrides `logging.level` when set. Run it from the repo root. The database defaults to `<data_dir>/spinikus.db` (`data/` in dev, gitignored). The master encryption key comes from `SPINIKUS_SECRETS__MASTER_KEY` or `[secrets] master_key_file`; with neither, `<data_dir>/master.key` is generated on first start. `server run` refuses to start if the database's data keys were wrapped by a different master key.
 
 Migrations live in `crates/spinikus-store/migrations/` as `NNNN_<name>.sql`, are embedded with `sqlx::migrate!`, and run automatically on startup. Tables are `STRICT`; timestamps are `TEXT` in UTC RFC 3339 with milliseconds (`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`).
 

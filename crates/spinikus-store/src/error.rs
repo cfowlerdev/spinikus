@@ -16,6 +16,8 @@ pub enum StoreError {
     /// A stored value could not be read back into its domain type.
     #[error("invalid {column} in {entity} row: {problem}")]
     InvalidRow { entity: &'static str, column: &'static str, problem: String },
+    #[error(transparent)]
+    Secrets(#[from] crate::secrets::SecretsError),
     #[error("failed to create database directory {path}")]
     CreateDir { path: String, source: std::io::Error },
     #[error(transparent)]
