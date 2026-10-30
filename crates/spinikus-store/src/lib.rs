@@ -8,6 +8,7 @@ pub mod secrets;
 pub mod servers;
 pub mod services;
 pub mod sources;
+pub mod variables;
 #[cfg(test)]
 mod test_support;
 
@@ -21,3 +22,4 @@ pub use secrets::{Keyring, MasterKey, Sealed, SecretsError};
 pub use servers::ServerRepository;
 pub use services::ServiceRepository;
 pub use sources::SourceRepository;
+pub use variables::VariableRepository;

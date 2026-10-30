@@ -13,6 +13,7 @@ Each entity gets a repository trait in `spinikus-store` (methods named after the
 - a `revision` column bumped on every user-facing update, and updates that take the expected revision (`RevisionMismatch` otherwise);
 - cursor pagination by ID; IDs come from a process-wide monotonic ULID generator, so they sort in creation order;
 - multi-statement writes in `SqliteStore::begin_write` (`BEGIN IMMEDIATE`), and timestamps written from Rust via `db::format_timestamp`;
+- SQL as `&'static str` only (sqlx 0.9 rejects dynamic strings): when a query varies, build each variant with `concat!` and a small macro (see `columns!`, `insert_under!` in `variables.rs`) rather than `format!`;
 - input validation (slugs aside) left to the service layer; the store keeps rows consistent with `CHECK` constraints and unique indexes.
 - secrets sealed with `SqliteStore::keyring()` (`secrets.rs`): envelope encryption with XChaCha20-Poly1305, data keys in `data_keys` wrapped by the master key. Store the `Sealed` key ID next to the ciphertext, and pass the owning row's ID as the `context` so a ciphertext can't be moved to another row.
 
