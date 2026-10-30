@@ -32,6 +32,12 @@ pub async fn connect(path: &Path) -> Result<SqlitePool, StoreError> {
     Ok(pool)
 }
 
+/// Formats a timestamp the way every timestamp column stores it, matching
+/// `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`: UTC with milliseconds, so stored values sort as text.
+pub(crate) fn format_timestamp(at: jiff::Timestamp) -> String {
+    at.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
 /// The SQLite implementation of every repository trait.
 #[derive(Clone)]
 pub struct SqliteStore {
@@ -45,6 +51,12 @@ impl SqliteStore {
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Starts a write transaction up front, so reads inside it see the state the writes are based on.
+    /// A deferred transaction that reads first can fail with "database is locked" when it starts writing.
+    pub(crate) async fn begin_write(&self) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, StoreError> {
+        Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
     }
 }
 
@@ -81,6 +93,16 @@ mod tests {
         assert_eq!(journal_mode, "wal");
         assert_eq!(foreign_keys, 1);
         assert_eq!(busy_timeout, 5000);
+    }
+
+    #[tokio::test]
+    async fn formats_timestamps_like_sqlite() {
+        let (_dir, pool) = migrated_pool().await;
+        let now: String = sqlx::query_scalar("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").fetch_one(&pool).await.unwrap();
+        let parsed: jiff::Timestamp = now.parse().unwrap();
+
+        assert_eq!(format_timestamp(parsed), now);
+        assert_eq!(format_timestamp("2026-10-30T09:00:00Z".parse().unwrap()), "2026-10-30T09:00:00.000Z");
     }
 
     #[tokio::test]

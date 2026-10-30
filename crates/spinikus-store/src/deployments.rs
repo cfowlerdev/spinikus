@@ -202,13 +202,6 @@ async fn find_by_status(
     row.map(Deployment::try_from).transpose()
 }
 
-impl SqliteStore {
-    /// Starts a write transaction up front, so reads inside it see the state the writes are based on.
-    async fn begin_write(&self) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, StoreError> {
-        Ok(self.pool().begin_with("BEGIN IMMEDIATE").await?)
-    }
-}
-
 #[async_trait]
 impl DeploymentRepository for SqliteStore {
     async fn create_deployment(&self, new: NewDeployment, actor: Actor) -> Result<Deployment, StoreError> {

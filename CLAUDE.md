@@ -4,7 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Spinikus is a Rust, self-hosted PaaS (a lighter Coolify/Dokploy, "self-hosted Vercel"). The repo is an early skeleton: the workspace and crates exist, but every library crate is still the `cargo new` placeholder and only the `spinikus` binary crate has real code (clap CLI + config/logging bootstrap). The design is in `docs/spinikus.md` — read it before building any feature; it records decisions (with the alternatives that were rejected) that the code is expected to follow.
+Spinikus is a Rust, self-hosted PaaS (a lighter Coolify/Dokploy, "self-hosted Vercel"). It is early: `spinikus-core` (domain types, IDs, deployment state machine) and `spinikus-store` (SQLite repositories) are being built out entity by entity following the data model in the design doc, and the `spinikus` binary has the CLI, config and database startup. The other crates are still `cargo new` placeholders. The design is in `docs/spinikus.md` — read it before building any feature; it records decisions (with the alternatives that were rejected) that the code is expected to follow.
+
+### Store conventions
+
+Each entity gets a repository trait in `spinikus-store` (methods named after the entity, e.g. `create_project`, since `SqliteStore` implements them all) with:
+- soft delete (`deleted_at`) for projects, environments and services, with slugs unique only among non-deleted rows; creating under a deleted parent is `NotFound`, deleting a parent with active children is `HasChildren`;
+- a `revision` column bumped on every user-facing update, and updates that take the expected revision (`RevisionMismatch` otherwise);
+- cursor pagination by ID; IDs come from a process-wide monotonic ULID generator, so they sort in creation order;
+- multi-statement writes in `SqliteStore::begin_write` (`BEGIN IMMEDIATE`), and timestamps written from Rust via `db::format_timestamp`;
+- input validation (slugs aside) left to the service layer; the store keeps rows consistent with `CHECK` constraints and unique indexes.
 
 ## Commands
 
