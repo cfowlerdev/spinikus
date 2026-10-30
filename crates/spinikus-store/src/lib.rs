@@ -1,5 +1,7 @@
+pub mod certificates;
 pub mod db;
 pub mod deployments;
+pub mod domains;
 pub mod environments;
 pub mod error;
 pub mod instances;
@@ -13,8 +15,10 @@ pub mod variables;
 #[cfg(test)]
 mod test_support;
 
+pub use certificates::CertificateRepository;
 pub use db::{SqliteStore, connect, migrate};
 pub use deployments::DeploymentRepository;
+pub use domains::DomainRepository;
 pub use environments::EnvironmentRepository;
 pub use error::StoreError;
 pub use instances::InstanceRepository;

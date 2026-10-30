@@ -32,7 +32,8 @@ pub trait ServiceRepository: Send + Sync {
     /// Replaces the service's fields if it is still at `revision`.
     async fn update_service(&self, id: ServiceId, revision: i64, fields: ServiceFields) -> Result<Service, StoreError>;
 
-    /// Soft-deletes the service, which frees its slug.
+    /// Soft-deletes the service, which frees its slug. Refused while it has domains, so a
+    /// deleted service never keeps hostnames reserved.
     async fn delete_service(&self, id: ServiceId) -> Result<(), StoreError>;
 }
 
@@ -176,14 +177,17 @@ impl ServiceRepository for SqliteStore {
             "UPDATE services
              SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                  revision = revision + 1
-             WHERE id = ? AND deleted_at IS NULL"
+             WHERE id = ? AND deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM domains WHERE service_id = services.id AND deleted_at IS NULL)"
         )
         .bind(id.to_string())
         .execute(self.pool())
         .await?;
 
         if result.rows_affected() == 0 {
-            return Err(not_found(id));
+            // Either the service is gone, or it still has domains.
+            self.get_service(id).await?;
+            return Err(StoreError::HasChildren { entity: ENTITY, id: id.to_string(), children: "domains" });
         }
         Ok(())
     }

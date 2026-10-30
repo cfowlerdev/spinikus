@@ -9,7 +9,7 @@ Spinikus is a Rust, self-hosted PaaS (a lighter Coolify/Dokploy, "self-hosted Ve
 ### Store conventions
 
 Each entity gets a repository trait in `spinikus-store` (methods named after the entity, e.g. `create_project`, since `SqliteStore` implements them all) with:
-- soft delete (`deleted_at`) for projects, environments and services, with slugs unique only among non-deleted rows; creating under a deleted parent is `NotFound`, deleting a parent with active children is `HasChildren`;
+- soft delete (`deleted_at`) for projects, environments, services and domains, with slugs and hostnames unique only among non-deleted rows; creating under a deleted parent is `NotFound`, deleting a parent with active children is `HasChildren`;
 - a `revision` column bumped on every user-facing update, and updates that take the expected revision (`RevisionMismatch` otherwise);
 - cursor pagination by ID; IDs come from a process-wide monotonic ULID generator, so they sort in creation order;
 - multi-statement writes in `SqliteStore::begin_write` (`BEGIN IMMEDIATE`), and timestamps written from Rust via `db::format_timestamp`;

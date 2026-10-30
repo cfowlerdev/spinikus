@@ -92,6 +92,7 @@ define_id!(InstanceId, "ins");
 define_id!(JobId, "job");
 define_id!(DomainId, "dom");
 define_id!(CertificateId, "crt");
+define_id!(AcmeAccountId, "acc");
 define_id!(VariableId, "var");
 define_id!(VolumeId, "vol");
 define_id!(UserId, "usr");

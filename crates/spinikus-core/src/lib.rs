@@ -1,6 +1,8 @@
 pub mod actor;
+pub mod certificate;
 pub mod config;
 pub mod deployment;
+pub mod domain;
 pub mod environment;
 pub mod id;
 pub mod job;
