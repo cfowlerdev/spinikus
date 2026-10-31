@@ -51,13 +51,15 @@ pub struct Control {
     authority: Arc<OnceCell<ca::CertificateAuthority>>,
     runner: Arc<deployments::Runner>,
     certificates: Arc<certificates::Certificates>,
+    logs: Arc<deployments::logs::DeploymentLogs>,
 }
 
 impl Control {
     pub fn new(store: SqliteStore) -> Self {
         let runner = Arc::new(deployments::Runner::new(DeploymentTimings::default()));
         let certificates = Arc::new(certificates::Certificates::new(Arc::new(InstantAcme::new()), CertificateTimings::default()));
-        Self { store, agents: AgentHub::default(), authority: Arc::default(), runner, certificates }
+        let logs = Arc::new(deployments::logs::DeploymentLogs::new(None));
+        Self { store, agents: AgentHub::default(), authority: Arc::default(), runner, certificates, logs }
     }
 
     /// Replaces the ACME client and the certificate manager's timings, such as to use a

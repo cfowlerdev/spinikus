@@ -283,6 +283,21 @@ async fn sets_a_source_and_deploys_it() {
     let path: Vec<_> = events.body.as_array().unwrap().iter().map(|event| event["to"].as_str().unwrap()).collect();
     assert_eq!(path, ["queued", "canceled"]);
     assert_eq!(again.status, StatusCode::CONFLICT);
+
+    let deploy_key = format!("{source}/deploy-key");
+    let logs = api.send(Method::GET, &format!("{location}/logs"), token, &[], None).await;
+    let no_key = api.send(Method::GET, &deploy_key, token, &[], None).await;
+    let ssh = json!({ "type": "git", "repo_url": "git@github.com:acme/web.git", "branch": "main" });
+    api.send(Method::PUT, &source, token, &[(header::IF_MATCH, replaced.header(header::ETAG))], Some(ssh)).await;
+    let key = api.send(Method::GET, &deploy_key, token, &[], None).await;
+    let rotated = api.send(Method::POST, &deploy_key, token, &[], None).await;
+
+    assert_eq!((logs.status, logs.header(header::CONTENT_TYPE)), (StatusCode::OK, "text/plain; charset=utf-8"));
+    assert_eq!(no_key.status, StatusCode::NOT_FOUND);
+    assert!(key.body["public_key"].as_str().unwrap().starts_with("ssh-ed25519 "), "{:?}", key.body);
+    assert!(key.body["fingerprint"].as_str().unwrap().starts_with("SHA256:"));
+    assert_eq!((rotated.status, rotated.header(header::LOCATION)), (StatusCode::CREATED, deploy_key.as_str()));
+    assert_ne!(rotated.body["fingerprint"], key.body["fingerprint"]);
 }
 
 #[tokio::test]

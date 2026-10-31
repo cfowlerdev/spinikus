@@ -6,6 +6,19 @@ use thiserror::Error;
 
 use crate::id::{ServiceId, SourceId};
 
+/// An SSH key a service clones its Git repository with, for private repositories. Add the
+/// public key to the repository as a read-only deploy key. The private key is stored
+/// sealed and only ever sent to the agent that builds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeployKey {
+    pub service_id: ServiceId,
+    /// In OpenSSH format: `ssh-ed25519 AAAA… spinikus`.
+    pub public_key: String,
+    /// `SHA256:…`, as `ssh-keygen -l` and Git hosts show it.
+    pub fingerprint: String,
+    pub created_at: Timestamp,
+}
+
 /// Longest repo URL, branch, root directory or image reference we accept.
 const MAX_LEN: usize = 1024;
 
@@ -53,6 +66,13 @@ pub struct SourceError {
     pub problem: &'static str,
 }
 
+impl GitSource {
+    /// Whether the repository is cloned over SSH, which needs a deploy key.
+    pub fn uses_ssh(&self) -> bool {
+        self.repo_url.starts_with("ssh://") || !self.repo_url.contains("://")
+    }
+}
+
 impl SourceSpec {
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -69,7 +89,7 @@ impl SourceSpec {
                 check("repo_url", &git.repo_url, repo_url_problem)?;
                 check("branch", &git.branch, branch_problem)?;
                 match &git.root_directory {
-                    Some(dir) => check("root_directory", dir, root_directory_problem),
+                    Some(dir) => check("root_directory", dir, relative_path_problem),
                     None => Ok(()),
                 }
             }
@@ -123,7 +143,8 @@ fn branch_problem(branch: &str) -> Option<&'static str> {
     }
 }
 
-fn root_directory_problem(dir: &str) -> Option<&'static str> {
+/// Why `path` is not a relative path inside the repository, if it is not.
+pub(crate) fn relative_path_problem(dir: &str) -> Option<&'static str> {
     if dir.starts_with('/') || dir.contains('\\') {
         Some("it must be a relative path using `/`")
     } else if dir.split('/').any(|part| part == "..") {

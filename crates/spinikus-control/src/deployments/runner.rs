@@ -25,7 +25,8 @@ use std::{
 use jiff::Timestamp;
 use spinikus_core::{
     actor::Actor,
-    deployment::{Deployment, DeploymentStatus, DeploymentTrigger, EndReason},
+    app_file::AppFile,
+    deployment::{Deployment, DeploymentSnapshot, DeploymentStatus, DeploymentTrigger, EndReason},
     id::{ServerId, ServiceId},
     server::Server,
 };
@@ -87,6 +88,13 @@ impl Runner {
 
 type Sent = HashMap<String, (ServerId, Instant)>;
 
+/// The deployment's snapshot with the settings from its `spinikus.json` merged in.
+fn with_app_file(deployment: &Deployment, text: &str) -> Result<DeploymentSnapshot, String> {
+    let file = AppFile::parse(text).map_err(|error| error.to_string())?;
+    let (config, from_file) = file.apply(&deployment.snapshot.config).map_err(|error| error.to_string())?;
+    Ok(DeploymentSnapshot { source: deployment.snapshot.source.clone(), config, from_file })
+}
+
 /// How long ago `since` was, zero if in the future.
 fn elapsed(since: Timestamp) -> Duration {
     Duration::try_from(Timestamp::now().duration_since(since)).unwrap_or_default()
@@ -132,6 +140,7 @@ impl Control {
             }
         };
         // Forget commands of deployments that have finished.
+        self.forget_log_servers(&active.iter().map(|deployment| deployment.id).collect::<Vec<_>>()).await;
         let ids: HashSet<String> = active.iter().map(|deployment| deployment.id.to_string()).collect();
         sent.retain(|command, _| command.split_once('/').is_some_and(|(deployment, _)| ids.contains(deployment)));
         // Before draining deployments are looked at, so they see the routes that replace them.
@@ -267,13 +276,13 @@ impl Control {
 
     /// Progress from an agent: the phase can move a starting deployment to `verifying`.
     pub(crate) async fn deployment_progress(&self, server: ServerId, progress: pb::CommandProgress) {
-        let Some((id, Step::Start)) = parse_command_id(&progress.command_id) else {
+        let Some((id, step)) = parse_command_id(&progress.command_id) else {
             return;
         };
-        for line in &progress.log_lines {
-            tracing::debug!(deployment = %id, line = line.text, "deployment log");
+        if matches!(step, Step::Prepare | Step::Start) {
+            self.log_progress(server, id, &progress).await;
         }
-        if progress.phase != "verifying" {
+        if step != Step::Start || progress.phase != "verifying" {
             return;
         }
         let _sent = self.runner().sent.lock().await;
@@ -324,7 +333,14 @@ impl Control {
                     return self.fail(&deployment, EndReason::BuildFailed, "the agent reported no image", actor).await;
                 }
                 let commit = Some(prepared.commit_sha).filter(|commit| !commit.is_empty());
-                self.store().record_build(id, commit, Some(prepared.image)).await?;
+                let snapshot = match prepared.app_file.as_str() {
+                    "" => None,
+                    text => match with_app_file(&deployment, text) {
+                        Ok(snapshot) => Some(snapshot),
+                        Err(problem) => return self.fail(&deployment, EndReason::BuildFailed, &problem, actor).await,
+                    },
+                };
+                self.store().record_build(id, commit, Some(prepared.image), snapshot).await?;
                 let starting = self.store().transition_deployment(id, DeploymentStatus::Starting, None, None, actor).await?;
                 // Start right away rather than on the next pass.
                 self.advance(&mut sent, starting, &mut HashSet::new()).await?;

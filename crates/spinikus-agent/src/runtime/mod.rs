@@ -5,7 +5,7 @@
 //! An app container's port is published on `127.0.0.1` with a host port the runtime picks
 //! ([`ContainerRuntime::endpoint`]); the health check and the proxy connect there.
 
-use std::{net::SocketAddr, pin::Pin, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, pin::Pin, time::Duration};
 
 use async_trait::async_trait;
 use spinikus_core::server::ObservedInstance;
@@ -41,6 +41,21 @@ pub struct ContainerSpec {
     pub port: Option<u16>,
     /// Named runtime volumes and where to mount them.
     pub volumes: Vec<Mount>,
+}
+
+/// An image to build from a directory with a Dockerfile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildSpec {
+    /// The build context, sent to the builder whole except for `.git`.
+    pub context: PathBuf,
+    /// The Dockerfile, relative to the context.
+    pub dockerfile: String,
+    /// The stage to build, the last one if `None`.
+    pub target: Option<String>,
+    /// Build arguments. Values may be secrets: never log them.
+    pub args: Vec<(String, String)>,
+    /// The tag to give the image.
+    pub tag: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +94,11 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// Pulls an image and returns the reference to run, pinned by digest. `progress` gets
     /// a line for each step of the pull.
     async fn pull(&self, image: &str, progress: &(dyn Fn(String) + Send + Sync)) -> Result<String, RuntimeError>;
+
+    /// Builds an image and returns its ID (`sha256:…`), which runs it exactly. `progress`
+    /// gets the build's output, a line at a time. A failed build is `Failed`, with the
+    /// builder's error.
+    async fn build(&self, spec: &BuildSpec, progress: &(dyn Fn(String) + Send + Sync)) -> Result<String, RuntimeError>;
 
     /// Creates a container, without starting it, and returns its ID.
     async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError>;

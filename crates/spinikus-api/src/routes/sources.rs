@@ -1,15 +1,18 @@
-use axum::{extract::State, response::Response};
+use axum::{
+    extract::State,
+    response::{Json, Response},
+};
 use serde::Deserialize;
 use spinikus_control::Control;
 use spinikus_core::{
     id::ServiceId,
-    source::{GitSource, ImageSource, SourceSpec},
+    source::{DeployKey, GitSource, ImageSource, SourceSpec},
 };
 
 use crate::{
     error::ApiError,
     extract::{Authenticated, Body, IfMatch, Path},
-    response::{created, tagged},
+    response::{created, located, tagged},
 };
 
 #[derive(Deserialize)]
@@ -57,4 +60,23 @@ pub async fn replace(
 ) -> Result<Response, ApiError> {
     let source = control.replace_source(&principal, service_id, revision, body.into()).await?;
     Ok(tagged(source.revision, source))
+}
+
+/// The public half of the service's deploy key, to add to the repository's host.
+pub async fn show_deploy_key(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+) -> Result<Json<DeployKey>, ApiError> {
+    Ok(Json(control.get_deploy_key(&principal, service_id).await?))
+}
+
+/// Replaces the service's deploy key with a new one. The old key stops working for builds at once.
+pub async fn create_deploy_key(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+) -> Result<Response, ApiError> {
+    let key = control.create_deploy_key(&principal, service_id).await?;
+    Ok(located(format!("/api/v1/services/{service_id}/source/deploy-key"), key))
 }

@@ -107,7 +107,7 @@ pub async fn open_control(config: &SpinikusConfig) -> anyhow::Result<Control> {
     let master_key = secrets::load_master_key(config)?;
     let store = SqliteStore::open(pool, &master_key).await.context("Failed to load the secrets keyring")?;
     tracing::info!(master_key = master_key.id(), "Secrets keyring ready");
-    Ok(Control::new(store))
+    Ok(Control::new(store).with_log_dir(config.data_dir.join("logs")))
 }
 
 /// Connects to the database and applies any pending migrations.

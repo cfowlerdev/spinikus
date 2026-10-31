@@ -115,7 +115,12 @@ impl TryFrom<AccountRow> for AcmeAccount {
 
 /// Runs `query` (selecting a sealed column and its data key ID) for row `id`, and decrypts the value,
 /// which was sealed with the row's ID as context.
-async fn open_sealed(store: &SqliteStore, query: &'static str, entity: &'static str, id: String) -> Result<Secret, StoreError> {
+pub(crate) async fn open_sealed(
+    store: &SqliteStore,
+    query: &'static str,
+    entity: &'static str,
+    id: String,
+) -> Result<Secret, StoreError> {
     let row: Option<(Vec<u8>, String)> = sqlx::query_as(query).bind(&id).fetch_optional(store.pool()).await?;
     let (ciphertext, key_id) = row.ok_or_else(|| StoreError::NotFound { entity, id: id.clone() })?;
     let sealed = Sealed { key_id: parse_column(entity, "data_key_id", &key_id)?, ciphertext };

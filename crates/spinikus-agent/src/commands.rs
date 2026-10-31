@@ -22,6 +22,7 @@ use tokio::{
 };
 
 use crate::{
+    build::BuildOptions,
     deploy::{prepare_deployment, start_deployment},
     runtime::{ContainerRuntime, RuntimeError},
 };
@@ -38,6 +39,7 @@ const PROGRESS_BUFFER: usize = 256;
 
 pub(crate) struct Commands {
     runtime: Arc<dyn ContainerRuntime>,
+    build: Arc<BuildOptions>,
     tasks: JoinSet<pb::CommandResult>,
     running: HashMap<task::Id, String>,
     finished: HashMap<String, pb::CommandResult>,
@@ -59,12 +61,25 @@ pub(crate) enum CommandEvent {
 pub(crate) struct Progress {
     command_id: String,
     phase: Mutex<String>,
+    /// Values replaced in log lines, such as secret build variables.
+    secrets: Mutex<Vec<String>>,
     sender: mpsc::Sender<pb::CommandProgress>,
 }
 
+/// Shorter values are not redacted, since they would mangle unrelated text.
+const MIN_REDACTED_LEN: usize = 4;
+
 impl Progress {
     pub(crate) fn new(command_id: String, sender: mpsc::Sender<pb::CommandProgress>) -> Self {
-        Self { command_id, phase: Mutex::default(), sender }
+        Self { command_id, phase: Mutex::default(), secrets: Mutex::default(), sender }
+    }
+
+    /// Replaces these values with `[redacted]` in log lines from now on.
+    pub(crate) fn redact(&self, secrets: impl IntoIterator<Item = String>) {
+        let mut redacted = self.secrets.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        redacted.extend(secrets.into_iter().filter(|secret| secret.len() >= MIN_REDACTED_LEN));
+        // Longest first, so a secret containing another is replaced whole.
+        redacted.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     }
 
     /// Moves on to a new step, such as "pulling image".
@@ -73,8 +88,13 @@ impl Progress {
         self.send(Vec::new());
     }
 
-    /// A log line for the current step. Never pass it a secret.
-    pub(crate) fn line(&self, text: String) {
+    /// A log line for the current step, with redacted values replaced.
+    pub(crate) fn line(&self, mut text: String) {
+        for secret in self.secrets.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter() {
+            if text.contains(secret.as_str()) {
+                text = text.replace(secret.as_str(), "[redacted]");
+            }
+        }
         let line = pb::LogLine { at: Some(std::time::SystemTime::now().into()), stream: pb::LogStream::Stdout.into(), text };
         self.send(vec![line]);
     }
@@ -87,10 +107,11 @@ impl Progress {
 }
 
 impl Commands {
-    pub(crate) fn new(runtime: Arc<dyn ContainerRuntime>) -> Self {
+    pub(crate) fn new(runtime: Arc<dyn ContainerRuntime>, build: BuildOptions) -> Self {
         let (progress_sender, progress) = mpsc::channel(PROGRESS_BUFFER);
         Self {
             runtime,
+            build: Arc::new(build),
             tasks: JoinSet::new(),
             running: HashMap::new(),
             finished: HashMap::new(),
@@ -126,7 +147,8 @@ impl Commands {
         let work = match command.kind {
             Some(Kind::PrepareDeployment(prepare)) => {
                 tracing::info!(command = id, deployment = prepare.deployment_id, "preparing a deployment");
-                Box::pin(async move { prepare_deployment(&*runtime, prepare, &progress).await }) as Work
+                let build = self.build.clone();
+                Box::pin(async move { prepare_deployment(&*runtime, &build, prepare, &progress).await }) as Work
             }
             Some(Kind::StartDeployment(start)) => {
                 tracing::info!(command = id, deployment = start.deployment_id, "starting a deployment");
@@ -322,6 +344,10 @@ mod tests {
         timeout(Duration::from_secs(5), finished).await.expect("a command finished")
     }
 
+    fn builds() -> BuildOptions {
+        BuildOptions::in_dir(&std::env::temp_dir().join("spinikus-agent-tests"))
+    }
+
     fn failed(result: &pb::CommandResult) -> &pb::CommandFailed {
         match &result.outcome {
             Some(Outcome::Failed(failed)) => failed,
@@ -333,6 +359,18 @@ mod tests {
         matches!(result.outcome, Some(Outcome::Succeeded(_)))
     }
 
+    #[test]
+    fn redacts_secrets_from_log_lines() {
+        let (sender, mut receiver) = mpsc::channel(8);
+        let progress = Progress::new("cmd".to_string(), sender);
+        progress.redact(["s3cret".to_string(), "s3cret-longer".to_string(), "abc".to_string()]);
+
+        progress.line("token s3cret-longer and s3cret, abc".to_string());
+
+        let line = receiver.try_recv().unwrap().log_lines.remove(0).text;
+        assert_eq!(line, "token [redacted] and [redacted], abc");
+    }
+
     #[tokio::test]
     async fn stops_and_removes_a_deployments_containers_only() {
         let runtime = Arc::new(MemoryRuntime::new());
@@ -340,7 +378,7 @@ mod tests {
         runtime.put(container("old-1", draining));
         runtime.put(container("old-2", draining));
         runtime.put(container("new", live));
-        let mut commands = Commands::new(runtime.clone());
+        let mut commands = Commands::new(runtime.clone(), builds());
 
         assert_eq!(commands.start(command("cmd-1", stop(draining))), None);
         assert_eq!(commands.in_flight(), ["cmd-1"]);
@@ -359,7 +397,7 @@ mod tests {
         let runtime = Arc::new(MemoryRuntime::new());
         let deployment = DeploymentId::new();
         runtime.put(container("c", deployment));
-        let mut commands = Commands::new(runtime.clone());
+        let mut commands = Commands::new(runtime.clone(), builds());
 
         commands.start(command("cmd-1", stop(deployment)));
         // Still running: the repeat is dropped, and the one result comes later.
@@ -376,7 +414,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopping_a_deployment_without_containers_succeeds() {
-        let mut commands = Commands::new(Arc::new(MemoryRuntime::new()));
+        let mut commands = Commands::new(Arc::new(MemoryRuntime::new()), builds());
 
         commands.start(command("cmd-1", stop(DeploymentId::new())));
 
@@ -389,7 +427,7 @@ mod tests {
         let mut exited = container("c", DeploymentId::new());
         exited.status = InstanceStatus::Exited;
         runtime.put(exited);
-        let mut commands = Commands::new(runtime.clone());
+        let mut commands = Commands::new(runtime.clone(), builds());
 
         let restart = |id: &str| Kind::RestartInstance(pb::RestartInstance { container_id: id.to_string() });
         commands.start(command("cmd-1", restart("c")));
@@ -406,7 +444,7 @@ mod tests {
     async fn reports_runtime_failures() {
         let runtime = Arc::new(MemoryRuntime::new());
         runtime.set_available(false);
-        let mut commands = Commands::new(runtime);
+        let mut commands = Commands::new(runtime, builds());
 
         commands.start(command("cmd-1", stop(DeploymentId::new())));
         let result = finish(&mut commands).await;
@@ -417,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_commands_it_cannot_run_yet() {
-        let mut commands = Commands::new(Arc::new(MemoryRuntime::new()));
+        let mut commands = Commands::new(Arc::new(MemoryRuntime::new()), builds());
         let start = Kind::RunRelease(pb::RunRelease::default());
         let invalid = Kind::StopDeployment(pb::StopDeployment { deployment_id: "web".to_string(), grace_period: None });
 
@@ -435,7 +473,7 @@ mod tests {
     async fn progress_comes_before_the_result() {
         let runtime = Arc::new(MemoryRuntime::new());
         runtime.add_image("web:1", "web@sha256:01");
-        let mut commands = Commands::new(runtime);
+        let mut commands = Commands::new(runtime, builds());
         let prepare = pb::PrepareDeployment {
             deployment_id: DeploymentId::new().to_string(),
             source: Some(pb::prepare_deployment::Source::Image(pb::ImageSource { image: "web:1".to_string() })),

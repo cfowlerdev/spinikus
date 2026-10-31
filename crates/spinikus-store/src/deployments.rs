@@ -56,12 +56,14 @@ pub trait DeploymentRepository: Send + Sync {
     ) -> Result<Deployment, StoreError>;
 
     /// Records the commit and image once the agent knows them. Each can be set once;
-    /// setting a different value later is a `Conflict`.
+    /// setting a different value later is a `Conflict`. A snapshot, given when the build
+    /// read `spinikus.json`, replaces the deployment's.
     async fn record_build(
         &self,
         id: DeploymentId,
         commit_sha: Option<String>,
         image: Option<String>,
+        snapshot: Option<DeploymentSnapshot>,
     ) -> Result<Deployment, StoreError>;
 
     /// The variables the deployment was created with, decrypted, secrets included.
@@ -431,6 +433,7 @@ impl DeploymentRepository for SqliteStore {
         id: DeploymentId,
         commit_sha: Option<String>,
         image: Option<String>,
+        snapshot: Option<DeploymentSnapshot>,
     ) -> Result<Deployment, StoreError> {
         let mut tx = self.begin_write().await?;
         let deployment = fetch(&mut tx, id).await?;
@@ -446,12 +449,13 @@ impl DeploymentRepository for SqliteStore {
 
         sqlx::query(
             "UPDATE deployments
-             SET commit_sha = coalesce(commit_sha, ?), image = coalesce(image, ?),
+             SET commit_sha = coalesce(commit_sha, ?), image = coalesce(image, ?), snapshot = coalesce(?, snapshot),
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?",
         )
         .bind(commit_sha)
         .bind(image)
+        .bind(snapshot.map(|snapshot| serde_json::to_string(&snapshot).expect("snapshots serialize")))
         .bind(id.to_string())
         .execute(&mut *tx)
         .await?;
@@ -515,6 +519,7 @@ mod tests {
             snapshot: DeploymentSnapshot {
                 source: SourceSpec::Image(ImageSource { image: "ghcr.io/acme/web:1".to_string() }),
                 config: Map::new(),
+                from_file: Vec::new(),
             },
             commit_sha: None,
             image: None,
@@ -698,13 +703,20 @@ mod tests {
         let (service_id, server_id) = service(&store).await;
         let deployment = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
 
-        let with_commit = store.record_build(deployment.id, Some("abc123".to_string()), None).await.unwrap();
-        let with_image =
-            store.record_build(deployment.id, Some("abc123".to_string()), Some("web@sha256:1".to_string())).await.unwrap();
-        let changed = store.record_build(deployment.id, Some("def456".to_string()), None).await;
+        let with_commit = store.record_build(deployment.id, Some("abc123".to_string()), None, None).await.unwrap();
+        let mut snapshot = deployment.snapshot.clone();
+        snapshot.config.insert("runtime".to_string(), serde_json::json!({ "port": 3000 }));
+        snapshot.from_file = vec!["runtime.port".to_string()];
+        let with_image = store
+            .record_build(deployment.id, Some("abc123".to_string()), Some("web@sha256:1".to_string()), Some(snapshot.clone()))
+            .await
+            .unwrap();
+        let changed = store.record_build(deployment.id, Some("def456".to_string()), None, None).await;
 
         assert_eq!((with_commit.commit_sha.as_deref(), with_commit.image.as_deref()), (Some("abc123"), None));
+        assert_eq!(with_commit.snapshot, deployment.snapshot);
         assert_eq!(with_image.image.as_deref(), Some("web@sha256:1"));
+        assert_eq!(with_image.snapshot, snapshot);
         assert!(matches!(changed, Err(StoreError::Conflict { field: "commit_sha", .. })), "{changed:?}");
     }
 
@@ -713,7 +725,7 @@ mod tests {
         let (_dir, store) = store().await;
         let (service_id, server_id) = service(&store).await;
         let first = deploy_live(&store, service_id, server_id).await;
-        store.record_build(first.id, None, Some("web@sha256:1".to_string())).await.unwrap();
+        store.record_build(first.id, None, Some("web@sha256:1".to_string()), None).await.unwrap();
         deploy_live(&store, service_id, server_id).await;
 
         let rollback = NewDeployment {

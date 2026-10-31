@@ -177,6 +177,9 @@ message PreparedImage {
   string image = 1;
   // The commit that was built, for Git sources.
   string commit_sha = 2;
+  // The text of the source's spinikus.json, if it has one, for the control plane to merge
+  // into the deployment's settings.
+  string app_file = 3;
 }
 
 message CommandFailed {
@@ -268,6 +271,8 @@ message GitSource {
   string root_directory = 4;
   // A short-lived credential for private repositories; empty for public ones.
   string access_token = 5;
+  // The service's deploy key, in OpenSSH format, for SSH repositories; empty for none.
+  string ssh_private_key = 6;
 }
 
 message ImageSource {

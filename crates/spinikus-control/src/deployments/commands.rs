@@ -10,7 +10,7 @@ use spinikus_core::{
     variable::{ResolvedVariable, VariableAvailability},
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, prepare_deployment::Source};
-use spinikus_store::{DeploymentRepository, VolumeRepository};
+use spinikus_store::{DeployKeyRepository, DeploymentRepository, VolumeRepository};
 
 use crate::{Control, ControlError};
 
@@ -87,13 +87,21 @@ impl Control {
     pub(crate) async fn prepare_command(&self, deployment: &Deployment) -> Result<pb::Command, ControlError> {
         let source = match &deployment.snapshot.source {
             SourceSpec::Image(image) => Source::Image(pb::ImageSource { image: image.image.clone() }),
-            SourceSpec::Git(git) => Source::Git(pb::GitSource {
-                repo_url: git.repo_url.clone(),
-                branch: git.branch.clone(),
-                commit_sha: deployment.commit_sha.clone().unwrap_or_default(),
-                root_directory: git.root_directory.clone().unwrap_or_default(),
-                access_token: String::new(),
-            }),
+            SourceSpec::Git(git) => {
+                // The service's current key, so a key replaced since works for this build too.
+                let key = match git.uses_ssh() {
+                    true => self.store().deploy_key_private(deployment.service_id).await?,
+                    false => None,
+                };
+                Source::Git(pb::GitSource {
+                    repo_url: git.repo_url.clone(),
+                    branch: git.branch.clone(),
+                    commit_sha: deployment.commit_sha.clone().unwrap_or_default(),
+                    root_directory: git.root_directory.clone().unwrap_or_default(),
+                    access_token: String::new(),
+                    ssh_private_key: key.map(|key| key.expose().to_string()).unwrap_or_default(),
+                })
+            }
         };
         let resolved = self.store().deployment_variables(deployment.id).await?;
         let prepare = pb::PrepareDeployment {

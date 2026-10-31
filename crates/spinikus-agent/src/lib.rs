@@ -9,6 +9,7 @@
 //! release commands and TLS come next.
 
 mod backoff;
+mod build;
 mod certificate;
 mod commands;
 mod connection;
@@ -23,6 +24,7 @@ mod report;
 pub mod runtime;
 
 pub use backoff::Backoff;
+pub use build::BuildOptions;
 pub use connection::{ProxyListeners, RunOptions, run};
 pub use enroll::join;
 pub use error::AgentError;

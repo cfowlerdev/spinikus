@@ -61,6 +61,10 @@ pub struct NewDeployment {
 pub struct DeploymentSnapshot {
     pub source: SourceSpec,
     pub config: ServiceConfig,
+    /// The config fields `spinikus.json` set, such as `runtime.port`, once the build has
+    /// read it; the file's values are already in `config`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_file: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

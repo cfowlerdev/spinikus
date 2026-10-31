@@ -1,7 +1,8 @@
 //! The Docker driver, over the Engine API with bollard.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
     sync::{Arc, Mutex},
@@ -10,22 +11,24 @@ use std::{
 
 use async_trait::async_trait;
 use bollard::{
-    API_DEFAULT_VERSION, Docker,
+    API_DEFAULT_VERSION, Docker, body_try_stream,
     errors::Error,
     models::{
         ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EventMessageTypeEnum, HealthStatusEnum,
         HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
     },
     query_parameters::{
-        CreateContainerOptionsBuilder, CreateImageOptionsBuilder, EventsOptionsBuilder, ListContainersOptionsBuilder,
-        RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
+        BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptionsBuilder, CreateImageOptionsBuilder, EventsOptionsBuilder,
+        ListContainersOptionsBuilder, RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
     },
 };
 use jiff::Timestamp;
 use spinikus_core::server::{InstanceHealth, InstanceStatus, ObservedInstance};
 use tokio_stream::StreamExt;
 
-use super::{ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner};
+use super::{
+    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
+};
 
 /// How long to wait for the Engine API to answer, beyond any grace period a call waits for.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -173,6 +176,61 @@ impl ContainerRuntime for DockerRuntime {
             .ok_or_else(|| RuntimeError::Failed(format!("{reference} has no digest")))
     }
 
+    /// Builds with BuildKit, which Dockerfiles with `RUN --mount` and the like need, sending
+    /// the context as a tar stream written while it uploads.
+    async fn build(&self, spec: &BuildSpec, progress: &(dyn Fn(String) + Send + Sync)) -> Result<String, RuntimeError> {
+        let docker = self.client()?;
+        let (reader, writer) = tokio::io::duplex(64 * 1024);
+        let context = spec.context.clone();
+        let packing = tokio::task::spawn_blocking(move || {
+            let mut tar = tar::Builder::new(tokio_util::io::SyncIoBridge::new(writer));
+            tar.follow_symlinks(false);
+            pack(&mut tar, &context, Path::new(""))?;
+            tar.into_inner()?.flush()
+        });
+        let options = BuildImageOptionsBuilder::new()
+            .dockerfile(&spec.dockerfile)
+            .t(&spec.tag)
+            .target(spec.target.as_deref().unwrap_or_default())
+            .buildargs(&spec.args.iter().cloned().collect())
+            .rm(true)
+            .version(BuilderVersion::BuilderBuildKit)
+            .session(&format!("spinikus-{:032x}", rand::random::<u128>()))
+            .build();
+        let body = body_try_stream(tokio_util::io::ReaderStream::new(reader));
+        let mut building = docker.build_image(options, None, Some(body));
+        let mut output = BuildOutput::default();
+        let mut failure = None;
+        while let Some(step) = building.next().await {
+            match step {
+                Ok(info) => output.show(info, progress),
+                Err(Error::DockerStreamError { error }) => {
+                    failure = Some(RuntimeError::Failed(error));
+                    break;
+                }
+                Err(error) => {
+                    failure = Some(runtime_error(error));
+                    break;
+                }
+            }
+        }
+        drop(building);
+        let packed = packing.await.map_err(|error| RuntimeError::Failed(format!("packing the build context: {error}")))?;
+        if let Some(failure) = failure {
+            return Err(match (failure, output.error) {
+                (RuntimeError::Failed(message), Some(step)) => RuntimeError::Failed(format!("{step}: {message}")),
+                (failure, _) => failure,
+            });
+        }
+        // The upload ends when the builder has read what it needs; only a failure to read
+        // the context matters, and then the build has failed too.
+        if let Err(error) = packed {
+            tracing::debug!(%error, "the builder stopped reading the context early");
+        }
+        let image = docker.inspect_image(&spec.tag).await.map_err(runtime_error)?;
+        image.id.ok_or_else(|| RuntimeError::Failed(format!("the built image {} has no ID", spec.tag)))
+    }
+
     async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError> {
         let mut labels = HashMap::from([
             (SERVICE_LABEL.to_string(), spec.service_id.to_string()),
@@ -251,6 +309,60 @@ fn published(inspected: &ContainerInspectResponse) -> Option<SocketAddr> {
 
 fn seconds(duration: Duration) -> i32 {
     i32::try_from(duration.as_secs()).unwrap_or(i32::MAX)
+}
+
+/// Adds `dir` (at `prefix` in the archive) to the build context, without `.git`.
+fn pack<W: Write>(tar: &mut tar::Builder<W>, dir: &Path, prefix: &Path) -> std::io::Result<()> {
+    let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let name = prefix.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            tar.append_dir(&name, entry.path())?;
+            pack(tar, &entry.path(), &name)?;
+        } else {
+            tar.append_path_with_name(entry.path(), &name)?;
+        }
+    }
+    Ok(())
+}
+
+/// Turns the builder's output into log lines.
+#[derive(Default)]
+struct BuildOutput {
+    /// BuildKit steps already shown.
+    shown: HashSet<String>,
+    /// The step that failed, if one did.
+    error: Option<String>,
+}
+
+impl BuildOutput {
+    fn show(&mut self, info: bollard::models::BuildInfo, progress: &(dyn Fn(String) + Send + Sync)) {
+        if let Some(text) = info.stream {
+            text.lines().filter(|line| !line.trim().is_empty()).for_each(|line| progress(line.to_string()));
+        }
+        let Some(bollard::models::BuildInfoAux::BuildKit(status)) = info.aux else {
+            return;
+        };
+        for vertex in status.vertexes {
+            if vertex.started.is_some() && !vertex.name.is_empty() && self.shown.insert(vertex.digest.clone()) {
+                progress(match vertex.cached {
+                    true => format!("{} (cached)", vertex.name),
+                    false => vertex.name.clone(),
+                });
+            }
+            if !vertex.error.is_empty() && self.error.is_none() {
+                progress(format!("ERROR: {}", vertex.error));
+                self.error = Some(vertex.name);
+            }
+        }
+        for log in status.logs {
+            String::from_utf8_lossy(&log.msg).lines().for_each(|line| progress(line.to_string()));
+        }
+    }
 }
 
 fn runtime_error(error: Error) -> RuntimeError {

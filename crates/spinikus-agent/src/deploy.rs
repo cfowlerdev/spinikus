@@ -1,4 +1,5 @@
-//! Deployment commands: `PrepareDeployment` pulls the image and pins it by digest, and
+//! Deployment commands: `PrepareDeployment` pulls the image and pins it by digest, or
+//! builds it from Git ([`crate::build`]), and
 //! `StartDeployment` starts the deployment's container and runs the health check, whose
 //! outcome is the command's result.
 //!
@@ -13,6 +14,7 @@ use spinikus_core::id::{DeploymentId, ServiceId, VolumeId};
 use spinikus_proto::agent::v1::{self as pb, DeploymentStrategy, FailureReason, prepare_deployment::Source};
 
 use crate::{
+    build::{BuildOptions, build_from_git},
     commands::{Progress, failure, parse_id, stop_containers},
     health::{HealthCheck, verify},
     runtime::{ContainerRuntime, ContainerSpec, Mount, RuntimeError},
@@ -24,14 +26,18 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 
 pub(crate) async fn prepare_deployment(
     runtime: &dyn ContainerRuntime,
+    build: &BuildOptions,
     prepare: pb::PrepareDeployment,
     progress: &Progress,
 ) -> Result<pb::CommandSucceeded, pb::CommandFailed> {
     let _: DeploymentId = parse_id("deployment ID", &prepare.deployment_id)?;
-    let image = match prepare.source {
-        Some(Source::Image(source)) if !source.image.is_empty() => source.image,
+    let image = match &prepare.source {
+        Some(Source::Image(source)) if !source.image.is_empty() => source.image.clone(),
         Some(Source::Image(_)) => return Err(failure(FailureReason::Internal, "the image source names no image")),
-        Some(Source::Git(_)) => return Err(failure(FailureReason::BuildFailed, "this agent cannot build from Git yet")),
+        Some(Source::Git(git)) => {
+            let prepared = build_from_git(runtime, build, &prepare, git, progress).await?;
+            return Ok(pb::CommandSucceeded { prepared: Some(prepared) });
+        }
         None => return Err(failure(FailureReason::Internal, "the deployment has no source")),
     };
     progress.phase("pulling image");
@@ -40,7 +46,7 @@ pub(crate) async fn prepare_deployment(
         .await
         .map_err(|error| failure(FailureReason::BuildFailed, error.to_string()))?;
     progress.line(format!("Pinned {image} as {pinned}"));
-    Ok(pb::CommandSucceeded { prepared: Some(pb::PreparedImage { image: pinned, commit_sha: String::new() }) })
+    Ok(pb::CommandSucceeded { prepared: Some(pb::PreparedImage { image: pinned, ..Default::default() }) })
 }
 
 pub(crate) async fn start_deployment(
@@ -136,6 +142,10 @@ mod tests {
     use super::*;
     use crate::runtime::MemoryRuntime;
 
+    fn builds() -> BuildOptions {
+        BuildOptions::in_dir(&std::env::temp_dir().join("spinikus-agent-tests"))
+    }
+
     fn progress() -> (Progress, mpsc::Receiver<pb::CommandProgress>) {
         let (sender, receiver) = mpsc::channel(64);
         (Progress::new("cmd".to_string(), sender), receiver)
@@ -185,28 +195,14 @@ mod tests {
             ..Default::default()
         };
 
-        let prepared = prepare_deployment(&runtime, prepare("ghcr.io/acme/web:1.2"), &progress).await.unwrap();
-        let missing = prepare_deployment(&runtime, prepare("ghcr.io/acme/nope"), &progress).await.unwrap_err();
+        let prepared = prepare_deployment(&runtime, &builds(), prepare("ghcr.io/acme/web:1.2"), &progress).await.unwrap();
+        let missing = prepare_deployment(&runtime, &builds(), prepare("ghcr.io/acme/nope"), &progress).await.unwrap_err();
 
         assert_eq!(prepared.prepared.unwrap().image, "ghcr.io/acme/web@sha256:abcd");
         assert_eq!(missing.reason, FailureReason::BuildFailed as i32);
         assert_eq!(missing.message, "the container runtime failed: cannot pull ghcr.io/acme/nope: not found");
         let first = reported.recv().await.unwrap();
         assert_eq!((first.command_id.as_str(), first.phase.as_str()), ("cmd", "pulling image"));
-    }
-
-    #[tokio::test]
-    async fn git_sources_are_not_built_yet() {
-        let runtime = MemoryRuntime::new();
-        let prepare = pb::PrepareDeployment {
-            deployment_id: DeploymentId::new().to_string(),
-            source: Some(Source::Git(pb::GitSource::default())),
-            ..Default::default()
-        };
-
-        let failed = prepare_deployment(&runtime, prepare, &progress().0).await.unwrap_err();
-
-        assert_eq!(failed.reason, FailureReason::BuildFailed as i32);
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 use axum::{
     extract::State,
-    response::{Json, Response},
+    http::header,
+    response::{IntoResponse, Json, Response},
 };
 use spinikus_control::Control;
 use spinikus_core::{
@@ -58,4 +59,14 @@ pub async fn cancel(
     Path(id): Path<DeploymentId>,
 ) -> Result<Json<Deployment>, ApiError> {
     Ok(Json(control.cancel_deployment(&principal, id).await?))
+}
+
+/// The deployment's log so far (the clone, build, pull and health check), as plain text.
+pub async fn logs(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(id): Path<DeploymentId>,
+) -> Result<Response, ApiError> {
+    let text = control.deployment_logs(&principal, id).await?;
+    Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response())
 }

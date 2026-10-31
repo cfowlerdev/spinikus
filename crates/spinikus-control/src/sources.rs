@@ -1,15 +1,21 @@
 //! A service's source: the Git repository it builds from, or the image it runs. Viewers
 //! read it; developers set it.
+//!
+//! A service cloned over SSH gets a deploy key: an Ed25519 key pair made when a Git source
+//! with an SSH URL is set (or on request), whose public half the user adds to the
+//! repository. The key belongs to the service, so it outlives source changes.
 
 use serde_json::json;
 use spinikus_core::{
     id::ServiceId,
     membership::Role,
-    source::{Source, SourceSpec},
+    secret::Secret,
+    source::{DeployKey, Source, SourceSpec},
 };
-use spinikus_store::SourceRepository;
+use spinikus_store::{DeployKeyRepository, SourceRepository};
+use ssh_key::{HashAlg, LineEnding, PrivateKey, private::Ed25519Keypair};
 
-use crate::{Control, ControlError, Principal};
+use crate::{Control, ControlError, Principal, access::not_found};
 
 impl Control {
     pub async fn get_source(&self, principal: &Principal, service_id: ServiceId) -> Result<Source, ControlError> {
@@ -30,6 +36,7 @@ impl Control {
         let source = self.store().create_source(service_id, spec).await?;
         let details = json!({ "service_id": service_id.to_string(), "type": source.spec.type_name() });
         self.audit_by(principal, "source.create", source.id, Some(environment.project_id), details).await?;
+        self.ensure_deploy_key(&source).await?;
         Ok(source)
     }
 
@@ -47,7 +54,45 @@ impl Control {
         let source = self.store().update_source(service_id, revision, spec).await?;
         let details = json!({ "service_id": service_id.to_string(), "type": source.spec.type_name() });
         self.audit_by(principal, "source.update", source.id, Some(environment.project_id), details).await?;
+        self.ensure_deploy_key(&source).await?;
         Ok(source)
+    }
+
+    /// The service's deploy key. `NotFound` if it has none.
+    pub async fn get_deploy_key(&self, principal: &Principal, service_id: ServiceId) -> Result<DeployKey, ControlError> {
+        self.service_with_access(principal, service_id, Role::Viewer).await?;
+        self.store().get_deploy_key(service_id).await?.ok_or_else(|| not_found("deploy key", service_id))
+    }
+
+    /// Gives the service a new deploy key, replacing any it had: the old one stops working
+    /// once removed from the repository.
+    pub async fn create_deploy_key(&self, principal: &Principal, service_id: ServiceId) -> Result<DeployKey, ControlError> {
+        let (_, environment) = self.service_with_access(principal, service_id, Role::Developer).await?;
+        let key = self.new_deploy_key(service_id).await?;
+        let details = json!({ "fingerprint": key.fingerprint });
+        self.audit_by(principal, "deploy_key.create", service_id, Some(environment.project_id), details).await?;
+        Ok(key)
+    }
+
+    /// Makes a deploy key for a source cloned over SSH, unless the service has one.
+    async fn ensure_deploy_key(&self, source: &Source) -> Result<(), ControlError> {
+        if let SourceSpec::Git(git) = &source.spec
+            && git.uses_ssh()
+            && self.store().get_deploy_key(source.service_id).await?.is_none()
+        {
+            self.new_deploy_key(source.service_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn new_deploy_key(&self, service_id: ServiceId) -> Result<DeployKey, ControlError> {
+        let keypair = Ed25519Keypair::from_seed(&rand::random());
+        let internal = |error: ssh_key::Error| ControlError::internal("making a deploy key", error);
+        let private = PrivateKey::new(keypair.into(), "spinikus").map_err(internal)?;
+        let public = private.public_key().to_openssh().map_err(internal)?;
+        let fingerprint = private.public_key().fingerprint(HashAlg::Sha256).to_string();
+        let private = Secret::new(private.to_openssh(LineEnding::LF).map_err(internal)?.as_str());
+        Ok(self.store().set_deploy_key(service_id, &public, &fingerprint, &private).await?)
     }
 }
 

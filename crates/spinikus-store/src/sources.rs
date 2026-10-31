@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use spinikus_core::{
     id::{ServiceId, SourceId},
-    source::{GitSource, ImageSource, Source, SourceSpec},
+    secret::Secret,
+    source::{DeployKey, GitSource, ImageSource, Source, SourceSpec},
 };
 
-use crate::{SqliteStore, StoreError, error::parse_column};
+use crate::{SqliteStore, StoreError, certificates::open_sealed, error::parse_column};
 
 const ENTITY: &str = "source";
 
@@ -178,6 +179,96 @@ impl SourceRepository for SqliteStore {
     }
 }
 
+const DEPLOY_KEY: &str = "deploy key";
+
+/// Services' SSH deploy keys, one per service, kept when the source changes.
+#[async_trait]
+pub trait DeployKeyRepository: Send + Sync {
+    async fn get_deploy_key(&self, service_id: ServiceId) -> Result<Option<DeployKey>, StoreError>;
+
+    /// Gives the service this key, replacing any it had. `NotFound` if the service does not
+    /// exist or is deleted.
+    async fn set_deploy_key(
+        &self,
+        service_id: ServiceId,
+        public_key: &str,
+        fingerprint: &str,
+        private_key: &Secret,
+    ) -> Result<DeployKey, StoreError>;
+
+    /// The private key, in OpenSSH format, if the service has a key.
+    async fn deploy_key_private(&self, service_id: ServiceId) -> Result<Option<Secret>, StoreError>;
+}
+
+#[derive(sqlx::FromRow)]
+struct DeployKeyRow {
+    service_id: String,
+    public_key: String,
+    fingerprint: String,
+    created_at: String,
+}
+
+impl TryFrom<DeployKeyRow> for DeployKey {
+    type Error = StoreError;
+
+    fn try_from(row: DeployKeyRow) -> Result<Self, Self::Error> {
+        Ok(DeployKey {
+            service_id: parse_column(DEPLOY_KEY, "service_id", &row.service_id)?,
+            public_key: row.public_key,
+            fingerprint: row.fingerprint,
+            created_at: parse_column(DEPLOY_KEY, "created_at", &row.created_at)?,
+        })
+    }
+}
+
+#[async_trait]
+impl DeployKeyRepository for SqliteStore {
+    async fn get_deploy_key(&self, service_id: ServiceId) -> Result<Option<DeployKey>, StoreError> {
+        let row: Option<DeployKeyRow> =
+            sqlx::query_as("SELECT service_id, public_key, fingerprint, created_at FROM deploy_keys WHERE service_id = ?")
+                .bind(service_id.to_string())
+                .fetch_optional(self.pool())
+                .await?;
+        row.map(DeployKey::try_from).transpose()
+    }
+
+    async fn set_deploy_key(
+        &self,
+        service_id: ServiceId,
+        public_key: &str,
+        fingerprint: &str,
+        private_key: &Secret,
+    ) -> Result<DeployKey, StoreError> {
+        let sealed = self.keyring().seal(private_key.expose().as_bytes(), service_id.to_string().as_bytes());
+        let row: Option<DeployKeyRow> = sqlx::query_as(
+            "INSERT INTO deploy_keys (service_id, public_key, fingerprint, private_key, data_key_id)
+             SELECT id, ?, ?, ?, ? FROM services WHERE id = ? AND deleted_at IS NULL
+             ON CONFLICT (service_id) DO UPDATE
+             SET public_key = excluded.public_key, fingerprint = excluded.fingerprint,
+                 private_key = excluded.private_key, data_key_id = excluded.data_key_id,
+                 created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             RETURNING service_id, public_key, fingerprint, created_at",
+        )
+        .bind(public_key)
+        .bind(fingerprint)
+        .bind(sealed.ciphertext)
+        .bind(sealed.key_id.to_string())
+        .bind(service_id.to_string())
+        .fetch_optional(self.pool())
+        .await?;
+        row.ok_or_else(|| StoreError::NotFound { entity: "service", id: service_id.to_string() })?.try_into()
+    }
+
+    async fn deploy_key_private(&self, service_id: ServiceId) -> Result<Option<Secret>, StoreError> {
+        let query = "SELECT private_key, data_key_id FROM deploy_keys WHERE service_id = ?";
+        match open_sealed(self, query, DEPLOY_KEY, service_id.to_string()).await {
+            Ok(secret) => Ok(Some(secret)),
+            Err(StoreError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::Map;
@@ -290,5 +381,25 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn keeps_one_sealed_deploy_key_per_service() {
+        let (_dir, store) = store().await;
+        let service = service(&store).await;
+
+        let none = store.get_deploy_key(service).await.unwrap();
+        let first = store.set_deploy_key(service, "ssh-ed25519 AAAA1", "SHA256:one", &Secret::new("private one")).await.unwrap();
+        let second = store.set_deploy_key(service, "ssh-ed25519 AAAA2", "SHA256:two", &Secret::new("private two")).await.unwrap();
+        let missing = store.set_deploy_key(ServiceId::new(), "ssh-ed25519 AAAA3", "SHA256:x", &Secret::new("x")).await;
+
+        assert_eq!(none, None);
+        assert_eq!(first.public_key, "ssh-ed25519 AAAA1");
+        assert_eq!(store.get_deploy_key(service).await.unwrap(), Some(second));
+        assert_eq!(store.deploy_key_private(service).await.unwrap().unwrap().expose(), "private two");
+        assert_eq!(store.deploy_key_private(ServiceId::new()).await.unwrap(), None);
+        assert!(matches!(missing, Err(StoreError::NotFound { entity: "service", .. })), "{missing:?}");
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT private_key FROM deploy_keys").fetch_one(store.pool()).await.unwrap();
+        assert!(!String::from_utf8_lossy(&stored).contains("private two"));
     }
 }

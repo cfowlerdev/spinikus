@@ -48,6 +48,7 @@ pub async fn run(config: &SpinikusConfig) -> anyhow::Result<()> {
         backoff: Backoff::default(),
         runtime: runtime(),
         proxy: proxy_listeners(config).await?,
+        local_repositories: false,
     };
     let shutdown = async {
         if let Err(error) = tokio::signal::ctrl_c().await {

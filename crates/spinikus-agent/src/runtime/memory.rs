@@ -17,7 +17,7 @@ use spinikus_core::server::{InstanceHealth, InstanceStatus, ObservedInstance};
 use tokio::sync::broadcast;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
-use super::{ContainerEvents, ContainerRuntime, ContainerSpec, RuntimeError};
+use super::{BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, RuntimeError};
 
 #[derive(Clone)]
 enum Event {
@@ -32,6 +32,10 @@ pub struct MemoryRuntime {
     /// Images that can be pulled, and the pinned reference each one resolves to.
     images: Mutex<HashMap<String, String>>,
     endpoint: Mutex<Option<SocketAddr>>,
+    /// Builds so far, and the Dockerfile each one read.
+    builds: Mutex<Vec<(BuildSpec, String)>>,
+    /// Why builds fail, if they do.
+    build_failure: Mutex<Option<String>>,
     exit_on_start: AtomicBool,
     next_id: AtomicU64,
     events: broadcast::Sender<Event>,
@@ -51,6 +55,8 @@ impl MemoryRuntime {
             specs: Mutex::default(),
             images: Mutex::default(),
             endpoint: Mutex::default(),
+            builds: Mutex::default(),
+            build_failure: Mutex::default(),
             exit_on_start: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             events: broadcast::channel(256).0,
@@ -61,6 +67,16 @@ impl MemoryRuntime {
     /// Makes `image` pullable, resolving to `pinned`.
     pub fn add_image(&self, image: &str, pinned: &str) {
         lock(&self.images).insert(image.to_string(), pinned.to_string());
+    }
+
+    /// The builds so far, each with the text of the Dockerfile it read.
+    pub fn builds(&self) -> Vec<(BuildSpec, String)> {
+        lock(&self.builds).clone()
+    }
+
+    /// Makes builds fail with `message`, or succeed again with `None`.
+    pub fn fail_builds(&self, message: Option<&str>) {
+        *lock(&self.build_failure) = message.map(str::to_string);
     }
 
     /// Where running containers with a port are published: a server the test runs.
@@ -165,6 +181,21 @@ impl ContainerRuntime for MemoryRuntime {
         self.check()?;
         progress(format!("Pulling {image}"));
         lock(&self.images).get(image).cloned().ok_or_else(|| RuntimeError::Failed(format!("cannot pull {image}: not found")))
+    }
+
+    /// Reads the Dockerfile and makes an image ID from the tag, which can then be started.
+    async fn build(&self, spec: &BuildSpec, progress: &(dyn Fn(String) + Send + Sync)) -> Result<String, RuntimeError> {
+        self.check()?;
+        let dockerfile = std::fs::read_to_string(spec.context.join(&spec.dockerfile))
+            .map_err(|error| RuntimeError::Failed(format!("cannot read the Dockerfile: {error}")))?;
+        progress(format!("Building {}", spec.tag));
+        lock(&self.builds).push((spec.clone(), dockerfile));
+        if let Some(message) = lock(&self.build_failure).clone() {
+            return Err(RuntimeError::Failed(message));
+        }
+        let id = format!("sha256:{:064x}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        lock(&self.images).insert(spec.tag.clone(), id.clone());
+        Ok(id)
     }
 
     async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError> {

@@ -108,7 +108,7 @@ fn only(mut commands: Vec<pb::Command>) -> pb::Command {
 }
 
 fn succeeded(command: &pb::Command, prepared: Option<&str>) -> pb::CommandResult {
-    let prepared = prepared.map(|image| pb::PreparedImage { image: image.to_string(), commit_sha: String::new() });
+    let prepared = prepared.map(|image| pb::PreparedImage { image: image.to_string(), ..Default::default() });
     pb::CommandResult {
         command_id: command.command_id.clone(),
         outcome: Some(Outcome::Succeeded(pb::CommandSucceeded { prepared })),
@@ -470,4 +470,149 @@ async fn an_agent_with_the_current_routes_needs_none() {
     assert_eq!(resent.iter().map(|set| set.revision).collect::<Vec<_>>(), [moved[0].revision]);
     assert!(commands.is_empty(), "the old deployment waits for the routes: {commands:?}");
     assert_eq!(status(control, first.id).await, Draining);
+}
+
+/// Switches the service to an SSH Git source, returning the deploy key it got.
+async fn use_git_over_ssh(setup: &Setup) -> spinikus_core::source::DeployKey {
+    let control = &setup.control;
+    let source = control.get_source(&setup.admin, setup.service.id).await.unwrap();
+    let git = SourceSpec::Git(spinikus_core::source::GitSource {
+        repo_url: "git@github.com:acme/web.git".to_string(),
+        branch: "main".to_string(),
+        root_directory: Some("apps/web".to_string()),
+    });
+    control.replace_source(&setup.admin, setup.service.id, source.revision, git).await.unwrap();
+    control.get_deploy_key(&setup.admin, setup.service.id).await.unwrap()
+}
+
+fn prepared_with_file(command: &pb::Command, app_file: &str) -> pb::CommandResult {
+    let prepared =
+        pb::PreparedImage { image: "sha256:0123".to_string(), commit_sha: "abc123".to_string(), app_file: app_file.to_string() };
+    pb::CommandResult {
+        command_id: command.command_id.clone(),
+        outcome: Some(Outcome::Succeeded(pb::CommandSucceeded { prepared: Some(prepared) })),
+    }
+}
+
+#[tokio::test]
+async fn git_over_ssh_gets_a_deploy_key_sent_with_the_build() {
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    let viewer = user(control, "vic@example.com", false).await;
+    grant(control, &viewer, MembershipScope::Environment(setup.environment.id), Role::Viewer).await;
+    let mut agent = connect(control, setup.server.id);
+
+    let none_for_images = control.get_deploy_key(&setup.admin, setup.service.id).await;
+    let key = use_git_over_ssh(&setup).await;
+    let seen_by_viewer = control.get_deploy_key(&viewer, setup.service.id).await.unwrap();
+    let replaced_by_viewer = control.create_deploy_key(&viewer, setup.service.id).await;
+    let deployment = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+    let replaced = control.create_deploy_key(&setup.admin, setup.service.id).await.unwrap();
+    control.advance_deployments().await;
+    let prepare = only(sent(&mut agent));
+
+    assert!(matches!(none_for_images, Err(ControlError::NotFound { entity: "deploy key", .. })), "{none_for_images:?}");
+    assert!(key.public_key.starts_with("ssh-ed25519 AAAA") && key.public_key.ends_with(" spinikus"), "{}", key.public_key);
+    assert!(key.fingerprint.starts_with("SHA256:"), "{}", key.fingerprint);
+    assert_eq!(seen_by_viewer, key);
+    assert!(matches!(replaced_by_viewer, Err(ControlError::Forbidden)), "{replaced_by_viewer:?}");
+    assert_ne!(replaced.public_key, key.public_key);
+    let Some(Kind::PrepareDeployment(prepare)) = prepare.kind else { panic!() };
+    let Some(pb::prepare_deployment::Source::Git(git)) = prepare.source else { panic!() };
+    assert_eq!((git.repo_url.as_str(), git.root_directory.as_str()), ("git@github.com:acme/web.git", "apps/web"));
+    // The key at the time of the build, which can be newer than the deployment.
+    let parsed = ssh_key::PrivateKey::from_openssh(&git.ssh_private_key).unwrap();
+    assert_eq!(parsed.public_key().to_openssh().unwrap(), replaced.public_key);
+    assert_eq!(status(control, deployment.id).await, Preparing);
+}
+
+#[tokio::test]
+async fn https_repositories_need_no_deploy_key() {
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    let source = control.get_source(&setup.admin, setup.service.id).await.unwrap();
+    let git = SourceSpec::Git(spinikus_core::source::GitSource {
+        repo_url: "https://github.com/acme/web.git".to_string(),
+        branch: "main".to_string(),
+        root_directory: None,
+    });
+
+    control.replace_source(&setup.admin, setup.service.id, source.revision, git).await.unwrap();
+
+    assert!(control.get_deploy_key(&setup.admin, setup.service.id).await.is_err());
+}
+
+#[tokio::test]
+async fn the_app_file_settings_go_into_the_snapshot() {
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    use_git_over_ssh(&setup).await;
+    let mut agent = connect(control, setup.server.id);
+    let deployment = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+    control.advance_deployments().await;
+    let prepare = only(sent(&mut agent));
+
+    let app_file = r#"{ /* from the repo */ "runtime": { "port": 8080, "healthcheck": { "path": "/up" } } }"#;
+    control.deployment_result(setup.server.id, prepared_with_file(&prepare, app_file)).await;
+    let start = only(sent(&mut agent));
+    let stored = control.store().get_deployment(deployment.id).await.unwrap();
+
+    let Some(Kind::StartDeployment(start)) = start.kind else { panic!() };
+    assert_eq!((start.image.as_str(), start.port), ("sha256:0123", 8080));
+    assert_eq!(start.health_check.unwrap().path, "/up");
+    assert_eq!(stored.commit_sha.as_deref(), Some("abc123"));
+    assert_eq!(stored.snapshot.from_file, ["runtime.healthcheck", "runtime.port"]);
+    assert_eq!(stored.snapshot.config["runtime"]["shutdown_timeout"], "20s");
+}
+
+#[tokio::test]
+async fn an_app_file_that_cannot_apply_fails_the_build() {
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    use_git_over_ssh(&setup).await;
+    let mut agent = connect(control, setup.server.id);
+    let deployment = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+    control.advance_deployments().await;
+    let prepare = only(sent(&mut agent));
+
+    control.deployment_result(setup.server.id, prepared_with_file(&prepare, r#"{ "runtime": { "port": 0 } }"#)).await;
+
+    let failed = control.store().get_deployment(deployment.id).await.unwrap();
+    assert_eq!((failed.status, failed.reason), (Failed, Some(EndReason::BuildFailed)));
+    let events = control.list_deployment_events(&setup.admin, deployment.id).await.unwrap();
+    let message = events.last().unwrap().message.clone().unwrap();
+    assert!(message.contains("spinikus.json: runtime: port must be between 1 and 65535"), "{message}");
+}
+
+#[tokio::test]
+async fn keeps_the_logs_of_the_deployments_own_server() {
+    let logs = tempfile::tempdir().unwrap();
+    let dir = logs.path().to_path_buf();
+    let setup = setup_with(DeploymentTimings::default(), |control| control.with_log_dir(dir)).await;
+    let control = &setup.control;
+    let other = control.create_server(&setup.admin, NewServer { name: "web-2".to_string() }).await.unwrap();
+    let deployment = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+    let command_id = format!("{}/prepare", deployment.id);
+    let line = |text: &str| pb::LogLine {
+        at: Some(prost_types::Timestamp { seconds: 1_793_443_983, nanos: 0 }),
+        stream: pb::LogStream::Stdout.into(),
+        text: text.to_string(),
+    };
+    let progress = |phase: &str, lines: Vec<pb::LogLine>| pb::CommandProgress {
+        command_id: command_id.clone(),
+        phase: phase.to_string(),
+        log_lines: lines,
+    };
+
+    let empty = control.deployment_logs(&setup.admin, deployment.id).await.unwrap();
+    control.deployment_progress(setup.server.id, progress("cloning", Vec::new())).await;
+    control.deployment_progress(setup.server.id, progress("cloning", vec![line("Cloning into 'repo'...")])).await;
+    control.deployment_progress(other.id, progress("cloning", vec![line("not from this server")])).await;
+    control.deployment_progress(setup.server.id, progress("building", vec![line("#1 FROM alpine"), line("done\n")])).await;
+    let logs = control.deployment_logs(&setup.admin, deployment.id).await.unwrap();
+
+    assert_eq!(empty, "");
+    let lines: Vec<_> = logs.lines().map(|line| line.split_once(' ').unwrap().1).collect();
+    assert_eq!(lines, ["==> cloning", "Cloning into 'repo'...", "#1 FROM alpine", "done"]);
+    assert!(logs.lines().nth(1).unwrap().starts_with("2026-10-31T"), "{logs}");
 }

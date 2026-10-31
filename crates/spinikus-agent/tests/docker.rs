@@ -1,6 +1,6 @@
 //! The Docker driver against a real Docker daemon. Ignored by default, since it needs one:
 //! run with `cargo test -p spinikus-agent --test docker -- --ignored`. It pulls `busybox`
-//! and `traefik/whoami`.
+//! and `traefik/whoami`, and builds from `busybox`.
 
 use std::{collections::HashMap, time::Duration};
 
@@ -8,7 +8,9 @@ use bollard::{
     models::ContainerCreateBody,
     query_parameters::{CreateImageOptionsBuilder, RemoveContainerOptionsBuilder},
 };
-use spinikus_agent::runtime::{ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, DockerRuntime, Mount, SERVICE_LABEL};
+use spinikus_agent::runtime::{
+    BuildSpec, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, DockerRuntime, Mount, RuntimeError, SERVICE_LABEL,
+};
 use spinikus_core::{
     id::{DeploymentId, ServiceId, VolumeId},
     server::InstanceStatus,
@@ -158,4 +160,68 @@ async fn pulls_creates_and_publishes_an_app_on_loopback() {
     let inspected = runtime.client().unwrap().inspect_container(&id, None).await.unwrap();
     let mounts = inspected.mounts.unwrap_or_default();
     assert!(mounts.iter().any(|mount| mount.name.as_deref() == Some(&volume) && mount.destination.as_deref() == Some("/data")));
+}
+
+/// Removes an image even when an assertion fails.
+struct ImageCleanup(DockerRuntime, String);
+
+impl Drop for ImageCleanup {
+    fn drop(&mut self) {
+        let (runtime, image) = (self.0.clone(), self.1.clone());
+        let options = bollard::query_parameters::RemoveImageOptionsBuilder::new().force(true).build();
+        let _ = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async move { runtime.client().unwrap().remove_image(&image, Some(options), None).await })
+        })
+        .join();
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn builds_with_buildkit() {
+    let runtime = DockerRuntime::new();
+    let dir = tempfile::tempdir().unwrap();
+    let context = dir.path().join("app");
+    std::fs::create_dir_all(context.join("docker")).unwrap();
+    std::fs::create_dir_all(context.join(".git")).unwrap();
+    std::fs::write(context.join(".git/HEAD"), "not for the image").unwrap();
+    std::fs::write(context.join("hello.txt"), "hello").unwrap();
+    // A cache mount needs BuildKit; the last stage checks what the context held.
+    std::fs::write(
+        context.join("docker/Dockerfile"),
+        "FROM busybox:1.37 AS base\n\
+         ARG GREETING\n\
+         COPY . /src\n\
+         RUN --mount=type=cache,target=/cache test ! -e /src/.git && echo \"$GREETING\" > /greeting\n\
+         FROM base AS broken\n\
+         RUN echo going wrong && exit 3\n",
+    )
+    .unwrap();
+    let tag = format!("spinikus/test:{}", DeploymentId::new().to_string().to_lowercase());
+    let _cleanup = ImageCleanup(runtime.clone(), tag.clone());
+    let spec = BuildSpec {
+        context: context.clone(),
+        dockerfile: "docker/Dockerfile".to_string(),
+        target: Some("base".to_string()),
+        args: vec![("GREETING".to_string(), "hi there".to_string())],
+        tag: tag.clone(),
+    };
+    let lines = std::sync::Mutex::new(Vec::new());
+
+    let image = runtime.build(&spec, &|line| lines.lock().unwrap().push(line)).await.unwrap();
+    let broken = runtime.build(&BuildSpec { target: Some("broken".to_string()), ..spec.clone() }, &|_| {}).await;
+
+    assert!(image.starts_with("sha256:"), "{image}");
+    let inspected = runtime.client().unwrap().inspect_image(&tag).await.unwrap();
+    assert_eq!(inspected.id.as_deref(), Some(image.as_str()));
+    let lines = lines.into_inner().unwrap();
+    assert!(lines.iter().any(|line| line.contains("COPY . /src")), "{lines:#?}");
+    match broken {
+        Err(RuntimeError::Failed(message)) => {
+            assert!(message.contains("exit 3") || message.contains("exit code: 3"), "{message}")
+        }
+        other => panic!("expected a failed build, got {other:?}"),
+    }
 }

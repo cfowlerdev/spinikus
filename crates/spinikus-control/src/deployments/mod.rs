@@ -7,6 +7,7 @@
 //! placement, or the embedded server). Later edits to the service never change it.
 
 mod commands;
+pub(crate) mod logs;
 mod routes;
 mod runner;
 
@@ -60,7 +61,7 @@ impl Control {
             trigger: DeploymentTrigger::Manual,
             strategy: DeploymentStrategy::default_for(service.kind, has_volumes),
             rollback_of: None,
-            snapshot: DeploymentSnapshot { source: source.spec, config: service.config },
+            snapshot: DeploymentSnapshot { source: source.spec, config: service.config, from_file: Vec::new() },
             commit_sha: None,
             image: None,
             variables: self.store().resolve_service_variables(service_id).await?,

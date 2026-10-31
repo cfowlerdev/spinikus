@@ -43,7 +43,7 @@ pub use servers::ServerRepository;
 pub use services::ServiceRepository;
 pub use sessions::SessionRepository;
 pub use settings::SettingRepository;
-pub use sources::SourceRepository;
+pub use sources::{DeployKeyRepository, SourceRepository};
 pub use users::UserRepository;
 pub use variables::VariableRepository;
 pub use volumes::VolumeRepository;

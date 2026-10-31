@@ -18,9 +18,10 @@ use spinikus_core::{
     id::{DeploymentId, ServerId, ServiceId},
     secret::Secret,
     server::{InstanceHealth, InstanceStatus, ObservedInstance, ServerStatus},
+    source::{GitSource, SourceSpec},
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, control_message};
-use spinikus_store::{DeploymentRepository, InstanceRepository, ServerRepository};
+use spinikus_store::{DeploymentRepository, InstanceRepository, ServerRepository, SourceRepository};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -45,6 +46,7 @@ fn start_agent_with(
         backoff: Backoff::new(Duration::from_millis(50), Duration::from_millis(200)),
         runtime,
         proxy: proxy.map(|http| ProxyListeners { http, https: None }),
+        local_repositories: true,
     };
     let handle = tokio::spawn(async move {
         spinikus_agent::run(&files, options, async move {
@@ -376,4 +378,118 @@ async fn the_agent_deploys_an_image_with_docker() {
     let stop = pb::StopDeployment { deployment_id: second.id.to_string(), grace_period: None };
     send_command(&control_plane, server, "cleanup", Kind::StopDeployment(stop)).await;
     wait_for_deployment(&control_plane, server, second.id, None).await;
+}
+
+/// Runs git in `dir` for setting up a test repository, and returns its output.
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "init.defaultBranch=main"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+#[tokio::test]
+async fn a_deployment_is_built_from_git_with_its_app_file() {
+    let logs = tempfile::tempdir().unwrap();
+    let log_dir = logs.path().to_path_buf();
+    let control_plane = ControlPlane::start_with(|control| control.with_log_dir(log_dir)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join("web")).unwrap();
+    std::fs::write(repo.join("web/Dockerfile"), "FROM scratch\n").unwrap();
+    std::fs::write(repo.join("web/spinikus.json"), r#"{ "runtime": { "port": 8080 } } // the app's port"#).unwrap();
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["add", "--all"]);
+    git(&repo, &["commit", "--quiet", "--message", "first"]);
+    let commit = git(&repo, &["rev-parse", "HEAD"]);
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let runtime = Arc::new(MemoryRuntime::new());
+    let app = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    runtime.set_endpoint(app.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(app, axum::Router::new().route("/", axum::routing::get(|| async { "built" }))).await });
+    let (listener, proxy) = proxy_listener().await;
+    let (_stop, _agent) = start_agent_with(&files, runtime.clone(), Some(listener));
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    // No port here: the app file sets it.
+    let service = control_plane.service(server, "unused:1", json!({ "healthcheck": { "start_period": "0s" } })).await;
+    let control = &control_plane.control;
+    // The service layer allows only remote URLs; the agent here allows local repositories.
+    let source = SourceSpec::Git(GitSource {
+        repo_url: repo.to_string_lossy().into_owned(),
+        branch: "main".to_string(),
+        root_directory: Some("web".to_string()),
+    });
+    control.store().update_source(service, 1, source).await.unwrap();
+
+    let deployment = control.create_deployment(&control_plane.admin, service).await.unwrap();
+    control_plane.wait_for_deployment(deployment.id, DeploymentStatus::Live, Duration::from_secs(20)).await;
+    let served = wait_for_response(proxy, "web-production-shop.localhost", 200, Duration::from_secs(10)).await;
+
+    assert_eq!(served, "built");
+    let deployment = control.store().get_deployment(deployment.id).await.unwrap();
+    assert_eq!(deployment.commit_sha.as_deref(), Some(commit.as_str()));
+    assert!(deployment.image.as_deref().unwrap().starts_with("sha256:"), "{:?}", deployment.image);
+    assert_eq!(deployment.snapshot.from_file, ["runtime.port"]);
+    assert_eq!(deployment.snapshot.config["runtime"]["port"], 8080);
+    let (spec, dockerfile) = runtime.builds().pop().unwrap();
+    assert_eq!(
+        (spec.tag, dockerfile.as_str()),
+        (
+            format!("spinikus/{}:{}", service.to_string().to_lowercase(), deployment.id.to_string().to_lowercase()),
+            "FROM scratch\n"
+        )
+    );
+    let log = control.deployment_logs(&control_plane.admin, deployment.id).await.unwrap();
+    for expected in ["==> cloning", "==> building", &commit[..12]] {
+        assert!(log.contains(expected), "{expected:?} is not in the log:\n{log}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon; pulls traefik/whoami"]
+async fn the_agent_builds_from_git_and_deploys_with_docker() {
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("Dockerfile"), "FROM traefik/whoami:v1.10\nARG GREETING\nLABEL greeting=$GREETING\n").unwrap();
+    std::fs::write(repo.join("spinikus.json"), r#"{ "runtime": { "port": 80, "healthcheck": { "path": "/" } } }"#).unwrap();
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["add", "--all"]);
+    git(&repo, &["commit", "--quiet", "--message", "first"]);
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let (listener, proxy) = proxy_listener().await;
+    let (_stop, _agent) = start_agent_with(&files, Arc::new(DockerRuntime::new()), Some(listener));
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let service = control_plane.service(server, "unused:1", json!({ "shutdown_timeout": "2s" })).await;
+    let control = &control_plane.control;
+    let source = SourceSpec::Git(GitSource {
+        repo_url: repo.to_string_lossy().into_owned(),
+        branch: "main".to_string(),
+        root_directory: None,
+    });
+    control.store().update_source(service, 1, source).await.unwrap();
+
+    let deployment = control.create_deployment(&control_plane.admin, service).await.unwrap();
+    let tag = format!("spinikus/{}:{}", service.to_string().to_lowercase(), deployment.id.to_string().to_lowercase());
+    control_plane.wait_for_deployment(deployment.id, DeploymentStatus::Live, Duration::from_secs(180)).await;
+    let served = wait_for_response(proxy, "web-production-shop.localhost", 200, Duration::from_secs(10)).await;
+    let stop = pb::StopDeployment { deployment_id: deployment.id.to_string(), grace_period: None };
+    send_command(&control_plane, server, "cleanup", Kind::StopDeployment(stop)).await;
+    wait_for_deployment(&control_plane, server, deployment.id, None).await;
+    let removed = std::process::Command::new("docker").args(["image", "rm", "--force", &tag]).output().unwrap();
+
+    assert!(served.contains("Host: web-production-shop.localhost"), "{served}");
+    let deployment = control.store().get_deployment(deployment.id).await.unwrap();
+    assert!(deployment.image.as_deref().unwrap().starts_with("sha256:"), "{:?}", deployment.image);
+    assert_eq!(deployment.snapshot.from_file, ["runtime.healthcheck", "runtime.port"]);
+    assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stderr));
 }
