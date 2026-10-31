@@ -9,7 +9,8 @@ use bollard::{
     query_parameters::{CreateImageOptionsBuilder, RemoveContainerOptionsBuilder},
 };
 use spinikus_agent::runtime::{
-    BuildSpec, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, DockerRuntime, LogOptions, Mount, RuntimeError, SERVICE_LABEL,
+    BuildSpec, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, DockerRuntime, LogOptions, Mount, Network, RuntimeError,
+    SERVICE_LABEL,
 };
 use spinikus_core::{
     id::{DeploymentId, ServiceId, VolumeId},
@@ -138,6 +139,7 @@ async fn pulls_creates_and_publishes_an_app_on_loopback() {
         env: vec![("WHOAMI_NAME".to_string(), "spinikus".to_string())],
         port: Some(80),
         volumes: vec![Mount { volume: volume.clone(), path: "/data".to_string() }],
+        network: None,
     };
     let id = runtime.create(&spec).await.unwrap();
     let _cleanup = Cleanup(runtime.clone(), id.clone());
@@ -267,4 +269,71 @@ async fn reads_and_follows_a_containers_log() {
     let texts: Vec<_> = lines.iter().map(|line| line.text.as_str()).collect();
     assert_eq!(texts, ["one", "two", "three", "four"]);
     assert!(lines.iter().all(|line| line.at.is_some()));
+}
+
+/// Removes a network even when an assertion fails. Declare it before the containers'
+/// [`Cleanup`]s, so they go first.
+struct NetworkCleanup(DockerRuntime, String);
+
+impl Drop for NetworkCleanup {
+    fn drop(&mut self) {
+        let (runtime, name) = (self.0.clone(), self.1.clone());
+        let _ = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async move { runtime.client().unwrap().remove_network(&name).await })
+        })
+        .join();
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn containers_on_an_environments_network_reach_each_other_by_alias() {
+    let runtime = DockerRuntime::new();
+    let docker = runtime.client().unwrap();
+    let pinned = runtime.pull("traefik/whoami:v1.10", &|_| {}).await.unwrap();
+    runtime.pull(IMAGE, &|_| {}).await.unwrap();
+    let name = format!("spinikus-test-{}", DeploymentId::new());
+    let _network = NetworkCleanup(runtime.clone(), name.clone());
+    let deployment = DeploymentId::new();
+    let spec = ContainerSpec {
+        name: format!("spinikus-{deployment}"),
+        image: pinned,
+        service_id: ServiceId::new(),
+        deployment_id: deployment,
+        env: vec![("WHOAMI_NAME".to_string(), "by-alias".to_string())],
+        port: Some(80),
+        volumes: Vec::new(),
+        network: Some(Network { name: name.clone(), aliases: vec!["web".to_string()] }),
+    };
+
+    let id = runtime.create(&spec).await.unwrap();
+    let _web = Cleanup(runtime.clone(), id.clone());
+    runtime.start(&id).await.unwrap();
+    // A second container on the network, as another service would be.
+    let client = ContainerCreateBody {
+        image: Some(IMAGE.to_string()),
+        cmd: Some(
+            ["sh", "-c", "for i in 1 2 3 4 5 6 7 8 9 10; do wget -qO- http://web/ && exit 0; sleep 0.5; done; exit 1"]
+                .map(str::to_string)
+                .to_vec(),
+        ),
+        host_config: Some(bollard::models::HostConfig { network_mode: Some(name.clone()), ..Default::default() }),
+        ..Default::default()
+    };
+    let client = docker.create_container(None, client).await.unwrap().id;
+    let _client = Cleanup(runtime.clone(), client.clone());
+    docker.start_container(&client, None).await.unwrap();
+    let mut waiting = docker.wait_container(&client, None);
+    let exit = timeout(Duration::from_secs(30), waiting.next()).await.unwrap();
+    let output: Vec<_> = runtime.logs(&client, LogOptions::default()).collect().await;
+    let output: Vec<_> = output.into_iter().map(|line| line.unwrap().text).collect();
+
+    assert!(matches!(exit, Some(Ok(ref response)) if response.status_code == 0), "{exit:?} {output:?}");
+    assert!(output.iter().any(|line| line == "Name: by-alias"), "{output:?}");
+    let network = docker.inspect_network(&name, None).await.unwrap();
+    assert_eq!(network.labels.unwrap_or_default().get("spinikus.network").map(String::as_str), Some("true"));
+    // Joining an existing network works too.
+    let again = ContainerSpec { name: format!("spinikus-{}", DeploymentId::new()), deployment_id: DeploymentId::new(), ..spec };
+    let second = runtime.create(&again).await.unwrap();
+    let _second = Cleanup(runtime.clone(), second);
 }

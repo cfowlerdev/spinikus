@@ -12,6 +12,7 @@ pub mod id;
 pub mod job;
 pub mod membership;
 pub mod project;
+pub mod reference;
 pub mod route;
 pub mod runtime;
 pub mod secret;

@@ -17,7 +17,7 @@ use crate::{
     build::{BuildOptions, build_from_git},
     commands::{Progress, failure, parse_id, stop_containers},
     health::{HealthCheck, verify},
-    runtime::{ContainerRuntime, ContainerSpec, Mount, RuntimeError},
+    runtime::{ContainerRuntime, ContainerSpec, Mount, Network, RuntimeError},
 };
 
 /// How long the previous deployment's containers get to stop under `recreate`, and a
@@ -117,6 +117,22 @@ fn spec(start: &pb::StartDeployment) -> Result<ContainerSpec, pb::CommandFailed>
             Ok(Mount { volume: volume.volume_id.clone(), path: volume.mount_path.clone() })
         })
         .collect::<Result<_, _>>()?;
+    let network = match &start.network {
+        None => None,
+        Some(network) => {
+            // Only Spinikus's own networks: never `host`, or another project's network.
+            let name_ok = network.name.strip_prefix(NETWORK_PREFIX).is_some_and(|rest| {
+                !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            });
+            if !name_ok {
+                return Err(invalid(format!("invalid network `{}`", network.name)));
+            }
+            if let Some(alias) = network.aliases.iter().find(|alias| alias.parse::<spinikus_core::slug::Slug>().is_err()) {
+                return Err(invalid(format!("invalid network alias `{alias}`")));
+            }
+            Some(Network { name: network.name.clone(), aliases: network.aliases.clone() })
+        }
+    };
     Ok(ContainerSpec {
         name: format!("spinikus-{deployment_id}"),
         image: start.image.clone(),
@@ -125,8 +141,12 @@ fn spec(start: &pb::StartDeployment) -> Result<ContainerSpec, pb::CommandFailed>
         env: start.variables.iter().map(|variable| (variable.name.clone(), variable.value.clone())).collect(),
         port,
         volumes,
+        network,
     })
 }
+
+/// Every network a deployment joins is named with this prefix.
+const NETWORK_PREFIX: &str = "spinikus-";
 
 #[cfg(test)]
 mod tests {
@@ -165,6 +185,7 @@ mod tests {
                 interval: Some(prost_types::Duration { seconds: 0, nanos: 5_000_000 }),
                 ..Default::default()
             }),
+            network: Some(pb::ServiceNetwork { name: "spinikus-env_01".to_string(), aliases: vec!["web".to_string()] }),
             ..Default::default()
         }
     }
@@ -225,6 +246,7 @@ mod tests {
         assert_eq!(spec.env, [("SECRET".to_string(), "hunter2".to_string())]);
         assert_eq!(spec.port, Some(3000));
         assert_eq!(spec.volumes, [Mount { volume: start.volumes[0].volume_id.clone(), path: "/data".to_string() }]);
+        assert_eq!(spec.network, Some(Network { name: "spinikus-env_01".to_string(), aliases: vec!["web".to_string()] }));
     }
 
     #[tokio::test]
@@ -304,6 +326,10 @@ mod tests {
         bad_port.port = 70_000;
         let mut bad_mount = valid();
         bad_mount.volumes[0].mount_path = "/data:ro".to_string();
+        let mut host_network = valid();
+        host_network.network.as_mut().unwrap().name = "host".to_string();
+        let mut bad_alias = valid();
+        bad_alias.network.as_mut().unwrap().aliases = vec!["Web App".to_string()];
         let mut path_without_port = valid();
         path_without_port.port = 0;
         path_without_port.health_check.as_mut().unwrap().path = "/up".to_string();
@@ -312,6 +338,8 @@ mod tests {
             (no_image, "no image to start"),
             (bad_port, "invalid port 70000"),
             (bad_mount, "invalid mount path `/data:ro`"),
+            (host_network, "invalid network `host`"),
+            (bad_alias, "invalid network alias `Web App`"),
             (path_without_port, "a health check path needs the app's port"),
         ] {
             let failed = start_deployment(&runtime, start, &progress().0).await.unwrap_err();

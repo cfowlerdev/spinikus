@@ -41,6 +41,15 @@ pub struct ContainerSpec {
     pub port: Option<u16>,
     /// Named runtime volumes and where to mount them.
     pub volumes: Vec<Mount>,
+    /// The network to join, created if it does not exist; the runtime's default if `None`.
+    pub network: Option<Network>,
+}
+
+/// A network shared with other containers, and the names they reach this one by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Network {
+    pub name: String,
+    pub aliases: Vec<String>,
 }
 
 /// An image to build from a directory with a Dockerfile.
@@ -130,7 +139,8 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// a container uses the image or an ID still has other references.
     async fn remove_image(&self, image: &str) -> Result<(), RuntimeError>;
 
-    /// Creates a container, without starting it, and returns its ID.
+    /// Creates a container, without starting it, and returns its ID. Its network is created
+    /// first if it does not exist.
     async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError>;
 
     /// Starts a created or stopped container. Starting a running one succeeds.

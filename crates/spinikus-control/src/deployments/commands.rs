@@ -4,15 +4,21 @@
 
 use spinikus_core::{
     deployment::{Deployment, DeploymentStrategy},
-    id::DeploymentId,
+    id::{DeploymentId, EnvironmentId},
     runtime::RuntimeSettings,
     source::SourceSpec,
     variable::{ResolvedVariable, VariableAvailability},
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, prepare_deployment::Source};
-use spinikus_store::{DeployKeyRepository, DeploymentRepository, VolumeRepository};
+use spinikus_store::{DeployKeyRepository, DeploymentRepository, ServiceRepository, StoreError, VolumeRepository};
 
 use crate::{Control, ControlError};
+
+/// The runtime network the environment's services share: they reach each other there by
+/// their slugs, and nothing outside the environment can.
+pub fn network_name(environment: EnvironmentId) -> String {
+    format!("spinikus-{environment}")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
@@ -126,6 +132,15 @@ impl Control {
         })?;
         let resolved = self.store().deployment_variables(deployment.id).await?;
         let volumes = self.store().list_volumes(deployment.service_id).await?;
+        // The environment's network, where the service's slug is its name. A deleted service
+        // keeps the default network.
+        let network = match self.store().get_service(deployment.service_id).await {
+            Ok(service) => {
+                Some(pb::ServiceNetwork { name: network_name(service.environment_id), aliases: vec![service.slug.to_string()] })
+            }
+            Err(StoreError::NotFound { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
         let check = settings.health_check();
         let strategy = match deployment.strategy {
             DeploymentStrategy::BlueGreen => pb::DeploymentStrategy::BlueGreen,
@@ -159,6 +174,7 @@ impl Control {
                 start_period: duration(check.start_period),
             }),
             replaces_deployment_id: replaces.map(|live| live.id.to_string()).unwrap_or_default(),
+            network,
         };
         Ok(command(deployment.id, Step::Start, Kind::StartDeployment(start)))
     }

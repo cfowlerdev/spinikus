@@ -3,8 +3,8 @@
 //! machine, by sending commands to the agent of the server it runs on.
 //!
 //! A deployment records what it deploys when it is created: the service's source and config
-//! (the snapshot), its resolved variables, and the server it runs on (the service's
-//! placement, or the embedded server). Later edits to the service never change it.
+//! (the snapshot), its resolved variables (with references to other services' variables
+//! replaced), and the server it runs on (the service's placement, or the embedded server). Later edits to the service never change it.
 
 mod cleanup;
 mod commands;
@@ -74,6 +74,8 @@ impl Control {
             .map_err(|error| ControlError::Invalid { field: "config.runtime", problem: error.to_string() })?;
         let server_id = self.placement(service).await?;
         let has_volumes = !self.store().list_volumes(service_id).await?.is_empty();
+        let variables = self.store().resolve_service_variables(service_id).await?;
+        let variables = self.resolve_references(service, variables).await?;
         let new = NewDeployment {
             service_id,
             server_id,
@@ -83,7 +85,7 @@ impl Control {
             snapshot: DeploymentSnapshot { source: source.spec, config: service.config.clone(), from_file: Vec::new() },
             commit_sha,
             image: None,
-            variables: self.store().resolve_service_variables(service_id).await?,
+            variables,
         };
         let deployment = self.store().create_deployment(new, actor).await?;
         self.wake_deployments();

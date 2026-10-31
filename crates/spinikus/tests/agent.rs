@@ -384,6 +384,15 @@ async fn the_agent_deploys_an_image_with_docker() {
     let stop = pb::StopDeployment { deployment_id: second.id.to_string(), grace_period: None };
     send_command(&control_plane, server, "cleanup", Kind::StopDeployment(stop)).await;
     wait_for_deployment(&control_plane, server, second.id, None).await;
+    assert!(remove_network(&control_plane, service).await, "the environment's network was not there");
+}
+
+/// Removes the network of the service's environment, which its containers joined, and
+/// says whether it was there.
+async fn remove_network(control_plane: &ControlPlane, service: ServiceId) -> bool {
+    let environment = control_plane.control.get_service(&control_plane.admin, service).await.unwrap().environment_id;
+    let network = format!("spinikus-{environment}");
+    std::process::Command::new("docker").args(["network", "rm", &network]).output().unwrap().status.success()
 }
 
 /// Runs git in `dir` for setting up a test repository, and returns its output.
@@ -519,6 +528,7 @@ async fn the_agent_builds_from_git_and_deploys_with_docker() {
     send_command(&control_plane, server, "cleanup", Kind::StopDeployment(stop)).await;
     wait_for_deployment(&control_plane, server, rollback.id, None).await;
     let removed = std::process::Command::new("docker").args(["image", "rm", "--force", &first_tag]).output().unwrap();
+    remove_network(&control_plane, service).await;
 
     assert!(served.contains("Host: web-production-shop.localhost"), "{served}");
     assert!(first_image.starts_with("sha256:") && first_image != second_image, "{first_image} {second_image}");

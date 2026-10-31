@@ -189,6 +189,7 @@ mod tests {
             env: Vec::new(),
             port,
             volumes: Vec::new(),
+            network: None,
         };
         let id = runtime.create(&spec).await.unwrap();
         runtime.start(&id).await.unwrap();

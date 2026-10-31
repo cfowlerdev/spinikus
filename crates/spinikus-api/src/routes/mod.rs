@@ -9,6 +9,8 @@ mod services;
 mod session;
 mod settings;
 mod sources;
+mod variables;
+mod volumes;
 
 use axum::{
     Router,
@@ -44,6 +46,13 @@ pub fn v1() -> Router<Control> {
         .route("/deployments/{id}/cancel", post(deployments::cancel))
         .route("/services/{id}/domains", get(domains::list).post(domains::create))
         .route("/domains/{id}", get(domains::show).patch(domains::update).delete(domains::delete))
+        .route("/projects/{id}/variables", get(variables::list_project).post(variables::create_project))
+        .route("/environments/{id}/variables", get(variables::list_environment).post(variables::create_environment))
+        .route("/services/{id}/variables", get(variables::list_service).post(variables::create_service))
+        .route("/variables/{id}", get(variables::show).patch(variables::update).delete(variables::delete))
+        .route("/variables/{id}/reveal", post(variables::reveal))
+        .route("/services/{id}/volumes", get(volumes::list).post(volumes::create))
+        .route("/volumes/{id}", get(volumes::show).patch(volumes::update).delete(volumes::delete))
         .route("/settings/{key}", get(settings::show).put(settings::put))
         .route("/servers", get(servers::list).post(servers::create))
         .route("/servers/{id}", get(servers::show))

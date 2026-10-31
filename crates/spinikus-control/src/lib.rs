@@ -23,6 +23,8 @@ pub mod setup;
 pub mod sources;
 #[cfg(test)]
 mod test_support;
+pub mod variables;
+pub mod volumes;
 pub mod webhooks;
 
 use std::sync::Arc;
@@ -43,6 +45,8 @@ pub use servers::{Enrolled, JoinToken, NewServer};
 pub use services::{NewService, ServiceChanges};
 use spinikus_store::SqliteStore;
 use tokio::sync::OnceCell;
+pub use variables::{NewVariable, VariableChanges};
+pub use volumes::{NewVolume, VolumeChanges};
 
 /// The service layer. Cheap to clone; clones share the database pool and the connected agents.
 #[derive(Clone)]

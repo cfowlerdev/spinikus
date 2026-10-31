@@ -3,6 +3,7 @@ use spinikus_core::{
     id::{EnvironmentId, ServiceId},
     route::ServiceNames,
     service::{Service, ServiceConfig, ServiceFields, ServiceKind},
+    slug::Slug,
 };
 
 use crate::{EnvironmentRepository, SqliteStore, StoreError, error::parse_column};
@@ -21,6 +22,9 @@ pub trait ServiceRepository: Send + Sync {
 
     /// Fails with `NotFound` for deleted services too.
     async fn get_service(&self, id: ServiceId) -> Result<Service, StoreError>;
+
+    /// The environment's service with this slug, unless it is deleted.
+    async fn find_service_by_slug(&self, environment_id: EnvironmentId, slug: &Slug) -> Result<Option<Service>, StoreError>;
 
     /// The slugs of every app service that is not deleted, with its environment's and
     /// project's, for generated hostnames.
@@ -153,6 +157,19 @@ impl ServiceRepository for SqliteStore {
         row.ok_or_else(|| not_found(id))?.try_into()
     }
 
+    async fn find_service_by_slug(&self, environment_id: EnvironmentId, slug: &Slug) -> Result<Option<Service>, StoreError> {
+        let row: Option<ServiceRow> = sqlx::query_as(
+            "SELECT id, environment_id, name, slug, kind, config, server_id, revision, created_at, updated_at
+             FROM services WHERE environment_id = ? AND slug = ? AND deleted_at IS NULL",
+        )
+        .bind(environment_id.to_string())
+        .bind(slug.as_str())
+        .fetch_optional(self.pool())
+        .await?;
+
+        row.map(Service::try_from).transpose()
+    }
+
     async fn list_services(
         &self,
         environment_id: EnvironmentId,
@@ -269,6 +286,20 @@ mod tests {
         assert_eq!(names[0].service_id, web.id);
         let slugs = (names[0].service.as_str(), names[0].environment.as_str(), names[0].project.as_str());
         assert_eq!(slugs, ("web", "staging", "shop"));
+    }
+
+    #[tokio::test]
+    async fn finds_a_service_by_its_slug_in_its_environment() {
+        let (_dir, store) = store().await;
+        let (staging, other) = (environment(&store, "shop").await, environment(&store, "blog").await);
+        let db = store.create_service(staging, ServiceKind::Database, fields("DB", "db", json!({}))).await.unwrap();
+        let old = store.create_service(staging, ServiceKind::App, fields("Old", "old", json!({}))).await.unwrap();
+        store.delete_service(old.id).await.unwrap();
+        let slug = |slug: &str| slug.parse::<Slug>().unwrap();
+
+        assert_eq!(store.find_service_by_slug(staging, &slug("db")).await.unwrap().map(|found| found.id), Some(db.id));
+        assert_eq!(store.find_service_by_slug(other, &slug("db")).await.unwrap(), None);
+        assert_eq!(store.find_service_by_slug(staging, &slug("old")).await.unwrap(), None);
     }
 
     #[tokio::test]

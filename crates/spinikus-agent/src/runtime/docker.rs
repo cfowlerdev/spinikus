@@ -15,8 +15,8 @@ use bollard::{
     container::LogOutput,
     errors::Error,
     models::{
-        ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EventMessageTypeEnum, HealthStatusEnum,
-        HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+        ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EndpointSettings, EventMessageTypeEnum,
+        HealthStatusEnum, HostConfig, NetworkCreateRequest, NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
     },
     query_parameters::{
         BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptionsBuilder, CreateImageOptionsBuilder, EventsOptionsBuilder,
@@ -29,9 +29,12 @@ use spinikus_core::server::{InstanceHealth, InstanceStatus, ObservedInstance};
 use tokio_stream::StreamExt;
 
 use super::{
-    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, LogLine, LogLines, LogOptions, PORT_LABEL,
-    RuntimeError, SERVICE_LABEL, owner,
+    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, LogLine, LogLines, LogOptions, Network,
+    PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
 };
+
+/// The label on networks Spinikus creates.
+pub const NETWORK_LABEL: &str = "spinikus.network";
 
 /// How long to wait for the Engine API to answer, beyond any grace period a call waits for.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -72,6 +75,27 @@ impl DockerRuntime {
         };
         let connected = connected.map_err(|error| RuntimeError::Unavailable(error.to_string()))?.with_timeout(REQUEST_TIMEOUT);
         Ok(docker.insert(connected).clone())
+    }
+
+    /// Creates the network if it does not exist: a bridge, labeled as Spinikus's. Two
+    /// deployments creating it at once both succeed.
+    async fn ensure_network(&self, network: &Network) -> Result<(), RuntimeError> {
+        let docker = self.client()?;
+        match docker.inspect_network(&network.name, None).await.map_err(runtime_error) {
+            Ok(_) => return Ok(()),
+            Err(RuntimeError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        let request = NetworkCreateRequest {
+            name: network.name.clone(),
+            driver: Some("bridge".to_string()),
+            labels: Some(HashMap::from([(NETWORK_LABEL.to_string(), "true".to_string())])),
+            ..Default::default()
+        };
+        match docker.create_network(request).await {
+            Ok(_) | Err(Error::DockerResponseServerError { status_code: 409, .. }) => Ok(()),
+            Err(error) => Err(runtime_error(error)),
+        }
     }
 
     /// A client whose requests may take `grace` longer, for calls that wait for a
@@ -288,14 +312,25 @@ impl ContainerRuntime for DockerRuntime {
             binds: Some(spec.volumes.iter().map(|mount| format!("{}:{}", mount.volume, mount.path)).collect()),
             // Containers come back after a reboot or a daemon restart, without the agent.
             restart_policy: Some(RestartPolicy { name: Some(RestartPolicyNameEnum::UNLESS_STOPPED), ..Default::default() }),
+            network_mode: spec.network.as_ref().map(|network| network.name.clone()),
             ..Default::default()
         };
+        if let Some(network) = &spec.network {
+            self.ensure_network(network).await?;
+        }
+        let networking_config = spec.network.as_ref().map(|network| NetworkingConfig {
+            endpoints_config: Some(HashMap::from([(
+                network.name.clone(),
+                EndpointSettings { aliases: Some(network.aliases.clone()), ..Default::default() },
+            )])),
+        });
         let body = ContainerCreateBody {
             image: Some(spec.image.clone()),
             env: Some(spec.env.iter().map(|(name, value)| format!("{name}={value}")).collect()),
             labels: Some(labels),
             exposed_ports: port.map(|port| vec![port]),
             host_config: Some(host_config),
+            networking_config,
             ..Default::default()
         };
         let options = CreateContainerOptionsBuilder::new().name(&spec.name).build();

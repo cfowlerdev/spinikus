@@ -276,6 +276,7 @@ mod tests {
             env: Vec::new(),
             port: Some(3000),
             volumes: Vec::new(),
+            network: None,
         };
         let container = runtime.create(&spec).await.unwrap();
         let address: SocketAddr = "127.0.0.1:49152".parse().unwrap();

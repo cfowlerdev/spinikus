@@ -451,3 +451,62 @@ async fn a_webhook_deploys_pushes() {
     assert_eq!(deleted.status, StatusCode::NO_CONTENT);
     assert_eq!(after_delete.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn manages_variables_with_write_only_secrets_and_volumes() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+    let project = api.send(Method::POST, "/api/v1/projects", token, &[], Some(json!({ "name": "Shop" }))).await;
+    let project_id = project.body["id"].as_str().unwrap();
+    let environments = format!("/api/v1/projects/{project_id}/environments");
+    let production =
+        api.send(Method::POST, &environments, token, &[], Some(json!({ "name": "Production", "kind": "production" }))).await;
+    let services = format!("/api/v1/environments/{}/services", production.body["id"].as_str().unwrap());
+    let service =
+        api.send(Method::POST, &services, token, &[], Some(json!({ "name": "Web", "kind": "app", "config": {} }))).await;
+    let service_id = service.body["id"].as_str().unwrap();
+    let variables = format!("/api/v1/services/{service_id}/variables");
+
+    let secret = json!({ "name": "API_KEY", "value": "s3cret", "secret": true });
+    let created = api.send(Method::POST, &variables, token, &[], Some(secret)).await;
+    let plain = json!({ "name": "LOG", "value": "info", "availability": "both" });
+    let on_project = api.send(Method::POST, &format!("/api/v1/projects/{project_id}/variables"), token, &[], Some(plain)).await;
+    let typo = api.send(Method::POST, &variables, token, &[], Some(json!({ "name": "X", "valeu": "1" }))).await;
+    let location = created.header(header::LOCATION).to_string();
+    let listed = api.send(Method::GET, &variables, token, &[], None).await;
+    let etag = [(header::IF_MATCH, created.header(header::ETAG))];
+    let renamed = api.send(Method::PATCH, &location, token, &etag, Some(json!({ "name": "API_TOKEN" }))).await;
+    let revealed = api.send(Method::POST, &format!("{location}/reveal"), token, &[], None).await;
+    let deleted = api.send(Method::DELETE, &location, token, &[], None).await;
+    let gone = api.send(Method::GET, &location, token, &[], None).await;
+
+    assert_eq!(
+        (created.status, &created.body["value"], &created.body["scope"]),
+        (StatusCode::CREATED, &Value::Null, &json!("service"))
+    );
+    assert_eq!((on_project.status, &on_project.body["value"]), (StatusCode::CREATED, &json!("info")));
+    assert_eq!((typo.status, &typo.body["code"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("invalid_body")));
+    assert_eq!(listed.body.as_array().unwrap().len(), 1);
+    assert_eq!(
+        (renamed.status, &renamed.body["name"], &renamed.body["value"]),
+        (StatusCode::OK, &json!("API_TOKEN"), &Value::Null)
+    );
+    assert_eq!((revealed.body["value"].as_str(), revealed.header(header::CACHE_CONTROL)), (Some("s3cret"), "no-store"));
+    assert_eq!((deleted.status, gone.status), (StatusCode::NO_CONTENT, StatusCode::NOT_FOUND));
+
+    let volumes = format!("/api/v1/services/{service_id}/volumes");
+    let volume = api.send(Method::POST, &volumes, token, &[], Some(json!({ "name": "data", "mount_path": "/data/" }))).await;
+    let bad = api.send(Method::POST, &volumes, token, &[], Some(json!({ "name": "x", "mount_path": "data" }))).await;
+    let volume_location = volume.header(header::LOCATION).to_string();
+    let etag = [(header::IF_MATCH, volume.header(header::ETAG))];
+    let moved = api.send(Method::PATCH, &volume_location, token, &etag, Some(json!({ "mount_path": "/srv" }))).await;
+    let listed = api.send(Method::GET, &volumes, token, &[], None).await;
+    let removed = api.send(Method::DELETE, &volume_location, token, &[], None).await;
+
+    assert_eq!((volume.status, &volume.body["mount_path"]), (StatusCode::CREATED, &json!("/data")));
+    assert_eq!((bad.status, &bad.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("mount_path")));
+    assert_eq!(moved.body["mount_path"], "/srv");
+    assert_eq!(listed.body[0]["mount_path"], "/srv");
+    assert_eq!(removed.status, StatusCode::NO_CONTENT);
+}

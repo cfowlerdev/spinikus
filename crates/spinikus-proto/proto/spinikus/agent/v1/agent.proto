@@ -310,6 +310,16 @@ message StartDeployment {
   HealthCheck health_check = 8;
   // For `recreate`: the deployment whose containers to stop first.
   string replaces_deployment_id = 9;
+  // The network to join, shared by the services of the deployment's environment. Unset
+  // leaves the container on the runtime's default network.
+  ServiceNetwork network = 10;
+}
+
+// A runtime network the agent creates if it does not exist, and the names other containers
+// on it reach the container by.
+message ServiceNetwork {
+  string name = 1;
+  repeated string aliases = 2;
 }
 
 enum DeploymentStrategy {

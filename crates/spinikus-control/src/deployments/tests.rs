@@ -180,6 +180,11 @@ async fn prepares_starts_and_verifies_a_deployment() {
     assert_eq!(start_deployment.health_check.as_ref().unwrap().path, "/healthz");
     assert_eq!(start_deployment.health_check.as_ref().unwrap().retries, 3);
     assert_eq!(start_deployment.strategy, pb::DeploymentStrategy::BlueGreen as i32);
+    let network = start_deployment.network.as_ref().unwrap();
+    assert_eq!(
+        (network.name.clone(), network.aliases.clone()),
+        (format!("spinikus-{}", setup.environment.id), vec!["web".to_string()])
+    );
     let variables: Vec<_> = start_deployment
         .variables
         .iter()
