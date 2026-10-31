@@ -368,7 +368,12 @@ mod tests {
             .create_service(
                 environment,
                 ServiceKind::App,
-                ServiceFields { name: "App".to_string(), slug: "app".parse().unwrap(), config: Default::default() },
+                ServiceFields {
+                    name: "App".to_string(),
+                    slug: "app".parse().unwrap(),
+                    config: Default::default(),
+                    server_id: None,
+                },
             )
             .await
             .unwrap()
@@ -591,7 +596,12 @@ mod tests {
             .create_service(
                 environment,
                 ServiceKind::App,
-                ServiceFields { name: "Worker".to_string(), slug: "worker".parse().unwrap(), config: Default::default() },
+                ServiceFields {
+                    name: "Worker".to_string(),
+                    slug: "worker".parse().unwrap(),
+                    config: Default::default(),
+                    server_id: None,
+                },
             )
             .await
             .unwrap()

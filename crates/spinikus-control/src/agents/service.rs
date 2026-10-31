@@ -100,6 +100,7 @@ impl AgentService for AgentGrpc {
         let (connection, stopped) = self.control.agents().register(server, sender);
         drop(transition);
         tracing::info!(server = %server, agent_version = hello.agent_version, "agent connected");
+        self.control.agent_connected(server).await;
 
         let control = self.control.clone();
         let idle_timeout = self.timings.idle_timeout;
@@ -187,10 +188,16 @@ async fn handle(control: &Control, server: ServerId, message: AgentMessage) -> R
             tracing::warn!(server = %server, "ignored a second Hello");
             Ok(())
         }
-        // Handled once deployments run on agents.
-        agent_message::Message::CommandProgress(_)
-        | agent_message::Message::CommandResult(_)
-        | agent_message::Message::SnapshotApplied(_) => {
+        agent_message::Message::CommandProgress(progress) => {
+            control.deployment_progress(server, progress).await;
+            Ok(())
+        }
+        agent_message::Message::CommandResult(result) => {
+            control.deployment_result(server, result).await;
+            Ok(())
+        }
+        // Handled once the proxy takes routes and certificates.
+        agent_message::Message::SnapshotApplied(_) => {
             tracing::debug!(server = %server, "ignored a message that is not handled yet");
             Ok(())
         }

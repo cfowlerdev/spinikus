@@ -1,13 +1,15 @@
-//! Services. Developers in an environment create and edit its services; admins delete them.
+//! Services. Developers in an environment create and edit its services (including where
+//! they run and their runtime settings); admins delete them.
 
 use serde_json::json;
 use spinikus_core::{
     environment::Environment,
-    id::{EnvironmentId, ServiceId},
+    id::{EnvironmentId, ServerId, ServiceId},
     membership::Role,
+    runtime::RuntimeSettings,
     service::{Service, ServiceConfig, ServiceFields, ServiceKind},
 };
-use spinikus_store::{EnvironmentRepository, ServiceRepository};
+use spinikus_store::{EnvironmentRepository, ServerRepository, ServiceRepository, StoreError};
 
 use crate::{
     Control, ControlError, Principal,
@@ -23,6 +25,8 @@ pub struct NewService {
     pub slug: Option<String>,
     pub kind: ServiceKind,
     pub config: ServiceConfig,
+    /// The server to run on; `None` means the embedded server.
+    pub server_id: Option<ServerId>,
 }
 
 /// Changes to a service. Fields left as `None` keep their current value; a new config
@@ -32,6 +36,8 @@ pub struct ServiceChanges {
     pub name: Option<String>,
     pub slug: Option<String>,
     pub config: Option<ServiceConfig>,
+    /// `Some(None)` moves the service back to the embedded server.
+    pub server_id: Option<Option<ServerId>>,
 }
 
 impl Control {
@@ -45,7 +51,9 @@ impl Control {
         self.access(principal).await?.check_environment(&environment, Role::Developer)?;
         let name = input::name(&new.name)?;
         let slug = input::slug(new.slug.as_deref(), &name)?;
-        let fields = ServiceFields { name, slug, config: new.config };
+        check_config(&new.config)?;
+        self.check_placement(new.server_id).await?;
+        let fields = ServiceFields { name, slug, config: new.config, server_id: new.server_id };
         let service = self.store().create_service(environment_id, new.kind, fields).await?;
         let details = json!({ "slug": service.slug, "kind": service.kind, "environment_id": environment_id.to_string() });
         self.audit_by(principal, "service.create", service.id, Some(environment.project_id), details).await?;
@@ -90,9 +98,19 @@ impl Control {
         };
         let config_changed = changes.config.is_some();
         let config = changes.config.unwrap_or(current.config);
-        let service = self.store().update_service(id, revision, ServiceFields { name, slug, config }).await?;
-        let changed =
-            audit::changed(&[("name", changes.name.is_some()), ("slug", changes.slug.is_some()), ("config", config_changed)]);
+        check_config(&config)?;
+        let placement_changed = changes.server_id.is_some();
+        let server_id = changes.server_id.unwrap_or(current.server_id);
+        if placement_changed {
+            self.check_placement(server_id).await?;
+        }
+        let service = self.store().update_service(id, revision, ServiceFields { name, slug, config, server_id }).await?;
+        let changed = audit::changed(&[
+            ("name", changes.name.is_some()),
+            ("slug", changes.slug.is_some()),
+            ("config", config_changed),
+            ("server_id", placement_changed),
+        ]);
         self.audit_by(principal, "service.update", id, Some(environment.project_id), changed).await?;
         Ok(service)
     }
@@ -105,9 +123,22 @@ impl Control {
         self.audit_by(principal, "service.delete", id, Some(environment.project_id), details).await
     }
 
+    /// A service can be placed on any server that is not revoked.
+    async fn check_placement(&self, server_id: Option<ServerId>) -> Result<(), ControlError> {
+        let Some(server_id) = server_id else {
+            return Ok(());
+        };
+        let unknown = || ControlError::Invalid { field: "server_id", problem: format!("no server `{server_id}`") };
+        match self.store().get_server(server_id).await {
+            Ok(server) if server.revoked_at.is_none() => Ok(()),
+            Ok(_) | Err(StoreError::NotFound { .. }) => Err(unknown()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// The service and its environment, if the principal has `needed` there. A service in an
     /// environment the principal cannot see is `NotFound`.
-    async fn service_with_access(
+    pub(crate) async fn service_with_access(
         &self,
         principal: &Principal,
         id: ServiceId,
@@ -122,6 +153,13 @@ impl Control {
     }
 }
 
+/// The runtime settings must be ones Spinikus can apply; the rest of the config is free-form.
+fn check_config(config: &ServiceConfig) -> Result<(), ControlError> {
+    RuntimeSettings::from_config(config)
+        .map(|_| ())
+        .map_err(|error| ControlError::Invalid { field: "config.runtime", problem: error.to_string() })
+}
+
 #[cfg(test)]
 mod tests {
     use spinikus_core::{environment::EnvironmentKind, membership::MembershipScope};
@@ -134,7 +172,7 @@ mod tests {
 
     fn new(name: &str) -> NewService {
         let config = json!({ "port": 8080 }).as_object().cloned().unwrap();
-        NewService { name: name.to_string(), slug: None, kind: ServiceKind::App, config }
+        NewService { name: name.to_string(), slug: None, kind: ServiceKind::App, config, server_id: None }
     }
 
     async fn environments(control: &Control, admin: &Principal) -> (Environment, Environment) {
@@ -169,6 +207,36 @@ mod tests {
         assert!(matches!(delete, Err(ControlError::Forbidden)), "{delete:?}");
         control.delete_service(&admin, service.id).await.unwrap();
         assert!(matches!(control.get_service(&admin, service.id).await, Err(ControlError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn checks_placement_and_runtime_settings() {
+        let (_dir, control) = control().await;
+        let admin = user(&control, "admin@example.com", true).await;
+        let (production, _) = environments(&control, &admin).await;
+        let server = control.create_server(&admin, crate::NewServer { name: "web-1".to_string() }).await.unwrap();
+        let revoked = control.create_server(&admin, crate::NewServer { name: "old".to_string() }).await.unwrap();
+        control.revoke_server(&admin, revoked.id).await.unwrap();
+        let runtime = |runtime: serde_json::Value| json!({ "runtime": runtime }).as_object().cloned().unwrap();
+
+        let placed = NewService { server_id: Some(server.id), ..new("Web") };
+        let service = control.create_service(&admin, production.id, placed).await.unwrap();
+        let on_revoked = NewService { server_id: Some(revoked.id), ..new("Worker") };
+        let on_revoked = control.create_service(&admin, production.id, on_revoked).await;
+        let unknown = NewService { config: runtime(json!({ "release": "migrate" })), ..new("Worker") };
+        let unknown = control.create_service(&admin, production.id, unknown).await;
+        let moved =
+            ServiceChanges { server_id: Some(None), config: Some(runtime(json!({ "port": 3000 }))), ..Default::default() };
+        let moved = control.update_service(&admin, service.id, service.revision, moved).await.unwrap();
+        let path_without_port =
+            ServiceChanges { config: Some(runtime(json!({ "healthcheck": { "path": "/up" } }))), ..Default::default() };
+        let path_without_port = control.update_service(&admin, service.id, moved.revision, path_without_port).await;
+
+        assert_eq!(service.server_id, Some(server.id));
+        assert!(matches!(on_revoked, Err(ControlError::Invalid { field: "server_id", .. })), "{on_revoked:?}");
+        assert!(matches!(unknown, Err(ControlError::Invalid { field: "config.runtime", .. })), "{unknown:?}");
+        assert_eq!(moved.server_id, None);
+        assert!(matches!(path_without_port, Err(ControlError::Invalid { field: "config.runtime", .. })), "{path_without_port:?}");
     }
 
     #[tokio::test]

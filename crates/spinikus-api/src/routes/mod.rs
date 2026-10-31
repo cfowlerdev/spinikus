@@ -1,8 +1,10 @@
+mod deployments;
 mod environments;
 mod projects;
 mod servers;
 mod services;
 mod session;
+mod sources;
 
 use axum::{
     Router,
@@ -21,6 +23,11 @@ pub fn v1() -> Router<Control> {
         .route("/environments/{id}", get(environments::show).patch(environments::update).delete(environments::delete))
         .route("/environments/{id}/services", get(services::list).post(services::create))
         .route("/services/{id}", get(services::show).patch(services::update).delete(services::delete))
+        .route("/services/{id}/source", get(sources::show).post(sources::create).put(sources::replace))
+        .route("/services/{id}/deployments", get(deployments::list).post(deployments::create))
+        .route("/deployments/{id}", get(deployments::show))
+        .route("/deployments/{id}/events", get(deployments::events))
+        .route("/deployments/{id}/cancel", post(deployments::cancel))
         .route("/servers", get(servers::list).post(servers::create))
         .route("/servers/{id}", get(servers::show))
         .route("/servers/{id}/revoke", post(servers::revoke))

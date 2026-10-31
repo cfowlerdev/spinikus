@@ -3,10 +3,10 @@ use axum::{
     http::StatusCode,
     response::{Json, Response},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use spinikus_control::{Control, NewService, ServiceChanges};
 use spinikus_core::{
-    id::{EnvironmentId, ServiceId},
+    id::{EnvironmentId, ServerId, ServiceId},
     service::{Service, ServiceConfig, ServiceKind},
 };
 
@@ -24,6 +24,8 @@ pub struct Create {
     kind: ServiceKind,
     #[serde(default)]
     config: ServiceConfig,
+    /// Where it runs; omitted means the embedded server.
+    server_id: Option<ServerId>,
 }
 
 #[derive(Deserialize)]
@@ -33,6 +35,14 @@ pub struct Update {
     slug: Option<String>,
     /// Replaces the whole config.
     config: Option<ServiceConfig>,
+    /// `null` moves the service back to the embedded server; omitted keeps the placement.
+    #[serde(default, deserialize_with = "present")]
+    server_id: Option<Option<ServerId>>,
+}
+
+/// Tells an explicit `null` (`Some(None)`) apart from a missing field (`None`, by default).
+fn present<'de, T: Deserialize<'de>, D: Deserializer<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
 }
 
 pub async fn list(
@@ -51,7 +61,7 @@ pub async fn create(
     Path(environment_id): Path<EnvironmentId>,
     Body(body): Body<Create>,
 ) -> Result<Response, ApiError> {
-    let new = NewService { name: body.name, slug: body.slug, kind: body.kind, config: body.config };
+    let new = NewService { name: body.name, slug: body.slug, kind: body.kind, config: body.config, server_id: body.server_id };
     let service = control.create_service(&principal, environment_id, new).await?;
     Ok(created(format!("/api/v1/services/{}", service.id), service.revision, service))
 }
@@ -72,7 +82,7 @@ pub async fn update(
     IfMatch(revision): IfMatch,
     Body(body): Body<Update>,
 ) -> Result<Response, ApiError> {
-    let changes = ServiceChanges { name: body.name, slug: body.slug, config: body.config };
+    let changes = ServiceChanges { name: body.name, slug: body.slug, config: body.config, server_id: body.server_id };
     let service = control.update_service(&principal, id, revision, changes).await?;
     Ok(tagged(service.revision, service))
 }

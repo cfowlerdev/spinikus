@@ -36,13 +36,19 @@ pub trait DeploymentRepository: Send + Sync {
     /// The deployment currently serving the service, if any.
     async fn live_deployment(&self, service_id: ServiceId) -> Result<Option<Deployment>, StoreError>;
 
-    /// Moves the deployment to `to`, recording an event. Going `live` moves the service's
-    /// previous live deployment to `draining` in the same transaction.
+    /// Every deployment that still has work to do (`queued` through `verifying`, and
+    /// `draining`), oldest first.
+    async fn list_active_deployments(&self) -> Result<Vec<Deployment>, StoreError>;
+
+    /// Moves the deployment to `to`, recording an event with an optional `message` (what
+    /// went wrong, for a failure). Going `live` moves the service's previous live
+    /// deployment to `draining` in the same transaction.
     async fn transition_deployment(
         &self,
         id: DeploymentId,
         to: DeploymentStatus,
         reason: Option<EndReason>,
+        message: Option<&str>,
         actor: Actor,
     ) -> Result<Deployment, StoreError>;
 
@@ -62,7 +68,7 @@ pub trait DeploymentRepository: Send + Sync {
 /// The deployment columns, in the order `DeploymentRow` reads them.
 macro_rules! columns {
     () => {
-        "id, service_id, trigger_type, strategy, status, reason, rollback_of, snapshot, commit_sha, image,
+        "id, service_id, server_id, trigger_type, strategy, status, reason, rollback_of, snapshot, commit_sha, image,
          created_at, updated_at"
     };
 }
@@ -71,6 +77,7 @@ macro_rules! columns {
 struct DeploymentRow {
     id: String,
     service_id: String,
+    server_id: String,
     trigger_type: String,
     strategy: String,
     status: String,
@@ -90,6 +97,7 @@ impl TryFrom<DeploymentRow> for Deployment {
         Ok(Deployment {
             id: parse_column(ENTITY, "id", &row.id)?,
             service_id: parse_column(ENTITY, "service_id", &row.service_id)?,
+            server_id: parse_column(ENTITY, "server_id", &row.server_id)?,
             trigger: parse_column(ENTITY, "trigger_type", &row.trigger_type)?,
             strategy: parse_column(ENTITY, "strategy", &row.strategy)?,
             status: parse_column(ENTITY, "status", &row.status)?,
@@ -115,6 +123,7 @@ struct EventRow {
     from_status: Option<String>,
     to_status: String,
     reason: Option<String>,
+    message: Option<String>,
     actor: String,
     created_at: String,
 }
@@ -130,6 +139,7 @@ impl TryFrom<EventRow> for DeploymentEvent {
             from: row.from_status.map(|status| parse_column(ENTITY, "from_status", &status)).transpose()?,
             to: parse_column(ENTITY, "to_status", &row.to_status)?,
             reason: row.reason.map(|reason| parse_column(ENTITY, "reason", &reason)).transpose()?,
+            message: row.message,
             actor: parse_column(ENTITY, "actor", &row.actor)?,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
         })
@@ -203,17 +213,19 @@ async fn insert_event(
     from: Option<DeploymentStatus>,
     to: DeploymentStatus,
     reason: Option<EndReason>,
+    message: Option<&str>,
     actor: Actor,
 ) -> Result<(), StoreError> {
     sqlx::query(
-        "INSERT INTO deployment_events (id, deployment_id, from_status, to_status, reason, actor)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO deployment_events (id, deployment_id, from_status, to_status, reason, message, actor)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(DeploymentEventId::new().to_string())
     .bind(deployment_id.to_string())
     .bind(from.map(DeploymentStatus::as_str))
     .bind(to.as_str())
     .bind(reason.map(EndReason::as_str))
+    .bind(message)
     .bind(actor.to_string())
     .execute(conn)
     .await?;
@@ -225,6 +237,7 @@ async fn apply(
     conn: &mut SqliteConnection,
     deployment: &Deployment,
     transition: Transition,
+    message: Option<&str>,
     actor: Actor,
 ) -> Result<(), StoreError> {
     sqlx::query(
@@ -245,7 +258,7 @@ async fn apply(
         })
     })?;
 
-    insert_event(conn, deployment.id, Some(transition.from), transition.to, transition.reason, actor).await
+    insert_event(conn, deployment.id, Some(transition.from), transition.to, transition.reason, message, actor).await
 }
 
 /// The service's deployment in `status`, which the unique indexes make at most one.
@@ -284,17 +297,18 @@ impl DeploymentRepository for SqliteStore {
 
         if let Some(queued) = find_by_status(&mut tx, new.service_id, DeploymentStatus::Queued).await? {
             let transition = queued.status.transition(DeploymentStatus::Canceled, Some(EndReason::SupersededInQueue))?;
-            apply(&mut tx, &queued, transition, actor).await?;
+            apply(&mut tx, &queued, transition, None, actor).await?;
         }
 
         let id = DeploymentId::new();
         sqlx::query(
             "INSERT INTO deployments
-                 (id, service_id, trigger_type, strategy, status, rollback_of, snapshot, commit_sha, image)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (id, service_id, server_id, trigger_type, strategy, status, rollback_of, snapshot, commit_sha, image)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(new.service_id.to_string())
+        .bind(new.server_id.to_string())
         .bind(new.trigger.as_str())
         .bind(new.strategy.as_str())
         .bind(DeploymentStatus::Queued.as_str())
@@ -304,7 +318,7 @@ impl DeploymentRepository for SqliteStore {
         .bind(new.image)
         .execute(&mut *tx)
         .await?;
-        insert_event(&mut tx, id, None, DeploymentStatus::Queued, None, actor).await?;
+        insert_event(&mut tx, id, None, DeploymentStatus::Queued, None, None, actor).await?;
 
         let sealed = seal_variables(self.keyring(), id, &new.variables);
         sqlx::query("INSERT INTO deployment_variables (deployment_id, variables, data_key_id) VALUES (?, ?, ?)")
@@ -346,7 +360,7 @@ impl DeploymentRepository for SqliteStore {
 
     async fn list_deployment_events(&self, id: DeploymentId) -> Result<Vec<DeploymentEvent>, StoreError> {
         let rows: Vec<EventRow> = sqlx::query_as(
-            "SELECT id, deployment_id, from_status, to_status, reason, actor, created_at
+            "SELECT id, deployment_id, from_status, to_status, reason, message, actor, created_at
              FROM deployment_events WHERE deployment_id = ? ORDER BY id",
         )
         .bind(id.to_string())
@@ -364,11 +378,24 @@ impl DeploymentRepository for SqliteStore {
         find_by_status(&mut *self.pool().acquire().await?, service_id, DeploymentStatus::Live).await
     }
 
+    async fn list_active_deployments(&self) -> Result<Vec<Deployment>, StoreError> {
+        let rows: Vec<DeploymentRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM deployments
+             WHERE status IN ('queued', 'preparing', 'releasing', 'starting', 'verifying', 'draining') ORDER BY id"
+        ))
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(Deployment::try_from).collect()
+    }
+
     async fn transition_deployment(
         &self,
         id: DeploymentId,
         to: DeploymentStatus,
         reason: Option<EndReason>,
+        message: Option<&str>,
         actor: Actor,
     ) -> Result<Deployment, StoreError> {
         let mut tx = self.begin_write().await?;
@@ -379,9 +406,9 @@ impl DeploymentRepository for SqliteStore {
             && let Some(previous) = find_by_status(&mut tx, deployment.service_id, DeploymentStatus::Live).await?
         {
             let draining = previous.status.transition(DeploymentStatus::Draining, None)?;
-            apply(&mut tx, &previous, draining, actor).await?;
+            apply(&mut tx, &previous, draining, None, actor).await?;
         }
-        apply(&mut tx, &deployment, transition, actor).await?;
+        apply(&mut tx, &deployment, transition, message, actor).await?;
 
         let deployment = fetch(&mut tx, id).await?;
         tx.commit().await?;
@@ -442,8 +469,9 @@ mod tests {
     use spinikus_core::{
         deployment::{DeploymentStatus::*, DeploymentStrategy, DeploymentTrigger, TransitionError},
         environment::{EnvironmentFields, EnvironmentKind},
-        id::UserId,
+        id::{ServerId, UserId},
         project::ProjectFields,
+        server::ServerFields,
         service::{ServiceFields, ServiceKind},
         source::{ImageSource, SourceSpec},
     };
@@ -451,20 +479,25 @@ mod tests {
     use spinikus_core::variable::{VariableFields, VariableScope};
 
     use super::*;
-    use crate::{EnvironmentRepository, ProjectRepository, ServiceRepository, VariableRepository, test_support::store};
+    use crate::{
+        EnvironmentRepository, ProjectRepository, ServerRepository, ServiceRepository, VariableRepository, test_support::store,
+    };
 
-    async fn service(store: &SqliteStore) -> ServiceId {
+    async fn service(store: &SqliteStore) -> (ServiceId, ServerId) {
+        let server = store.create_server(ServerFields { name: "web-1".to_string() }).await.unwrap().id;
         let project = ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() };
         let project_id = store.create_project(project).await.unwrap().id;
         let env = EnvironmentFields { name: "Staging".to_string(), slug: "staging".parse().unwrap() };
         let env_id = store.create_environment(project_id, EnvironmentKind::Staging, env).await.unwrap().id;
-        let service = ServiceFields { name: "Web".to_string(), slug: "web".parse().unwrap(), config: Map::new() };
-        store.create_service(env_id, ServiceKind::App, service).await.unwrap().id
+        let service =
+            ServiceFields { name: "Web".to_string(), slug: "web".parse().unwrap(), config: Map::new(), server_id: None };
+        (store.create_service(env_id, ServiceKind::App, service).await.unwrap().id, server)
     }
 
-    fn new_deployment(service_id: ServiceId) -> NewDeployment {
+    fn new_deployment(service_id: ServiceId, server_id: ServerId) -> NewDeployment {
         NewDeployment {
             service_id,
+            server_id,
             trigger: DeploymentTrigger::Manual,
             strategy: DeploymentStrategy::BlueGreen,
             rollback_of: None,
@@ -479,10 +512,10 @@ mod tests {
     }
 
     /// Creates a deployment and walks it to `live`.
-    async fn deploy_live(store: &SqliteStore, service_id: ServiceId) -> Deployment {
-        let deployment = store.create_deployment(new_deployment(service_id), Actor::System).await.unwrap();
+    async fn deploy_live(store: &SqliteStore, service_id: ServiceId, server_id: ServerId) -> Deployment {
+        let deployment = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
         for status in [Preparing, Starting, Verifying, Live] {
-            store.transition_deployment(deployment.id, status, None, Actor::System).await.unwrap();
+            store.transition_deployment(deployment.id, status, None, None, Actor::System).await.unwrap();
         }
         store.get_deployment(deployment.id).await.unwrap()
     }
@@ -494,24 +527,53 @@ mod tests {
     #[tokio::test]
     async fn creates_a_queued_deployment_with_an_event() {
         let (_dir, store) = store().await;
-        let service_id = service(&store).await;
+        let (service_id, server_id) = service(&store).await;
         let user = Actor::User(UserId::new());
 
-        let deployment = store.create_deployment(new_deployment(service_id), user).await.unwrap();
+        let deployment = store.create_deployment(new_deployment(service_id, server_id), user).await.unwrap();
         let events = store.list_deployment_events(deployment.id).await.unwrap();
 
         assert_eq!(store.get_deployment(deployment.id).await.unwrap(), deployment);
         assert_eq!(deployment.status, Queued);
-        assert_eq!(deployment.snapshot, new_deployment(service_id).snapshot);
+        assert_eq!(deployment.snapshot, new_deployment(service_id, server_id).snapshot);
         assert_eq!(statuses(&events), vec![(None, Queued)]);
         assert_eq!(events[0].actor, user);
+    }
+
+    #[tokio::test]
+    async fn records_the_server_and_lists_active_deployments() {
+        let (_dir, store) = store().await;
+        let (service_id, server_id) = service(&store).await;
+        let live = deploy_live(&store, service_id, server_id).await;
+        let failed = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
+        store.transition_deployment(failed.id, Preparing, None, None, Actor::System).await.unwrap();
+        store
+            .transition_deployment(failed.id, Failed, Some(EndReason::BuildFailed), Some("cannot pull"), Actor::Server(server_id))
+            .await
+            .unwrap();
+        let queued = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
+        let second_live = deploy_live(&store, service_id, server_id).await;
+
+        let active: Vec<_> = store.list_active_deployments().await.unwrap().into_iter().map(|d| (d.id, d.status)).collect();
+        let events = store.list_deployment_events(failed.id).await.unwrap();
+
+        assert_eq!(queued.server_id, server_id);
+        // The first live one is draining now; the queued one was superseded by the second.
+        assert_eq!(active, vec![(live.id, Draining)]);
+        assert_eq!(second_live.status, Live);
+        let last = events.last().unwrap();
+        assert_eq!((last.to, last.reason, last.message.as_deref()), (Failed, Some(EndReason::BuildFailed), Some("cannot pull")));
+        assert_eq!(last.actor, Actor::Server(server_id));
+        assert_eq!(events[0].message, None);
     }
 
     #[tokio::test]
     async fn requires_an_active_service() {
         let (_dir, store) = store().await;
 
-        let result = store.create_deployment(new_deployment(ServiceId::new()), Actor::System).await;
+        let (_, server_id) = service(&store).await;
+
+        let result = store.create_deployment(new_deployment(ServiceId::new(), server_id), Actor::System).await;
 
         assert!(matches!(result, Err(StoreError::NotFound { entity: "service", .. })), "{result:?}");
     }
@@ -519,10 +581,10 @@ mod tests {
     #[tokio::test]
     async fn a_new_deployment_supersedes_the_queued_one() {
         let (_dir, store) = store().await;
-        let service_id = service(&store).await;
-        let first = store.create_deployment(new_deployment(service_id), Actor::System).await.unwrap();
+        let (service_id, server_id) = service(&store).await;
+        let first = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
 
-        let second = store.create_deployment(new_deployment(service_id), Actor::System).await.unwrap();
+        let second = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
         let first = store.get_deployment(first.id).await.unwrap();
 
         assert_eq!((first.status, first.reason), (Canceled, Some(EndReason::SupersededInQueue)));
@@ -536,9 +598,9 @@ mod tests {
     #[tokio::test]
     async fn walks_the_state_machine_and_records_each_step() {
         let (_dir, store) = store().await;
-        let service_id = service(&store).await;
+        let (service_id, server_id) = service(&store).await;
 
-        let deployment = deploy_live(&store, service_id).await;
+        let deployment = deploy_live(&store, service_id, server_id).await;
         let events = store.list_deployment_events(deployment.id).await.unwrap();
 
         assert_eq!(deployment.status, Live);
@@ -558,11 +620,11 @@ mod tests {
     #[tokio::test]
     async fn rejects_transitions_the_state_machine_forbids() {
         let (_dir, store) = store().await;
-        let service_id = service(&store).await;
-        let deployment = store.create_deployment(new_deployment(service_id), Actor::System).await.unwrap();
+        let (service_id, server_id) = service(&store).await;
+        let deployment = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
 
-        let skip = store.transition_deployment(deployment.id, Live, None, Actor::System).await;
-        let no_reason = store.transition_deployment(deployment.id, Canceled, None, Actor::System).await;
+        let skip = store.transition_deployment(deployment.id, Live, None, None, Actor::System).await;
+        let no_reason = store.transition_deployment(deployment.id, Canceled, None, None, Actor::System).await;
 
         assert!(matches!(skip, Err(StoreError::InvalidTransition(TransitionError::NotAllowed { .. }))), "{skip:?}");
         assert!(matches!(no_reason, Err(StoreError::InvalidTransition(TransitionError::MissingReason { .. }))), "{no_reason:?}");
@@ -572,28 +634,28 @@ mod tests {
     #[tokio::test]
     async fn going_live_drains_the_previous_deployment() {
         let (_dir, store) = store().await;
-        let service_id = service(&store).await;
-        let first = deploy_live(&store, service_id).await;
+        let (service_id, server_id) = service(&store).await;
+        let first = deploy_live(&store, service_id, server_id).await;
 
-        let second = deploy_live(&store, service_id).await;
+        let second = deploy_live(&store, service_id, server_id).await;
         let first = store.get_deployment(first.id).await.unwrap();
 
         assert_eq!(first.status, Draining);
         assert_eq!(store.live_deployment(service_id).await.unwrap(), Some(second));
-        store.transition_deployment(first.id, Superseded, None, Actor::System).await.unwrap();
+        store.transition_deployment(first.id, Superseded, None, None, Actor::System).await.unwrap();
     }
 
     #[tokio::test]
     async fn allows_one_deployment_in_progress_per_service() {
         let (_dir, store) = store().await;
-        let service_id = service(&store).await;
-        let first = store.create_deployment(new_deployment(service_id), Actor::System).await.unwrap();
-        store.transition_deployment(first.id, Preparing, None, Actor::System).await.unwrap();
-        let second = store.create_deployment(new_deployment(service_id), Actor::System).await.unwrap();
+        let (service_id, server_id) = service(&store).await;
+        let first = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
+        store.transition_deployment(first.id, Preparing, None, None, Actor::System).await.unwrap();
+        let second = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
 
-        let blocked = store.transition_deployment(second.id, Preparing, None, Actor::System).await;
-        store.transition_deployment(first.id, Failed, Some(EndReason::BuildFailed), Actor::System).await.unwrap();
-        let unblocked = store.transition_deployment(second.id, Preparing, None, Actor::System).await;
+        let blocked = store.transition_deployment(second.id, Preparing, None, None, Actor::System).await;
+        store.transition_deployment(first.id, Failed, Some(EndReason::BuildFailed), None, Actor::System).await.unwrap();
+        let unblocked = store.transition_deployment(second.id, Preparing, None, None, Actor::System).await;
 
         assert!(matches!(blocked, Err(StoreError::Conflict { field: "status", .. })), "{blocked:?}");
         assert_eq!(store.get_deployment(second.id).await.unwrap().status, Preparing);
@@ -603,10 +665,10 @@ mod tests {
     #[tokio::test]
     async fn lists_newest_first_with_a_cursor() {
         let (_dir, store) = store().await;
-        let service_id = service(&store).await;
+        let (service_id, server_id) = service(&store).await;
         let mut ids = Vec::new();
         for _ in 0..3 {
-            ids.push(store.create_deployment(new_deployment(service_id), Actor::System).await.unwrap().id);
+            ids.push(store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap().id);
         }
         ids.reverse();
 
@@ -620,8 +682,8 @@ mod tests {
     #[tokio::test]
     async fn records_build_outputs_once() {
         let (_dir, store) = store().await;
-        let service_id = service(&store).await;
-        let deployment = store.create_deployment(new_deployment(service_id), Actor::System).await.unwrap();
+        let (service_id, server_id) = service(&store).await;
+        let deployment = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
 
         let with_commit = store.record_build(deployment.id, Some("abc123".to_string()), None).await.unwrap();
         let with_image =
@@ -636,20 +698,20 @@ mod tests {
     #[tokio::test]
     async fn a_rollback_reuses_an_earlier_deployment() {
         let (_dir, store) = store().await;
-        let service_id = service(&store).await;
-        let first = deploy_live(&store, service_id).await;
+        let (service_id, server_id) = service(&store).await;
+        let first = deploy_live(&store, service_id, server_id).await;
         store.record_build(first.id, None, Some("web@sha256:1".to_string())).await.unwrap();
-        deploy_live(&store, service_id).await;
+        deploy_live(&store, service_id, server_id).await;
 
         let rollback = NewDeployment {
             trigger: DeploymentTrigger::Rollback,
             rollback_of: Some(first.id),
             image: Some("web@sha256:1".to_string()),
-            ..new_deployment(service_id)
+            ..new_deployment(service_id, server_id)
         };
         let rollback = store.create_deployment(rollback, Actor::System).await.unwrap();
         for status in [Starting, Verifying, Live] {
-            store.transition_deployment(rollback.id, status, None, Actor::System).await.unwrap();
+            store.transition_deployment(rollback.id, status, None, None, Actor::System).await.unwrap();
         }
 
         let live = store.live_deployment(service_id).await.unwrap().unwrap();
@@ -659,7 +721,7 @@ mod tests {
     #[tokio::test]
     async fn keeps_the_variables_resolved_at_creation() {
         let (_dir, store) = store().await;
-        let service_id = service(&store).await;
+        let (service_id, server_id) = service(&store).await;
         let scope = VariableScope::Service(service_id);
         let fields =
             |name: &str, secret| VariableFields { name: name.parse().unwrap(), availability: VariableAvailability::Both, secret };
@@ -668,7 +730,10 @@ mod tests {
 
         let resolved = store.resolve_service_variables(service_id).await.unwrap();
         let deployment = store
-            .create_deployment(NewDeployment { variables: resolved.clone(), ..new_deployment(service_id) }, Actor::System)
+            .create_deployment(
+                NewDeployment { variables: resolved.clone(), ..new_deployment(service_id, server_id) },
+                Actor::System,
+            )
             .await
             .unwrap();
         // Later edits do not reach the existing deployment.

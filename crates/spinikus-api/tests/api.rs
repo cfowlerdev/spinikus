@@ -240,3 +240,47 @@ async fn admins_create_servers_and_join_tokens() {
     assert_eq!(shown.body["status"], "revoked");
     assert_eq!(listed.body["items"], json!([]), "revoked servers are not listed");
 }
+
+#[tokio::test]
+async fn sets_a_source_and_deploys_it() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+    let project = api.send(Method::POST, "/api/v1/projects", token, &[], Some(json!({ "name": "Shop" }))).await;
+    let environments = format!("/api/v1/projects/{}/environments", project.body["id"].as_str().unwrap());
+    let production =
+        api.send(Method::POST, &environments, token, &[], Some(json!({ "name": "Production", "kind": "production" }))).await;
+    let server = api.send(Method::POST, "/api/v1/servers", token, &[], Some(json!({ "name": "web-1" }))).await;
+    let services = format!("/api/v1/environments/{}/services", production.body["id"].as_str().unwrap());
+    let web = json!({ "name": "Web", "kind": "app", "config": { "runtime": { "port": 3000 } }, "server_id": server.body["id"] });
+    let service = api.send(Method::POST, &services, token, &[], Some(web)).await;
+    let source = format!("/api/v1/services/{}/source", service.body["id"].as_str().unwrap());
+    let deployments = format!("/api/v1/services/{}/deployments", service.body["id"].as_str().unwrap());
+
+    let no_source = api.send(Method::POST, &deployments, token, &[], None).await;
+    let typo = api.send(Method::POST, &source, token, &[], Some(json!({ "type": "image", "imag": "web:1" }))).await;
+    let created = api.send(Method::POST, &source, token, &[], Some(json!({ "type": "image", "image": "web:1" }))).await;
+    let git = json!({ "type": "git", "repo_url": "https://github.com/acme/web.git", "branch": "main" });
+    let replaced = api.send(Method::PUT, &source, token, &[(header::IF_MATCH, created.header(header::ETAG))], Some(git)).await;
+    let deployed = api.send(Method::POST, &deployments, token, &[], None).await;
+    let location = deployed.header(header::LOCATION).to_string();
+    let listed = api.send(Method::GET, &deployments, token, &[], None).await;
+    let canceled = api.send(Method::POST, &format!("{location}/cancel"), token, &[], None).await;
+    let shown = api.send(Method::GET, &location, token, &[], None).await;
+    let events = api.send(Method::GET, &format!("{location}/events"), token, &[], None).await;
+    let again = api.send(Method::POST, &format!("{location}/cancel"), token, &[], None).await;
+
+    assert_eq!((no_source.status, &no_source.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("source")));
+    assert_eq!((typo.status, &typo.body["code"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("invalid_body")));
+    assert_eq!((created.status, &created.body["image"]), (StatusCode::CREATED, &json!("web:1")));
+    assert_eq!((replaced.status, &replaced.body["type"]), (StatusCode::OK, &json!("git")));
+    assert_eq!((deployed.status, &deployed.body["status"]), (StatusCode::CREATED, &json!("queued")));
+    assert_eq!(deployed.body["server_id"], server.body["id"]);
+    assert_eq!(deployed.body["snapshot"]["source"]["branch"], "main");
+    assert_eq!(listed.body["items"][0]["id"], deployed.body["id"]);
+    assert_eq!((canceled.status, &canceled.body["reason"]), (StatusCode::OK, &json!("canceled_by_user")));
+    assert_eq!(shown.body["status"], "canceled");
+    let path: Vec<_> = events.body.as_array().unwrap().iter().map(|event| event["to"].as_str().unwrap()).collect();
+    assert_eq!(path, ["queued", "canceled"]);
+    assert_eq!(again.status, StatusCode::CONFLICT);
+}

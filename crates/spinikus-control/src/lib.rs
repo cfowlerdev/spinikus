@@ -6,6 +6,7 @@ pub mod agents;
 mod audit;
 pub mod auth;
 pub mod ca;
+pub mod deployments;
 pub mod environments;
 pub mod error;
 mod input;
@@ -15,6 +16,7 @@ pub mod projects;
 pub mod servers;
 pub mod services;
 pub mod setup;
+pub mod sources;
 #[cfg(test)]
 mod test_support;
 
@@ -22,6 +24,7 @@ use std::sync::Arc;
 
 use agents::AgentHub;
 pub use auth::{ClientInfo, Credential, Principal};
+pub use deployments::DeploymentTimings;
 pub use environments::{EnvironmentChanges, NewEnvironment};
 pub use error::ControlError;
 pub use page::Page;
@@ -38,11 +41,24 @@ pub struct Control {
     agents: AgentHub,
     /// Loaded (or created) on first use.
     authority: Arc<OnceCell<ca::CertificateAuthority>>,
+    runner: Arc<deployments::Runner>,
 }
 
 impl Control {
     pub fn new(store: SqliteStore) -> Self {
-        Self { store, agents: AgentHub::default(), authority: Arc::default() }
+        let runner = Arc::new(deployments::Runner::new(DeploymentTimings::default()));
+        Self { store, agents: AgentHub::default(), authority: Arc::default(), runner }
+    }
+
+    /// Replaces the deployment runner's timings, such as to shorten them in tests. Call it
+    /// before the runner starts.
+    pub fn with_deployment_timings(mut self, timings: DeploymentTimings) -> Self {
+        self.runner = Arc::new(deployments::Runner::new(timings));
+        self
+    }
+
+    pub(crate) fn runner(&self) -> &deployments::Runner {
+        &self.runner
     }
 
     pub fn store(&self) -> &SqliteStore {

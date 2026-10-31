@@ -7,18 +7,20 @@ mod common;
 
 use common::ControlPlane;
 use jiff::{SignedDuration, Timestamp};
+use serde_json::json;
 use spinikus_agent::{
     AgentError, AgentFiles, Backoff, RunOptions,
     runtime::{ContainerRuntime, DockerRuntime, MemoryRuntime},
 };
 use spinikus_control::ca::AgentCsr;
 use spinikus_core::{
+    deployment::DeploymentStatus,
     id::{DeploymentId, ServerId, ServiceId},
     secret::Secret,
     server::{InstanceHealth, InstanceStatus, ObservedInstance, ServerStatus},
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, control_message};
-use spinikus_store::{InstanceRepository, ServerRepository};
+use spinikus_store::{DeploymentRepository, InstanceRepository, ServerRepository};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 /// Starts the agent in the background, with no containers. Dropping the sender stops it.
@@ -219,44 +221,34 @@ fn send_command(control_plane: &ControlPlane, server: ServerId, id: &str, kind: 
 }
 
 #[tokio::test]
-async fn the_agent_pulls_and_starts_a_deployment() {
+async fn a_deployment_goes_live_and_the_next_one_supersedes_it() {
     let control_plane = ControlPlane::start().await;
     let dir = tempfile::tempdir().unwrap();
     let files = AgentFiles::new(dir.path().join("agent"));
     let server = enroll(&control_plane, &files).await;
     let runtime = Arc::new(MemoryRuntime::new());
     runtime.add_image("ghcr.io/acme/web:1", "ghcr.io/acme/web@sha256:01");
-    let (service, deployment) = (ServiceId::new(), DeploymentId::new());
     let (_stop, _agent) = start_agent_with(&files, runtime.clone());
     control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let service = control_plane.service(server, "ghcr.io/acme/web:1", json!({ "healthcheck": { "start_period": "0s" } })).await;
+    let control = &control_plane.control;
 
-    let prepare = pb::PrepareDeployment {
-        deployment_id: deployment.to_string(),
-        service_id: service.to_string(),
-        source: Some(pb::prepare_deployment::Source::Image(pb::ImageSource { image: "ghcr.io/acme/web:1".to_string() })),
-        ..Default::default()
-    };
-    send_command(&control_plane, server, "cmd-1", Kind::PrepareDeployment(prepare)).await;
-    let start = pb::StartDeployment {
-        deployment_id: deployment.to_string(),
-        service_id: service.to_string(),
-        image: "ghcr.io/acme/web@sha256:01".to_string(),
-        health_check: Some(pb::HealthCheck { start_period: Some(prost_types::Duration::default()), ..Default::default() }),
-        ..Default::default()
-    };
-    send_command(&control_plane, server, "cmd-2", Kind::StartDeployment(start)).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let instance = loop {
-        let instances = control_plane.control.store().list_server_instances(server).await.unwrap();
-        if let Some(instance) = instances.into_iter().find(|instance| instance.observed.status == InstanceStatus::Running) {
-            break instance;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "the deployment's container never ran");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
+    let first = control.create_deployment(&control_plane.admin, service).await.unwrap();
+    control_plane.wait_for_deployment(first.id, DeploymentStatus::Live, Duration::from_secs(10)).await;
+    wait_for_deployment(&control_plane, server, first.id, Some(InstanceStatus::Running)).await;
+    let second = control.create_deployment(&control_plane.admin, service).await.unwrap();
+    control_plane.wait_for_deployment(second.id, DeploymentStatus::Live, Duration::from_secs(10)).await;
+    control_plane.wait_for_deployment(first.id, DeploymentStatus::Superseded, Duration::from_secs(10)).await;
+    wait_for_deployment(&control_plane, server, first.id, None).await;
 
-    assert_eq!((instance.observed.service_id, instance.observed.deployment_id), (service, deployment));
-    assert_eq!(runtime.spec(&instance.observed.container_id).unwrap().image, "ghcr.io/acme/web@sha256:01");
+    let first = control.store().get_deployment(first.id).await.unwrap();
+    assert_eq!(first.image.as_deref(), Some("ghcr.io/acme/web@sha256:01"));
+    let path: Vec<_> = control.store().list_deployment_events(first.id).await.unwrap().iter().map(|event| event.to).collect();
+    use DeploymentStatus::*;
+    assert_eq!(path, [Queued, Preparing, Starting, Verifying, Live, Draining, Superseded]);
+    let instances = control.store().list_server_instances(server).await.unwrap();
+    assert_eq!(instances.iter().map(|instance| instance.observed.deployment_id).collect::<Vec<_>>(), [second.id]);
+    assert_eq!(runtime.spec(&instances[0].observed.container_id).unwrap().service_id, service);
 }
 
 /// Waits for the instance of `deployment` to have `status`, or to be gone if `None`.
@@ -288,31 +280,20 @@ async fn the_agent_deploys_an_image_with_docker() {
     let dir = tempfile::tempdir().unwrap();
     let files = AgentFiles::new(dir.path().join("agent"));
     let server = enroll(&control_plane, &files).await;
-    let (service, deployment) = (ServiceId::new(), DeploymentId::new());
     let (_stop, _agent) = start_agent_with(&files, Arc::new(DockerRuntime::new()));
     control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let runtime = json!({ "port": 80, "healthcheck": { "path": "/" }, "shutdown_timeout": "2s" });
+    let service = control_plane.service(server, "traefik/whoami:v1.10", runtime).await;
+    let control = &control_plane.control;
 
-    let prepare = pb::PrepareDeployment {
-        deployment_id: deployment.to_string(),
-        service_id: service.to_string(),
-        source: Some(pb::prepare_deployment::Source::Image(pb::ImageSource { image: "traefik/whoami:v1.10".to_string() })),
-        ..Default::default()
-    };
-    send_command(&control_plane, server, "cmd-1", Kind::PrepareDeployment(prepare)).await;
-    // The control plane does not handle results yet, so give the pull its time.
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    let start = pb::StartDeployment {
-        deployment_id: deployment.to_string(),
-        service_id: service.to_string(),
-        image: "traefik/whoami:v1.10".to_string(),
-        port: 80,
-        health_check: Some(pb::HealthCheck { path: "/".to_string(), ..Default::default() }),
-        ..Default::default()
-    };
-    send_command(&control_plane, server, "cmd-2", Kind::StartDeployment(start)).await;
-    wait_for_deployment(&control_plane, server, deployment, Some(InstanceStatus::Running)).await;
-
-    let stop = pb::StopDeployment { deployment_id: deployment.to_string(), grace_period: None };
-    send_command(&control_plane, server, "cmd-3", Kind::StopDeployment(stop)).await;
-    wait_for_deployment(&control_plane, server, deployment, None).await;
+    let first = control.create_deployment(&control_plane.admin, service).await.unwrap();
+    control_plane.wait_for_deployment(first.id, DeploymentStatus::Live, Duration::from_secs(120)).await;
+    let second = control.create_deployment(&control_plane.admin, service).await.unwrap();
+    control_plane.wait_for_deployment(second.id, DeploymentStatus::Live, Duration::from_secs(60)).await;
+    control_plane.wait_for_deployment(first.id, DeploymentStatus::Superseded, Duration::from_secs(30)).await;
+    wait_for_deployment(&control_plane, server, first.id, None).await;
+    // Clean up: stop the live one too.
+    let stop = pb::StopDeployment { deployment_id: second.id.to_string(), grace_period: None };
+    send_command(&control_plane, server, "cleanup", Kind::StopDeployment(stop)).await;
+    wait_for_deployment(&control_plane, server, second.id, None).await;
 }

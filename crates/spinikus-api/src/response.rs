@@ -52,3 +52,9 @@ pub fn created<T: Serialize>(location: String, revision: i64, body: T) -> Respon
     let location = HeaderValue::from_str(&location).expect("resource paths are valid header values");
     (StatusCode::CREATED, [(header::LOCATION, location), (header::ETAG, etag(revision))], Json(body)).into_response()
 }
+
+/// `201 Created` with the new resource's location, for resources that are never updated.
+pub fn located<T: Serialize>(location: String, body: T) -> Response {
+    let location = HeaderValue::from_str(&location).expect("resource paths are valid header values");
+    (StatusCode::CREATED, [(header::LOCATION, location)], Json(body)).into_response()
+}

@@ -16,6 +16,9 @@ pub trait ServerRepository: Send + Sync {
     /// there is none yet. Returned even if revoked, so a revoked one is not replaced.
     async fn get_or_create_embedded_server(&self, fields: ServerFields) -> Result<Server, StoreError>;
 
+    /// The embedded server, if there is one (revoked or not).
+    async fn find_embedded_server(&self) -> Result<Option<Server>, StoreError>;
+
     /// Returns revoked servers too, so their history stays visible.
     async fn get_server(&self, id: ServerId) -> Result<Server, StoreError>;
 
@@ -129,6 +132,12 @@ impl ServerRepository for SqliteStore {
         let row: ServerRow =
             sqlx::query_as(concat!(select_servers!(), " WHERE servers.embedded = 1")).fetch_one(self.pool()).await?;
         row.try_into()
+    }
+
+    async fn find_embedded_server(&self) -> Result<Option<Server>, StoreError> {
+        let row: Option<ServerRow> =
+            sqlx::query_as(concat!(select_servers!(), " WHERE servers.embedded = 1")).fetch_optional(self.pool()).await?;
+        row.map(Server::try_from).transpose()
     }
 
     async fn get_server(&self, id: ServerId) -> Result<Server, StoreError> {
@@ -283,6 +292,7 @@ mod tests {
     async fn there_is_one_embedded_server_even_once_revoked() {
         let (_dir, store) = store().await;
         let other = store.create_server(fields("web-2")).await.unwrap();
+        assert_eq!(store.find_embedded_server().await.unwrap(), None);
 
         let embedded = store.get_or_create_embedded_server(fields("host-a")).await.unwrap();
         let again = store.get_or_create_embedded_server(fields("host-b")).await.unwrap();
@@ -292,6 +302,7 @@ mod tests {
         assert!(embedded.embedded && !other.embedded);
         assert_eq!((again.id, again.name.as_str()), (embedded.id, "host-a"));
         assert_eq!((revoked.id, revoked.status), (embedded.id, ServerStatus::Revoked));
+        assert_eq!(store.find_embedded_server().await.unwrap().map(|server| server.id), Some(embedded.id));
     }
 
     #[tokio::test]

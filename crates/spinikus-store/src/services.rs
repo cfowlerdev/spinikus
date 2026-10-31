@@ -45,6 +45,7 @@ struct ServiceRow {
     slug: String,
     kind: String,
     config: String,
+    server_id: Option<String>,
     revision: i64,
     created_at: String,
     updated_at: String,
@@ -65,6 +66,7 @@ impl TryFrom<ServiceRow> for Service {
                 column: "config",
                 problem: error.to_string(),
             })?,
+            server_id: row.server_id.map(|id| parse_column(ENTITY, "server_id", &id)).transpose()?,
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
             updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
@@ -90,15 +92,16 @@ impl ServiceRepository for SqliteStore {
         fields: ServiceFields,
     ) -> Result<Service, StoreError> {
         let row: Option<ServiceRow> = sqlx::query_as(
-            "INSERT INTO services (id, environment_id, name, slug, kind, config)
-             SELECT ?, id, ?, ?, ?, ? FROM environments WHERE id = ? AND deleted_at IS NULL
-             RETURNING id, environment_id, name, slug, kind, config, revision, created_at, updated_at",
+            "INSERT INTO services (id, environment_id, name, slug, kind, config, server_id)
+             SELECT ?, id, ?, ?, ?, ?, ? FROM environments WHERE id = ? AND deleted_at IS NULL
+             RETURNING id, environment_id, name, slug, kind, config, server_id, revision, created_at, updated_at",
         )
         .bind(ServiceId::new().to_string())
         .bind(&fields.name)
         .bind(fields.slug.as_str())
         .bind(kind.as_str())
         .bind(serde_json::Value::Object(fields.config.clone()).to_string())
+        .bind(fields.server_id.map(|id| id.to_string()))
         .bind(environment_id.to_string())
         .fetch_optional(self.pool())
         .await
@@ -112,7 +115,7 @@ impl ServiceRepository for SqliteStore {
 
     async fn get_service(&self, id: ServiceId) -> Result<Service, StoreError> {
         let row: Option<ServiceRow> = sqlx::query_as(
-            "SELECT id, environment_id, name, slug, kind, config, revision, created_at, updated_at
+            "SELECT id, environment_id, name, slug, kind, config, server_id, revision, created_at, updated_at
              FROM services WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(id.to_string())
@@ -129,7 +132,7 @@ impl ServiceRepository for SqliteStore {
         limit: u32,
     ) -> Result<Vec<Service>, StoreError> {
         let rows: Vec<ServiceRow> = sqlx::query_as(
-            "SELECT id, environment_id, name, slug, kind, config, revision, created_at, updated_at
+            "SELECT id, environment_id, name, slug, kind, config, server_id, revision, created_at, updated_at
              FROM services WHERE environment_id = ? AND deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?",
         )
         .bind(environment_id.to_string())
@@ -148,14 +151,15 @@ impl ServiceRepository for SqliteStore {
     async fn update_service(&self, id: ServiceId, revision: i64, fields: ServiceFields) -> Result<Service, StoreError> {
         let row: Option<ServiceRow> = sqlx::query_as(
             "UPDATE services
-             SET name = ?, slug = ?, config = ?, revision = revision + 1,
+             SET name = ?, slug = ?, config = ?, server_id = ?, revision = revision + 1,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ? AND revision = ? AND deleted_at IS NULL
-             RETURNING id, environment_id, name, slug, kind, config, revision, created_at, updated_at",
+             RETURNING id, environment_id, name, slug, kind, config, server_id, revision, created_at, updated_at",
         )
         .bind(&fields.name)
         .bind(fields.slug.as_str())
         .bind(serde_json::Value::Object(fields.config.clone()).to_string())
+        .bind(fields.server_id.map(|id| id.to_string()))
         .bind(id.to_string())
         .bind(revision)
         .fetch_optional(self.pool())
@@ -204,14 +208,15 @@ mod tests {
     use spinikus_core::{
         environment::{EnvironmentFields, EnvironmentKind},
         project::ProjectFields,
+        server::ServerFields,
     };
 
     use super::*;
-    use crate::{ProjectRepository, test_support::store};
+    use crate::{ProjectRepository, ServerRepository, test_support::store};
 
     fn fields(name: &str, slug: &str, config: serde_json::Value) -> ServiceFields {
         let serde_json::Value::Object(config) = config else { panic!("config must be an object") };
-        ServiceFields { name: name.to_string(), slug: slug.parse().unwrap(), config }
+        ServiceFields { name: name.to_string(), slug: slug.parse().unwrap(), config, server_id: None }
     }
 
     async fn environment(store: &SqliteStore, slug: &str) -> EnvironmentId {
@@ -219,6 +224,22 @@ mod tests {
         let project_id = store.create_project(project).await.unwrap().id;
         let env = EnvironmentFields { name: "Staging".to_string(), slug: "staging".parse().unwrap() };
         store.create_environment(project_id, EnvironmentKind::Staging, env).await.unwrap().id
+    }
+
+    #[tokio::test]
+    async fn stores_the_placement() {
+        let (_dir, store) = store().await;
+        let environment = environment(&store, "staging").await;
+        let server = store.create_server(ServerFields { name: "web-1".to_string() }).await.unwrap().id;
+
+        let placed = ServiceFields { server_id: Some(server), ..fields("Web", "web", json!({})) };
+        let service = store.create_service(environment, ServiceKind::App, placed).await.unwrap();
+        let read = store.get_service(service.id).await.unwrap();
+        let moved = store.update_service(service.id, service.revision, fields("Web", "web", json!({}))).await.unwrap();
+
+        assert_eq!(service.server_id, Some(server));
+        assert_eq!(read.server_id, Some(server));
+        assert_eq!(moved.server_id, None);
     }
 
     #[tokio::test]

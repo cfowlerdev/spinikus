@@ -9,7 +9,7 @@ pub use state::*;
 
 use crate::{
     actor::Actor,
-    id::{DeploymentEventId, DeploymentId, ServiceId},
+    id::{DeploymentEventId, DeploymentId, ServerId, ServiceId},
     service::{ServiceConfig, ServiceKind},
     source::SourceSpec,
     text::impl_text,
@@ -20,6 +20,8 @@ use crate::{
 pub struct Deployment {
     pub id: DeploymentId,
     pub service_id: ServiceId,
+    /// The server it runs on, fixed when it is created.
+    pub server_id: ServerId,
     pub trigger: DeploymentTrigger,
     pub strategy: DeploymentStrategy,
     pub status: DeploymentStatus,
@@ -40,6 +42,7 @@ pub struct Deployment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewDeployment {
     pub service_id: ServiceId,
+    pub server_id: ServerId,
     pub trigger: DeploymentTrigger,
     pub strategy: DeploymentStrategy,
     pub rollback_of: Option<DeploymentId>,
@@ -127,6 +130,8 @@ pub struct DeploymentEvent {
     pub from: Option<DeploymentStatus>,
     pub to: DeploymentStatus,
     pub reason: Option<EndReason>,
+    /// What went wrong, in words, for a deployment that failed.
+    pub message: Option<String>,
     pub actor: Actor,
     pub created_at: Timestamp,
 }

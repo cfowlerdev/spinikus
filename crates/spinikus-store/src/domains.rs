@@ -289,7 +289,8 @@ mod tests {
         let env_id = store.create_environment(project_id, EnvironmentKind::Production, env).await.unwrap().id;
         let mut ids = Vec::new();
         for slug in ["app", "api"] {
-            let fields = ServiceFields { name: slug.to_string(), slug: slug.parse().unwrap(), config: Map::new() };
+            let fields =
+                ServiceFields { name: slug.to_string(), slug: slug.parse().unwrap(), config: Map::new(), server_id: None };
             ids.push(store.create_service(env_id, ServiceKind::App, fields).await.unwrap().id);
         }
         (ids[0], ids[1])

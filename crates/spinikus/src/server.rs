@@ -36,6 +36,10 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
             }
         })
     });
+    let deployments = {
+        let (control, shutdown) = (control.clone(), until(stopped.clone()));
+        tokio::spawn(async move { control.run_deployments(shutdown).await })
+    };
     let agents = spinikus_control::agents::serve(control, agent_listener, until(stopped));
     tracing::info!(%http_address, "Server started, press Ctrl+C to stop");
 
@@ -59,6 +63,7 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
         Stopped::Http(result) => result.and(joined(agents.await)),
         Stopped::Agents(result) => result.and(joined(http.await)),
     };
+    let _ = deployments.await;
     if let Some(embedded) = embedded {
         let _ = embedded.await;
     }

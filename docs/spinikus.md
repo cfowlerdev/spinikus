@@ -304,7 +304,9 @@ A deployment that fails or is canceled before going live never receives traffic,
 - **Concurrency**: one active deployment per service. A newer deployment cancels older queued ones (`superseded_in_queue`). An in-progress build finishes unless the user cancels it.
 - **Rollback** creates a new deployment with trigger `rollback`, reusing the target's image and snapshot. It starts at `starting` and skips the build and, by default, the release command.
 - **Agent loss**: deployments in progress on a server whose agent disconnects are failed with `agent_lost` after a timeout. When the agent reconnects, it reports what is actually running and the reconciler reconciles that against the database.
-- **Timeouts**: a default timeout per phase for the build and the release command, with health check parameters coming from `spinikus.json`. Concrete values are still to be set.
+- **Timeouts**: `preparing` may take 30 minutes. `starting` and `verifying` together may take the health check's longest possible run (start period, then every retry timing out) plus a 2-minute margin. Health check parameters and the shutdown timeout come from the `runtime` object of the service config, in the same shape as `runtime` in `spinikus.json`, with durations written like `10s` or `1m30s`. A control plane that restarts counts timeouts and agent loss from its own start at the earliest, so agents have time to reconnect.
+- **Placement**: a service names the server it runs on (`server_id`), and without one it runs on the embedded server. A deployment fixes its server when it is created, so moving a service affects only later deployments. Choosing a server per deployment, and spreading replicas over several servers, were left for later.
+- **Driving deployments**: a runner in the control plane moves each deployment forward by sending commands whose IDs are the deployment ID and the step (`dep_…/prepare`, `start`, `stop`, and `cleanup` for a container a start left behind after a cancel). An unanswered command is sent again after 30 seconds and whenever the agent reconnects, and only the agent of the deployment's server can report on it.
 
 ## Agent protocol
 

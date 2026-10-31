@@ -2376,6 +2376,7 @@ dependencies = [
  "rcgen",
  "rpassword",
  "serde",
+ "serde_json",
  "spinikus-agent",
  "spinikus-api",
  "spinikus-control",

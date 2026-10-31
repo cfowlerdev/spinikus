@@ -19,13 +19,12 @@ use crate::{
     runtime::ContainerRuntime,
 };
 
-const DEFAULT_INTERVAL: Duration = Duration::from_secs(2);
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_RETRIES: u32 = 3;
-/// Failures in this time do not count, and success ends it early, so it can be generous.
-const DEFAULT_START_PERIOD: Duration = Duration::from_secs(60);
-/// How long a container without a health check path has to keep running.
-const DEFAULT_SETTLE: Duration = Duration::from_secs(5);
+// The control plane sends every field; these defaults are for ones it leaves out.
+use spinikus_core::runtime::{
+    DEFAULT_HEALTHCHECK_INTERVAL as DEFAULT_INTERVAL, DEFAULT_HEALTHCHECK_RETRIES as DEFAULT_RETRIES,
+    DEFAULT_HEALTHCHECK_START_PERIOD as DEFAULT_START_PERIOD, DEFAULT_HEALTHCHECK_TIMEOUT as DEFAULT_TIMEOUT,
+    DEFAULT_SETTLE_PERIOD as DEFAULT_SETTLE,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HealthCheck {

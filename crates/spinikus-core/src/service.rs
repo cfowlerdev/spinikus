@@ -2,7 +2,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    id::{EnvironmentId, ServiceId},
+    id::{EnvironmentId, ServerId, ServiceId},
     slug::Slug,
     text::impl_text,
 };
@@ -21,6 +21,8 @@ pub struct Service {
     /// Fixed when the service is created.
     pub kind: ServiceKind,
     pub config: ServiceConfig,
+    /// The server new deployments run on; `None` means the embedded server.
+    pub server_id: Option<ServerId>,
     pub revision: i64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -54,6 +56,7 @@ pub struct ServiceFields {
     pub name: String,
     pub slug: Slug,
     pub config: ServiceConfig,
+    pub server_id: Option<ServerId>,
 }
 
 #[cfg(test)]
