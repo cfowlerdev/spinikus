@@ -6,13 +6,18 @@ edition = "2024"
 [dependencies]
 argon2.workspace = true
 jiff.workspace = true
+prost-types.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
 tracing.workspace = true
 
 spinikus-core.workspace = true
+spinikus-proto.workspace = true
 spinikus-store.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }

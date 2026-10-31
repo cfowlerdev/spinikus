@@ -2095,12 +2095,16 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "jiff",
+ "prost-types",
  "serde_json",
  "spinikus-core",
+ "spinikus-proto",
  "spinikus-store",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
 ]
 

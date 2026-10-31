@@ -2,6 +2,7 @@
 //! and webhooks all go through, so they share one set of rules.
 
 mod access;
+pub mod agents;
 mod audit;
 pub mod auth;
 pub mod environments;
@@ -15,6 +16,7 @@ pub mod setup;
 #[cfg(test)]
 mod test_support;
 
+use agents::AgentHub;
 pub use auth::{ClientInfo, Credential, Principal};
 pub use environments::{EnvironmentChanges, NewEnvironment};
 pub use error::ControlError;
@@ -23,18 +25,24 @@ pub use projects::{NewProject, ProjectChanges};
 pub use services::{NewService, ServiceChanges};
 use spinikus_store::SqliteStore;
 
-/// The service layer. Cheap to clone; clones share the database pool.
+/// The service layer. Cheap to clone; clones share the database pool and the connected agents.
 #[derive(Clone)]
 pub struct Control {
     store: SqliteStore,
+    agents: AgentHub,
 }
 
 impl Control {
     pub fn new(store: SqliteStore) -> Self {
-        Self { store }
+        Self { store, agents: AgentHub::default() }
     }
 
     pub fn store(&self) -> &SqliteStore {
         &self.store
+    }
+
+    /// The agents connected to this control plane.
+    pub fn agents(&self) -> &AgentHub {
+        &self.agents
     }
 }
