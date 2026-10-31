@@ -23,6 +23,7 @@ mod test_support;
 pub mod users;
 pub mod variables;
 pub mod volumes;
+pub mod webhooks;
 
 pub use api_tokens::ApiTokenRepository;
 pub use audit_log::AuditLogRepository;
@@ -47,3 +48,4 @@ pub use sources::{DeployKeyRepository, SourceRepository};
 pub use users::UserRepository;
 pub use variables::VariableRepository;
 pub use volumes::VolumeRepository;
+pub use webhooks::WebhookRepository;

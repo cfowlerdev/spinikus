@@ -12,7 +12,10 @@ use spinikus_agent::{
     AgentError, AgentFiles, Backoff, ProxyListeners, RunOptions,
     runtime::{ContainerRuntime, DockerRuntime, MemoryRuntime},
 };
-use spinikus_control::ca::AgentCsr;
+use spinikus_control::{
+    ca::AgentCsr,
+    webhooks::{PushDelivery, PushOutcome},
+};
 use spinikus_core::build::image_tag;
 use spinikus_core::{
     deployment::DeploymentStatus,
@@ -20,6 +23,7 @@ use spinikus_core::{
     secret::Secret,
     server::{InstanceHealth, InstanceStatus, ObservedInstance, ServerStatus},
     source::{GitSource, ImageSource, SourceSpec},
+    webhook::GitProvider,
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, control_message};
 use spinikus_store::{DeploymentRepository, InstanceRepository, ServerRepository, SourceRepository};
@@ -577,4 +581,61 @@ async fn a_rollback_runs_the_earlier_image_and_cleanup_removes_what_no_one_needs
     assert!(first.cleaned_at.is_some());
     let gone = control.rollback_service(admin, service, Some(first.id)).await;
     assert!(gone.is_err());
+}
+
+#[tokio::test]
+async fn a_push_deploys_its_own_commit_even_if_the_branch_moved_on() {
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("Dockerfile"), "FROM scratch\nLABEL version=1\n").unwrap();
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["add", "--all"]);
+    git(&repo, &["commit", "--quiet", "--message", "first"]);
+    let pushed = git(&repo, &["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("Dockerfile"), "FROM scratch\nLABEL version=2\n").unwrap();
+    git(&repo, &["commit", "--quiet", "--all", "--message", "second"]);
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let runtime = Arc::new(MemoryRuntime::new());
+    let (_stop, _agent) = start_agent_with(&files, runtime.clone(), None);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let service = control_plane.service(server, "unused:1", json!({ "healthcheck": { "start_period": "0s" } })).await;
+    let (control, admin) = (&control_plane.control, &control_plane.admin);
+    let https = SourceSpec::Git(GitSource {
+        repo_url: "https://example.com/acme/web.git".to_string(),
+        branch: "main".to_string(),
+        root_directory: None,
+    });
+    let source = control.replace_source(admin, service, 1, https).await.unwrap();
+    let hook = control.create_webhook(admin, service).await.unwrap();
+    // The service layer allows only remote URLs; the agent here allows local repositories.
+    let local = SourceSpec::Git(GitSource {
+        repo_url: repo.to_string_lossy().into_owned(),
+        branch: "main".to_string(),
+        root_directory: None,
+    });
+    control.store().update_source(service, source.revision, local).await.unwrap();
+    let body = json!({
+        "ref": "refs/heads/main", "before": "1111111111111111111111111111111111111111", "after": pushed,
+        "commits": [{ "added": ["Dockerfile"], "modified": [], "removed": [] }],
+    })
+    .to_string();
+    let signature = {
+        use hmac::{Hmac, KeyInit, Mac};
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(hook.secret.expose().as_bytes()).unwrap();
+        mac.update(body.as_bytes());
+        mac.finalize().into_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+    };
+
+    let delivery = PushDelivery { event: Some("push"), signature: Some(&signature), body: body.as_bytes() };
+    let outcome = control.receive_push(GitProvider::Gitea, hook.webhook.id, delivery).await.unwrap();
+    let PushOutcome::Deployed(deployment) = outcome else { panic!("{outcome:?}") };
+    control_plane.wait_for_deployment(deployment.id, DeploymentStatus::Live, Duration::from_secs(20)).await;
+
+    let deployment = control.store().get_deployment(deployment.id).await.unwrap();
+    assert_eq!(deployment.commit_sha.as_deref(), Some(pushed.as_str()));
+    let (_, dockerfile) = runtime.builds().pop().unwrap();
+    assert_eq!(dockerfile, "FROM scratch\nLABEL version=1\n");
 }

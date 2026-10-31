@@ -1,12 +1,14 @@
 use axum::{
     extract::State,
+    http::StatusCode,
     response::{Json, Response},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use spinikus_control::Control;
 use spinikus_core::{
     id::ServiceId,
     source::{DeployKey, GitSource, ImageSource, SourceSpec},
+    webhook::Webhook,
 };
 
 use crate::{
@@ -79,4 +81,42 @@ pub async fn create_deploy_key(
 ) -> Result<Response, ApiError> {
     let key = control.create_deploy_key(&principal, service_id).await?;
     Ok(located(format!("/api/v1/services/{service_id}/source/deploy-key"), key))
+}
+
+/// The service's webhook, which deploys pushes to its branch. Its secret is never shown again.
+pub async fn show_webhook(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+) -> Result<Json<Webhook>, ApiError> {
+    Ok(Json(control.get_webhook(&principal, service_id).await?))
+}
+
+#[derive(Serialize)]
+struct CreatedWebhook<'a> {
+    #[serde(flatten)]
+    webhook: &'a Webhook,
+    /// Shown only now: set it as the webhook's secret at the repository's host.
+    secret: &'a str,
+}
+
+/// Turns on deploying on push, or replaces the webhook's secret (its URL stays the same).
+pub async fn create_webhook(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+) -> Result<Response, ApiError> {
+    let created = control.create_webhook(&principal, service_id).await?;
+    let body = CreatedWebhook { webhook: &created.webhook, secret: created.secret.expose() };
+    Ok(located(format!("/api/v1/services/{service_id}/source/webhook"), body))
+}
+
+/// Turns off deploying on push.
+pub async fn delete_webhook(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+) -> Result<StatusCode, ApiError> {
+    control.delete_webhook(&principal, service_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

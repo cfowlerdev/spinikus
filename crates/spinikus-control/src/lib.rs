@@ -22,6 +22,7 @@ pub mod setup;
 pub mod sources;
 #[cfg(test)]
 mod test_support;
+pub mod webhooks;
 
 use std::sync::Arc;
 

@@ -101,6 +101,7 @@ define_id!(ApiTokenId, "tok");
 define_id!(SessionId, "ses");
 define_id!(AuditEntryId, "aud");
 define_id!(EnrollmentTokenId, "enr");
+define_id!(WebhookId, "whk");
 define_id!(
     /// A data key for envelope encryption of secrets.
     DataKeyId,

@@ -367,3 +367,61 @@ async fn manages_domains_and_the_base_domain() {
     assert_eq!(listed.body["domains"].as_array().unwrap().len(), 2);
     assert_eq!(deleted.status, StatusCode::NO_CONTENT);
 }
+
+#[tokio::test]
+async fn a_webhook_deploys_pushes() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+    let project = api.send(Method::POST, "/api/v1/projects", token, &[], Some(json!({ "name": "Shop" }))).await;
+    let environments = format!("/api/v1/projects/{}/environments", project.body["id"].as_str().unwrap());
+    let production =
+        api.send(Method::POST, &environments, token, &[], Some(json!({ "name": "Production", "kind": "production" }))).await;
+    let server = api.send(Method::POST, "/api/v1/servers", token, &[], Some(json!({ "name": "web-1" }))).await;
+    let services = format!("/api/v1/environments/{}/services", production.body["id"].as_str().unwrap());
+    let web = json!({ "name": "Web", "kind": "app", "config": {}, "server_id": server.body["id"] });
+    let service = api.send(Method::POST, &services, token, &[], Some(web)).await;
+    let source = format!("/api/v1/services/{}/source", service.body["id"].as_str().unwrap());
+    let git = json!({ "type": "git", "repo_url": "https://gitlab.com/acme/web.git", "branch": "main" });
+    api.send(Method::POST, &source, token, &[], Some(git)).await;
+    let webhook = format!("{source}/webhook");
+    let commit = "abcdef0123456789abcdef0123456789abcdef01";
+    let push = json!({
+        "object_kind": "push", "ref": "refs/heads/main", "before": "1111111111111111111111111111111111111111",
+        "after": commit, "total_commits_count": 1, "commits": [{ "added": ["a"], "modified": [], "removed": [] }],
+    });
+    let (event, signature) =
+        (header::HeaderName::from_static("x-gitlab-event"), header::HeaderName::from_static("x-gitlab-token"));
+    // A GitLab delivery of the push to `path`, with `secret` as its token.
+    let deliver = |path: String, secret: String| {
+        let (push, event, signature) = (push.clone(), event.clone(), signature.clone());
+        let api = &api;
+        async move { api.send(Method::POST, &path, None, &[(event, "Push Hook"), (signature, &secret)], Some(push)).await }
+    };
+
+    let none = api.send(Method::GET, &webhook, token, &[], None).await;
+    let created = api.send(Method::POST, &webhook, token, &[], None).await;
+    let secret = created.body["secret"].as_str().unwrap().to_string();
+    let hook = created.body["paths"]["gitlab"].as_str().unwrap().to_string();
+    let forged = deliver(hook.clone(), "guess".to_string()).await;
+    let deployed = deliver(hook.clone(), secret.clone()).await;
+    let again = deliver(hook.clone(), secret.clone()).await;
+    let other_provider = deliver(hook.replace("/gitlab/", "/bitbucket/"), secret.clone()).await;
+    let shown = api.send(Method::GET, &webhook, token, &[], None).await;
+    let deleted = api.send(Method::DELETE, &webhook, token, &[], None).await;
+    let after_delete = deliver(hook.clone(), secret.clone()).await;
+
+    assert_eq!(none.status, StatusCode::NOT_FOUND);
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert_eq!(forged.status, StatusCode::UNAUTHORIZED);
+    assert_eq!((deployed.status, &deployed.body["result"]), (StatusCode::ACCEPTED, &json!("deployed")));
+    let deployment = format!("/api/v1/deployments/{}", deployed.body["deployment_id"].as_str().unwrap());
+    let deployment = api.send(Method::GET, &deployment, token, &[], None).await;
+    assert_eq!((&deployment.body["trigger"], &deployment.body["commit_sha"]), (&json!("git_push"), &json!(commit)));
+    assert_eq!((again.status, &again.body["result"]), (StatusCode::OK, &json!("ignored")));
+    assert_eq!(other_provider.status, StatusCode::NOT_FOUND);
+    assert!(shown.body.get("secret").is_none(), "{:?}", shown.body);
+    assert!(shown.body["last_delivery"].as_str().unwrap().starts_with("ignored: "), "{:?}", shown.body);
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    assert_eq!(after_delete.status, StatusCode::NOT_FOUND);
+}

@@ -9,6 +9,7 @@ async-trait.workspace = true
 instant-acme.workspace = true
 jiff.workspace = true
 prost-types.workspace = true
+hmac.workspace = true
 rand.workspace = true
 rcgen.workspace = true
 serde.workspace = true

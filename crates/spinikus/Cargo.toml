@@ -23,6 +23,8 @@ spinikus-store.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 async-trait.workspace = true
 spinikus-agent = { workspace = true, features = ["test-support"] }
 spinikus-proto.workspace = true

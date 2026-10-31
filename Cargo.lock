@@ -3087,6 +3087,7 @@ dependencies = [
  "axum",
  "clap",
  "config",
+ "hmac 0.13.0",
  "jiff",
  "prost-types",
  "rcgen",
@@ -3094,6 +3095,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "spinikus-agent",
  "spinikus-api",
  "spinikus-control",
@@ -3164,6 +3166,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "async-trait",
+ "hmac 0.13.0",
  "instant-acme",
  "jiff",
  "prost-types",

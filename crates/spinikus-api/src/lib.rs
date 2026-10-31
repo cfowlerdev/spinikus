@@ -1,4 +1,4 @@
-//! The JSON API under `/api/v1`: a thin HTTP layer over the service layer in
+//! The JSON API under `/api/v1`, and inbound webhooks under `/hooks`: a thin HTTP layer over the service layer in
 //! `spinikus-control`, which does the validation, permission checks and auditing.
 //!
 //! Conventions: errors are RFC 9457 problem details with a stable `code`; callers
@@ -22,5 +22,8 @@ pub fn router(control: Control) -> Router {
     let v1 = routes::v1()
         .fallback(|| async { ApiError::NoRoute })
         .method_not_allowed_fallback(|| async { ApiError::MethodNotAllowed });
-    Router::new().nest("/api/v1", v1).layer(TraceLayer::new_for_http()).with_state(control)
+    let hooks = routes::hooks()
+        .fallback(|| async { ApiError::NoRoute })
+        .method_not_allowed_fallback(|| async { ApiError::MethodNotAllowed });
+    Router::new().nest("/api/v1", v1).nest("/hooks", hooks).layer(TraceLayer::new_for_http()).with_state(control)
 }

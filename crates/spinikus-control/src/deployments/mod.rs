@@ -14,6 +14,7 @@ mod runner;
 
 use serde_json::json;
 use spinikus_core::{
+    actor::Actor,
     deployment::{
         Deployment, DeploymentEvent, DeploymentSnapshot, DeploymentStatus, DeploymentStrategy, DeploymentTrigger, EndReason,
         NewDeployment,
@@ -42,6 +43,22 @@ impl Control {
     /// service is canceled (`superseded_in_queue`); one in progress finishes first.
     pub async fn create_deployment(&self, principal: &Principal, service_id: ServiceId) -> Result<Deployment, ControlError> {
         let (service, environment) = self.service_with_access(principal, service_id, Role::Developer).await?;
+        let deployment = self.queue_deployment(&service, DeploymentTrigger::Manual, None, principal.actor()).await?;
+        let details = json!({ "service_id": service_id.to_string(), "server_id": deployment.server_id.to_string() });
+        self.audit_by(principal, "deployment.create", deployment.id, Some(environment.project_id), details).await?;
+        Ok(deployment)
+    }
+
+    /// Queues a deployment of the service as it is now, of `commit` if given (else the
+    /// branch's latest), and wakes the runner. Access is the caller's to check.
+    pub(crate) async fn queue_deployment(
+        &self,
+        service: &Service,
+        trigger: DeploymentTrigger,
+        commit_sha: Option<String>,
+        actor: Actor,
+    ) -> Result<Deployment, ControlError> {
+        let service_id = service.id;
         let source = match self.store().get_source(service_id).await {
             Ok(source) => source,
             Err(StoreError::NotFound { .. }) => {
@@ -54,22 +71,20 @@ impl Control {
         };
         RuntimeSettings::from_config(&service.config)
             .map_err(|error| ControlError::Invalid { field: "config.runtime", problem: error.to_string() })?;
-        let server_id = self.placement(&service).await?;
+        let server_id = self.placement(service).await?;
         let has_volumes = !self.store().list_volumes(service_id).await?.is_empty();
         let new = NewDeployment {
             service_id,
             server_id,
-            trigger: DeploymentTrigger::Manual,
+            trigger,
             strategy: DeploymentStrategy::default_for(service.kind, has_volumes),
             rollback_of: None,
-            snapshot: DeploymentSnapshot { source: source.spec, config: service.config, from_file: Vec::new() },
-            commit_sha: None,
+            snapshot: DeploymentSnapshot { source: source.spec, config: service.config.clone(), from_file: Vec::new() },
+            commit_sha,
             image: None,
             variables: self.store().resolve_service_variables(service_id).await?,
         };
-        let deployment = self.store().create_deployment(new, principal.actor()).await?;
-        let details = json!({ "service_id": service_id.to_string(), "server_id": server_id.to_string() });
-        self.audit_by(principal, "deployment.create", deployment.id, Some(environment.project_id), details).await?;
+        let deployment = self.store().create_deployment(new, actor).await?;
         self.wake_deployments();
         Ok(deployment)
     }

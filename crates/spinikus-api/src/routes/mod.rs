@@ -1,6 +1,7 @@
 mod deployments;
 mod domains;
 mod environments;
+mod hooks;
 mod projects;
 mod servers;
 mod services;
@@ -28,6 +29,10 @@ pub fn v1() -> Router<Control> {
         .route("/services/{id}", get(services::show).patch(services::update).delete(services::delete))
         .route("/services/{id}/source", get(sources::show).post(sources::create).put(sources::replace))
         .route("/services/{id}/source/deploy-key", get(sources::show_deploy_key).post(sources::create_deploy_key))
+        .route(
+            "/services/{id}/source/webhook",
+            get(sources::show_webhook).post(sources::create_webhook).delete(sources::delete_webhook),
+        )
         .route("/services/{id}/deployments", get(deployments::list).post(deployments::create))
         .route("/services/{id}/rollback", post(deployments::rollback))
         .route("/deployments/{id}", get(deployments::show))
@@ -41,6 +46,13 @@ pub fn v1() -> Router<Control> {
         .route("/servers/{id}", get(servers::show))
         .route("/servers/{id}/revoke", post(servers::revoke))
         .route("/servers/{id}/enrollment-tokens", post(servers::create_join_token))
+}
+
+/// Inbound webhooks, outside `/api/v1`.
+pub fn hooks() -> Router<Control> {
+    Router::new()
+        .route("/git/{provider}/{id}", post(hooks::receive))
+        .layer(axum::extract::DefaultBodyLimit::max(hooks::MAX_DELIVERY_SIZE))
 }
 
 /// Tells an explicit `null` (`Some(None)`) apart from a missing field (`None`, by default).

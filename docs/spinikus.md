@@ -436,6 +436,14 @@ JSON over HTTP under `/api/v1`. The OpenAPI spec is generated from the Rust type
 
 **Inbound webhooks** live outside `/api/v1`, at `/hooks/git/{provider}/{id}`. They verify signatures and trigger deployments.
 
+#### Decided
+
+- **Webhooks are per service for now**: a service with a Git source turns on deploying on push and gets a URL (`/hooks/git/{github|gitlab|gitea}/whk_…`; Forgejo uses Gitea's) and a secret, shown once, to paste into the repository's webhook settings. A monorepo with several services has one webhook per service. One webhook per repository, fanning out to every matching service, was considered and left for Git provider connections, which can register webhooks themselves; matching repository URLs across https, ssh and scp forms by hand was the deciding cost.
+- **Signatures**: GitHub's `X-Hub-Signature-256` and Gitea's `X-Gitea-Signature` (HMAC-SHA256 of the body), and GitLab's `X-Gitlab-Token` (the secret itself). A delivery that doesn't match is a 401 and deploys nothing.
+- **A push deploys its own commit**, not the branch head when the build starts, so a delivery that arrives late builds what was pushed. Deliveries for a commit already in progress or live deploy nothing, since providers deliver again on timeouts.
+- **Monorepo services deploy only when their root directory changed**, judged by the files the payload lists. When the list may be incomplete (forced pushes, new branches, more commits than the payload lists), the push deploys anyway. Changes to shared code outside the root directory don't deploy it; a list of extra paths to watch can come later.
+- **Every delivery's outcome is kept on the webhook** (`last_delivery`): deployed, ignored and why, refused, or failed. That's the first place to look when a push didn't deploy.
+
 ### CLI
 
 The CLI is the same `spinikus` binary as the server.
