@@ -12,8 +12,8 @@
 //! }
 //! ```
 //!
-//! Fields Spinikus cannot apply yet (`env`, `cron`, `apps`, and `start` or `release` in
-//! `runtime`) are rejected, so a deployment fails loudly instead of ignoring them.
+//! Fields Spinikus cannot apply yet (`env`, `cron`, `apps`, and `release` in `runtime`) are
+//! rejected, so a deployment fails loudly instead of ignoring them.
 
 use serde::Deserialize;
 use serde_json::{Map, Value};

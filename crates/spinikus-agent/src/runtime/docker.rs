@@ -326,6 +326,7 @@ impl ContainerRuntime for DockerRuntime {
         });
         let body = ContainerCreateBody {
             image: Some(spec.image.clone()),
+            cmd: (!spec.command.is_empty()).then(|| spec.command.clone()),
             env: Some(spec.env.iter().map(|(name, value)| format!("{name}={value}")).collect()),
             labels: Some(labels),
             exposed_ports: port.map(|port| vec![port]),

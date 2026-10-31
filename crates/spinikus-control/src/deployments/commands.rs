@@ -175,6 +175,7 @@ impl Control {
             }),
             replaces_deployment_id: replaces.map(|live| live.id.to_string()).unwrap_or_default(),
             network,
+            command: settings.command(),
         };
         Ok(command(deployment.id, Step::Start, Kind::StartDeployment(start)))
     }

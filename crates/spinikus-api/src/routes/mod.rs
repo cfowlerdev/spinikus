@@ -1,3 +1,4 @@
+mod databases;
 mod deployments;
 mod domains;
 mod environments;
@@ -29,6 +30,7 @@ pub fn v1() -> Router<Control> {
         .route("/projects/{id}/environments", get(environments::list).post(environments::create))
         .route("/environments/{id}", get(environments::show).patch(environments::update).delete(environments::delete))
         .route("/environments/{id}/services", get(services::list).post(services::create))
+        .route("/environments/{id}/databases", post(databases::create))
         .route("/services/{id}", get(services::show).patch(services::update).delete(services::delete))
         .route("/services/{id}/source", get(sources::show).post(sources::create).put(sources::replace))
         .route("/services/{id}/source/deploy-key", get(sources::show_deploy_key).post(sources::create_deploy_key))

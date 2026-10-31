@@ -43,6 +43,8 @@ pub struct ContainerSpec {
     pub volumes: Vec<Mount>,
     /// The network to join, created if it does not exist; the runtime's default if `None`.
     pub network: Option<Network>,
+    /// The command to run in place of the image's; the image's if empty.
+    pub command: Vec<String>,
 }
 
 /// A network shared with other containers, and the names they reach this one by.

@@ -17,6 +17,9 @@ use crate::service::ServiceConfig;
 /// The longest duration any setting accepts.
 pub const MAX_SETTING_DURATION: Duration = Duration::from_secs(60 * 60);
 
+/// The longest start command allowed.
+pub const MAX_START_LEN: usize = 4096;
+
 /// How long a container gets to stop when `shutdown_timeout` is unset.
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -52,6 +55,10 @@ pub struct RuntimeSettings {
     /// The port the app listens on inside its container. Without one, the app receives no
     /// traffic and its health check cannot have a path.
     pub port: Option<u16>,
+    /// The command that starts the app, run by `/bin/sh -c` in place of the image's own, so
+    /// it can use the container's environment (`"exec redis-server --requirepass \"$PASSWORD\""`).
+    /// The image's command if unset.
+    pub start: Option<String>,
     pub healthcheck: Option<HealthCheckSettings>,
     /// How long a replaced container gets to finish in-flight requests before it is killed.
     #[serde(default, deserialize_with = "duration")]
@@ -92,6 +99,11 @@ impl RuntimeSettings {
         if self.port == Some(0) {
             return Err(RuntimeSettingsError("port must be between 1 and 65535".to_string()));
         }
+        if let Some(start) = &self.start
+            && (start.trim().is_empty() || start.len() > MAX_START_LEN || start.contains('\0'))
+        {
+            return Err(RuntimeSettingsError("start must be a command of at most 4096 characters, without NUL".to_string()));
+        }
         let Some(check) = &self.healthcheck else {
             return Ok(());
         };
@@ -119,6 +131,14 @@ impl RuntimeSettings {
             retries: check.retries.filter(|retries| *retries > 0).unwrap_or(DEFAULT_HEALTHCHECK_RETRIES),
             start_period: check.start_period.unwrap_or(default_start),
             path: check.path,
+        }
+    }
+
+    /// The container's command: the start command through a shell, or empty for the image's.
+    pub fn command(&self) -> Vec<String> {
+        match &self.start {
+            Some(start) => vec!["/bin/sh".to_string(), "-c".to_string(), start.clone()],
+            None => Vec::new(),
         }
     }
 
@@ -176,6 +196,14 @@ mod tests {
     }
 
     #[test]
+    fn runs_the_start_command_through_a_shell() {
+        let settings = RuntimeSettings::from_config(&config(json!({ "start": "exec node server.js" }))).unwrap();
+
+        assert_eq!(settings.command(), ["/bin/sh", "-c", "exec node server.js"]);
+        assert!(RuntimeSettings::default().command().is_empty());
+    }
+
+    #[test]
     fn defaults_without_a_runtime_object() {
         let settings = RuntimeSettings::from_config(&ServiceConfig::new()).unwrap();
 
@@ -198,6 +226,7 @@ mod tests {
         assert!(problem(json!({ "port": 80, "healthcheck": { "path": "up" } })).contains("must start with `/`"));
         assert!(problem(json!({ "port": 80, "healthcheck": { "path": "/a b" } })).contains("must start with `/`"));
         assert!(problem(json!({ "healthcheck": { "path": "/up" } })).contains("needs a port"));
+        assert!(problem(json!({ "start": " " })).contains("start must be a command"));
         assert!(problem(json!("3000")).contains("invalid type"));
     }
 }

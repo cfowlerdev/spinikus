@@ -510,3 +510,39 @@ async fn manages_variables_with_write_only_secrets_and_volumes() {
     assert_eq!(listed.body[0]["mount_path"], "/srv");
     assert_eq!(removed.status, StatusCode::NO_CONTENT);
 }
+
+#[tokio::test]
+async fn creates_a_database_with_its_parts() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+    let project = api.send(Method::POST, "/api/v1/projects", token, &[], Some(json!({ "name": "Shop" }))).await;
+    let environments = format!("/api/v1/projects/{}/environments", project.body["id"].as_str().unwrap());
+    let production =
+        api.send(Method::POST, &environments, token, &[], Some(json!({ "name": "Production", "kind": "production" }))).await;
+    let server = api.send(Method::POST, "/api/v1/servers", token, &[], Some(json!({ "name": "db-1" }))).await;
+    let databases = format!("/api/v1/environments/{}/databases", production.body["id"].as_str().unwrap());
+
+    let redis = json!({ "name": "Cache", "engine": "redis", "server_id": server.body["id"] });
+    let created = api.send(Method::POST, &databases, token, &[], Some(redis)).await;
+    let unknown_engine = api.send(Method::POST, &databases, token, &[], Some(json!({ "name": "X", "engine": "oracle" }))).await;
+    let bad_version =
+        api.send(Method::POST, &databases, token, &[], Some(json!({ "name": "X", "engine": "postgres", "version": "9" }))).await;
+    let location = created.header(header::LOCATION).to_string();
+    let variables = api.send(Method::GET, &format!("{location}/variables"), token, &[], None).await;
+    let volumes = api.send(Method::GET, &format!("{location}/volumes"), token, &[], None).await;
+
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert_eq!((&created.body["service"]["kind"], &created.body["service"]["slug"]), (&json!("database"), &json!("cache")));
+    assert_eq!(created.body["service"]["config"]["database"], json!({ "engine": "redis", "version": "8" }));
+    assert_eq!(
+        (&created.body["deployment"]["status"], &created.body["deployment"]["strategy"]),
+        (&json!("queued"), &json!("recreate"))
+    );
+    let names: Vec<_> = variables.body.as_array().unwrap().iter().map(|variable| variable["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["REDIS_PASSWORD", "REDIS_URL"]);
+    assert!(variables.body.as_array().unwrap().iter().all(|variable| variable["value"].is_null()));
+    assert_eq!(volumes.body[0]["mount_path"], "/data");
+    assert_eq!(unknown_engine.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!((bad_version.status, &bad_version.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("version")));
+}

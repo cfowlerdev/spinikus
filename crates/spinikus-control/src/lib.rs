@@ -7,6 +7,7 @@ mod audit;
 pub mod auth;
 pub mod ca;
 pub mod certificates;
+pub mod databases;
 pub mod deployments;
 pub mod domains;
 pub mod environments;
@@ -35,6 +36,7 @@ pub use certificates::{
     CertificateTimings,
     acme::{AcmeClient, InstantAcme},
 };
+pub use databases::{CreatedDatabase, NewDatabase};
 pub use deployments::DeploymentTimings;
 pub use domains::{DomainChanges, NewDomain, ServiceDomains};
 pub use environments::{EnvironmentChanges, NewEnvironment};

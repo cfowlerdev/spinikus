@@ -435,6 +435,7 @@ mod tests {
             port: None,
             volumes: Vec::new(),
             network: None,
+            command: Vec::new(),
         };
         runtime.create(&spec).await.unwrap();
         let mut commands = Commands::new(runtime.clone(), builds());

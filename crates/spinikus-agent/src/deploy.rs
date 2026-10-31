@@ -142,6 +142,7 @@ fn spec(start: &pb::StartDeployment) -> Result<ContainerSpec, pb::CommandFailed>
         port,
         volumes,
         network,
+        command: start.command.clone(),
     })
 }
 
@@ -186,6 +187,7 @@ mod tests {
                 ..Default::default()
             }),
             network: Some(pb::ServiceNetwork { name: "spinikus-env_01".to_string(), aliases: vec!["web".to_string()] }),
+            command: vec!["/bin/sh".to_string(), "-c".to_string(), "exec app".to_string()],
             ..Default::default()
         }
     }
@@ -247,6 +249,7 @@ mod tests {
         assert_eq!(spec.port, Some(3000));
         assert_eq!(spec.volumes, [Mount { volume: start.volumes[0].volume_id.clone(), path: "/data".to_string() }]);
         assert_eq!(spec.network, Some(Network { name: "spinikus-env_01".to_string(), aliases: vec!["web".to_string()] }));
+        assert_eq!(spec.command, ["/bin/sh", "-c", "exec app"]);
     }
 
     #[tokio::test]

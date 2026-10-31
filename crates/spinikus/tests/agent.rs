@@ -705,3 +705,114 @@ async fn runtime_logs_come_from_the_agent_and_stop_when_nobody_reads() {
     let away = control.service_logs(admin, service, LogQuery::default()).await;
     assert!(matches!(away, Err(ControlError::Rejected { .. })), "{away:?}");
 }
+
+/// Removes what a database test made in Docker, even when an assertion fails: the services'
+/// containers and volumes, the environment's network, and the images the test pulled.
+struct DatabaseCleanup {
+    services: Vec<String>,
+    volumes: Vec<String>,
+    network: String,
+    pulled: Vec<&'static str>,
+}
+
+impl Drop for DatabaseCleanup {
+    fn drop(&mut self) {
+        let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().unwrap();
+        for service in &self.services {
+            let listed = docker(&["ps", "--all", "--quiet", "--filter", &format!("label=spinikus.service={service}")]);
+            for container in String::from_utf8_lossy(&listed.stdout).split_whitespace() {
+                docker(&["rm", "--force", container]);
+            }
+        }
+        for volume in &self.volumes {
+            docker(&["volume", "rm", volume]);
+        }
+        docker(&["network", "rm", &self.network]);
+        for image in &self.pulled {
+            docker(&["image", "rm", image]);
+        }
+    }
+}
+
+/// Runs `command` in a throwaway container of `image` on `network` until it succeeds or
+/// `within` passes, and returns its output.
+async fn run_on_network(network: &str, image: &str, command: &[&str], within: Duration) -> String {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let output = std::process::Command::new("docker")
+            .args(["run", "--rm", "--network", network, image])
+            .args(command)
+            .output()
+            .unwrap();
+        if output.status.success() {
+            return String::from_utf8_lossy(&output.stdout).into_owned();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{command:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon; pulls postgres:18 and redis:8"]
+async fn databases_are_reachable_by_name_and_keep_their_data() {
+    use spinikus_control::NewDatabase;
+    use spinikus_core::{database::Engine, variable::VariableScope};
+    use spinikus_store::{VariableRepository, VolumeRepository};
+
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let (_stop, _agent) = start_agent_with(&files, Arc::new(DockerRuntime::new()), None);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let (control, admin) = (&control_plane.control, &control_plane.admin);
+    let web = control_plane.service(server, "unused:1", json!({})).await;
+    let environment = control.get_service(admin, web).await.unwrap().environment_id;
+    let network = format!("spinikus-{environment}");
+    let present =
+        |image: &str| std::process::Command::new("docker").args(["image", "inspect", image]).output().unwrap().status.success();
+    let pulled = ["postgres:18", "redis:8"].into_iter().filter(|image| !present(image)).collect();
+    let database =
+        |name: &str, engine| NewDatabase { name: name.to_string(), slug: None, engine, version: None, server_id: Some(server) };
+    let postgres = control.create_database(admin, environment, database("Postgres", Engine::Postgres)).await.unwrap();
+    let redis = control.create_database(admin, environment, database("Redis", Engine::Redis)).await.unwrap();
+    let mut cleanup = DatabaseCleanup { services: Vec::new(), volumes: Vec::new(), network: network.clone(), pulled };
+    for created in [&postgres, &redis] {
+        cleanup.services.push(created.service.id.to_string());
+        let volumes = control.store().list_volumes(created.service.id).await.unwrap();
+        cleanup.volumes.extend(volumes.into_iter().map(|volume| volume.id.to_string()));
+    }
+    let secret = |service, name: &'static str| async move {
+        let variables = control.store().list_variables(VariableScope::Service(service)).await.unwrap();
+        let variable = variables.into_iter().find(|variable| variable.name.as_str() == name).unwrap();
+        control.store().reveal_variable(variable.id).await.unwrap().expose().to_string()
+    };
+    let within = Duration::from_secs(300);
+
+    control_plane.wait_for_deployment(postgres.deployment.id, DeploymentStatus::Live, within).await;
+    control_plane.wait_for_deployment(redis.deployment.id, DeploymentStatus::Live, within).await;
+    let url = secret(postgres.service.id, "DATABASE_URL").await;
+    let sql = |statement: &str| ["psql", url.as_str(), "--tuples-only", "--no-align", "--command", statement].map(str::to_string);
+    let created = sql("CREATE TABLE notes (body text); INSERT INTO notes VALUES ('kept');");
+    let created: Vec<&str> = created.iter().map(String::as_str).collect();
+    run_on_network(&network, "postgres:18", &created, Duration::from_secs(60)).await;
+    let redis_url = secret(redis.service.id, "REDIS_URL").await;
+    let pong = run_on_network(&network, "redis:8", &["redis-cli", "-u", &redis_url, "ping"], Duration::from_secs(30)).await;
+    let refused = std::process::Command::new("docker")
+        .args(["run", "--rm", "--network", &network, "redis:8", "redis-cli", "-h", "redis", "ping"])
+        .output()
+        .unwrap();
+
+    // A redeploy replaces the container (recreate) on the same volume.
+    let again = control.create_deployment(admin, postgres.service.id).await.unwrap();
+    control_plane.wait_for_deployment(again.id, DeploymentStatus::Live, within).await;
+    control_plane.wait_for_deployment(postgres.deployment.id, DeploymentStatus::Superseded, within).await;
+    let read = sql("SELECT body FROM notes;");
+    let read: Vec<&str> = read.iter().map(String::as_str).collect();
+    let kept = run_on_network(&network, "postgres:18", &read, Duration::from_secs(60)).await;
+
+    assert_eq!(pong.trim(), "PONG");
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("NOAUTH"), "{refused:?}");
+    assert_eq!(kept.trim(), "kept");
+    drop(cleanup);
+}

@@ -4,6 +4,7 @@ pub mod audit;
 pub mod build;
 pub mod certificate;
 pub mod config;
+pub mod database;
 pub mod deployment;
 pub mod domain;
 pub mod enrollment;

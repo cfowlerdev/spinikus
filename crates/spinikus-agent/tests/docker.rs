@@ -140,6 +140,7 @@ async fn pulls_creates_and_publishes_an_app_on_loopback() {
         port: Some(80),
         volumes: vec![Mount { volume: volume.clone(), path: "/data".to_string() }],
         network: None,
+        command: Vec::new(),
     };
     let id = runtime.create(&spec).await.unwrap();
     let _cleanup = Cleanup(runtime.clone(), id.clone());
@@ -304,6 +305,7 @@ async fn containers_on_an_environments_network_reach_each_other_by_alias() {
         port: Some(80),
         volumes: Vec::new(),
         network: Some(Network { name: name.clone(), aliases: vec!["web".to_string()] }),
+        command: Vec::new(),
     };
 
     let id = runtime.create(&spec).await.unwrap();
