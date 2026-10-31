@@ -13,6 +13,7 @@ use spinikus_agent::{
     runtime::{ContainerRuntime, DockerRuntime, MemoryRuntime},
 };
 use spinikus_control::{
+    ControlError,
     ca::AgentCsr,
     webhooks::{PushDelivery, PushOutcome},
 };
@@ -638,4 +639,59 @@ async fn a_push_deploys_its_own_commit_even_if_the_branch_moved_on() {
     assert_eq!(deployment.commit_sha.as_deref(), Some(pushed.as_str()));
     let (_, dockerfile) = runtime.builds().pop().unwrap();
     assert_eq!(dockerfile, "FROM scratch\nLABEL version=1\n");
+}
+
+#[tokio::test]
+async fn runtime_logs_come_from_the_agent_and_stop_when_nobody_reads() {
+    use spinikus_control::service_logs::{ContainerLogUpdate, LogQuery};
+    use tokio_stream::StreamExt;
+
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let runtime = Arc::new(MemoryRuntime::new());
+    runtime.add_image("ghcr.io/acme/web:1", "ghcr.io/acme/web@sha256:01");
+    let (stop, _agent) = start_agent_with(&files, runtime.clone(), None);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let service = control_plane.service(server, "ghcr.io/acme/web:1", json!({ "healthcheck": { "start_period": "0s" } })).await;
+    let (control, admin) = (&control_plane.control, &control_plane.admin);
+    let deployment = control.create_deployment(admin, service).await.unwrap();
+    control_plane.wait_for_deployment(deployment.id, DeploymentStatus::Live, Duration::from_secs(10)).await;
+    wait_for_deployment(&control_plane, server, deployment.id, Some(InstanceStatus::Running)).await;
+    let container = control.store().list_server_instances(server).await.unwrap()[0].observed.container_id.clone();
+    for line in ["booting", "listening on :3000", "ready"] {
+        runtime.write_log(&container, false, line);
+    }
+    runtime.write_log(&container, true, "warning: no cache");
+    let within = Duration::from_secs(5);
+
+    let tail = control.service_logs(admin, service, LogQuery { tail: Some(2), ..Default::default() }).await.unwrap();
+    let tail: Vec<_> = tokio::time::timeout(within, tail.collect()).await.unwrap();
+    let mut followed =
+        control.service_logs(admin, service, LogQuery { tail: Some(1), follow: true, ..Default::default() }).await.unwrap();
+    let last = tokio::time::timeout(within, followed.next()).await.unwrap().unwrap();
+    runtime.write_log(&container, false, "GET / 200");
+    let new = tokio::time::timeout(within, followed.next()).await.unwrap().unwrap();
+    let following = runtime.log_followers();
+    drop(followed);
+    let deadline = tokio::time::Instant::now() + within;
+    while runtime.log_followers() == following {
+        assert!(tokio::time::Instant::now() < deadline, "the agent kept following the log");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let text = |update: &ContainerLogUpdate| match update {
+        ContainerLogUpdate::Line { text, stderr, .. } => format!("{}{text}", if *stderr { "! " } else { "" }),
+        ContainerLogUpdate::End { error } => format!("end {error:?}"),
+    };
+    assert_eq!(tail.iter().map(text).collect::<Vec<_>>(), ["ready", "! warning: no cache", "end None"]);
+    assert_eq!((text(&last), text(&new)), ("! warning: no cache".to_string(), "GET / 200".to_string()));
+    let unknown =
+        control.service_logs(admin, service, LogQuery { deployment_id: Some(DeploymentId::new()), ..Default::default() }).await;
+    assert!(matches!(unknown, Err(ControlError::NotFound { .. })), "{unknown:?}");
+    drop(stop);
+    control_plane.wait_for_status(server, ServerStatus::Disconnected).await;
+    let away = control.service_logs(admin, service, LogQuery::default()).await;
+    assert!(matches!(away, Err(ControlError::Rejected { .. })), "{away:?}");
 }

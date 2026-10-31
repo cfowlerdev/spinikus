@@ -69,6 +69,28 @@ pub struct Mount {
 /// ends when the runtime goes away; changes after that are only found by listing again.
 pub type ContainerEvents = Pin<Box<dyn Stream<Item = Result<String, RuntimeError>> + Send>>;
 
+/// Which part of a container's log to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LogOptions {
+    /// Only lines written at or after this time.
+    pub since: Option<jiff::Timestamp>,
+    /// At most this many of the lines already written.
+    pub tail: Option<u32>,
+    /// Keep going with new lines as they are written.
+    pub follow: bool,
+}
+
+/// One line a container wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogLine {
+    pub at: Option<jiff::Timestamp>,
+    pub stderr: bool,
+    pub text: String,
+}
+
+/// A container's log lines; it ends when there are no more, or with an error.
+pub type LogLines = Pin<Box<dyn Stream<Item = Result<LogLine, RuntimeError>> + Send>>;
+
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync + 'static {
     /// Every container Spinikus manages on this server, running or not.
@@ -90,6 +112,9 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// Changes to managed containers from now on, including any that happen while the
     /// stream is being set up.
     fn events(&self) -> ContainerEvents;
+
+    /// The container's log, stdout and stderr together, as `options` says.
+    fn logs(&self, container_id: &str, options: LogOptions) -> LogLines;
 
     /// Pulls an image and returns the reference to run, pinned by digest. `progress` gets
     /// a line for each step of the pull.

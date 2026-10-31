@@ -4,6 +4,7 @@ mod environments;
 mod hooks;
 mod projects;
 mod servers;
+mod service_logs;
 mod services;
 mod session;
 mod settings;
@@ -35,9 +36,11 @@ pub fn v1() -> Router<Control> {
         )
         .route("/services/{id}/deployments", get(deployments::list).post(deployments::create))
         .route("/services/{id}/rollback", post(deployments::rollback))
+        .route("/services/{id}/logs", get(service_logs::show))
         .route("/deployments/{id}", get(deployments::show))
         .route("/deployments/{id}/events", get(deployments::events))
         .route("/deployments/{id}/logs", get(deployments::logs))
+        .route("/deployments/{id}/stream", get(deployments::stream))
         .route("/deployments/{id}/cancel", post(deployments::cancel))
         .route("/services/{id}/domains", get(domains::list).post(domains::create))
         .route("/domains/{id}", get(domains::show).patch(domains::update).delete(domains::delete))

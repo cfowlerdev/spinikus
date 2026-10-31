@@ -51,6 +51,16 @@ impl Api {
         reply.body["token"].as_str().unwrap().to_string()
     }
 
+    /// A GET whose body is text, such as server-sent events, read to the end.
+    async fn get_text(&self, uri: &str, token: &str) -> (StatusCode, String, String) {
+        let request = Request::builder().uri(uri).header(header::AUTHORIZATION, format!("Bearer {token}"));
+        let response = self.router.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+        let (parts, body) = response.into_parts();
+        let content_type = parts.headers.get(header::CONTENT_TYPE).map(|value| value.to_str().unwrap().to_string());
+        let bytes = body.collect().await.unwrap().to_bytes();
+        (parts.status, content_type.unwrap_or_default(), String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
     async fn send(
         &self,
         method: Method,
@@ -269,6 +279,13 @@ async fn sets_a_source_and_deploys_it() {
     let shown = api.send(Method::GET, &location, token, &[], None).await;
     let events = api.send(Method::GET, &format!("{location}/events"), token, &[], None).await;
     let again = api.send(Method::POST, &format!("{location}/cancel"), token, &[], None).await;
+    let (stream_status, stream_type, streamed) = api.get_text(&format!("{location}/stream"), &bearer).await;
+    let service_logs = format!("/api/v1/services/{}/logs", service.body["id"].as_str().unwrap());
+    let nothing_live = api.send(Method::GET, &service_logs, token, &[], None).await;
+    let deployment_id = deployed.body["id"].as_str().unwrap();
+    let no_container =
+        api.send(Method::GET, &format!("{service_logs}?deployment_id={deployment_id}&tail=5"), token, &[], None).await;
+    let unknown_param = api.send(Method::GET, &format!("{service_logs}?lines=5"), token, &[], None).await;
 
     assert_eq!((no_source.status, &no_source.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("source")));
     assert_eq!((typo.status, &typo.body["code"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("invalid_body")));
@@ -283,6 +300,15 @@ async fn sets_a_source_and_deploys_it() {
     let path: Vec<_> = events.body.as_array().unwrap().iter().map(|event| event["to"].as_str().unwrap()).collect();
     assert_eq!(path, ["queued", "canceled"]);
     assert_eq!(again.status, StatusCode::CONFLICT);
+    assert_eq!((stream_status, stream_type.as_str()), (StatusCode::OK, "text/event-stream"));
+    assert!(
+        streamed.starts_with("event: status\ndata: {\"message\":null,\"reason\":\"canceled_by_user\",\"status\":\"canceled\"}"),
+        "{streamed}"
+    );
+    assert!(streamed.ends_with("event: end\ndata: canceled\n\n"), "{streamed:?}");
+    assert_eq!((nothing_live.status, &nothing_live.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("deployment_id")));
+    assert_eq!(no_container.status, StatusCode::CONFLICT, "{:?}", no_container.body);
+    assert_eq!(unknown_param.status, StatusCode::BAD_REQUEST, "{:?}", unknown_param.body);
 
     let deploy_key = format!("{source}/deploy-key");
     let logs = api.send(Method::GET, &format!("{location}/logs"), token, &[], None).await;

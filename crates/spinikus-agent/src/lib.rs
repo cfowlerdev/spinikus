@@ -3,10 +3,10 @@
 //! It enrolls ([`join`]) and holds the control stream open ([`run`]): hello, heartbeats,
 //! reconnects with backoff, and certificate renewal. Over that stream it reports the
 //! containers Spinikus manages on this server, through the container [`runtime`], and
-//! runs commands: pulling an image, starting a deployment and verifying it with its health
-//! check, and stopping and restarting containers. It applies the route tables it is sent
-//! to its proxy ([`spinikus_proxy`]), which serves the apps on this server. The builder,
-//! release commands and TLS come next.
+//! runs commands: building from Git or pulling an image, starting a deployment and verifying
+//! it with its health check, and stopping, restarting and removing containers. It applies the
+//! route tables and certificates it is sent to its proxy ([`spinikus_proxy`]), which serves
+//! the apps on this server, and serves log tails as sessions. Release commands come next.
 
 mod backoff;
 mod build;
@@ -22,6 +22,7 @@ mod health;
 mod proxy;
 mod report;
 pub mod runtime;
+mod sessions;
 
 pub use backoff::Backoff;
 pub use build::BuildOptions;

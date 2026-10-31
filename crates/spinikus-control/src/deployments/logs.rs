@@ -27,14 +27,17 @@ pub(crate) struct DeploymentLogs {
     /// Deployments whose server was checked, with their server. Held while writing, so
     /// lines from concurrent messages never interleave.
     servers: Mutex<HashMap<DeploymentId, ServerId>>,
+    /// The deployments whose log just grew, for followers (`stream.rs`).
+    pub(super) appended: tokio::sync::broadcast::Sender<DeploymentId>,
 }
 
 impl DeploymentLogs {
     pub(crate) fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir: dir.map(|dir| dir.join("deployments")), servers: Mutex::default() }
+        let appended = tokio::sync::broadcast::channel(1024).0;
+        Self { dir: dir.map(|dir| dir.join("deployments")), servers: Mutex::default(), appended }
     }
 
-    fn path(&self, deployment: DeploymentId) -> Option<PathBuf> {
+    pub(super) fn path(&self, deployment: DeploymentId) -> Option<PathBuf> {
         Some(self.dir.as_ref()?.join(format!("{deployment}.log")))
     }
 }
@@ -85,8 +88,9 @@ impl Control {
         let Some(path) = self.logs.path(deployment) else {
             return;
         };
-        if let Err(error) = append(&path, &text).await {
-            tracing::warn!(deployment = %deployment, %error, "failed to write a deployment log");
+        match append(&path, &text).await {
+            Ok(()) => drop(self.logs.appended.send(deployment)),
+            Err(error) => tracing::warn!(deployment = %deployment, %error, "failed to write a deployment log"),
         }
     }
 
@@ -96,8 +100,9 @@ impl Control {
         let Some(path) = self.logs.path(deployment) else {
             return;
         };
-        if let Err(error) = append(&path, &format!("{} ==> {text}\n", Timestamp::now())).await {
-            tracing::warn!(deployment = %deployment, %error, "failed to write a deployment log");
+        match append(&path, &format!("{} ==> {text}\n", Timestamp::now())).await {
+            Ok(()) => drop(self.logs.appended.send(deployment)),
+            Err(error) => tracing::warn!(deployment = %deployment, %error, "failed to write a deployment log"),
         }
     }
 

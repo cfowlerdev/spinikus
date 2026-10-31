@@ -16,6 +16,7 @@ pub mod page;
 pub mod password;
 pub mod projects;
 pub mod servers;
+pub mod service_logs;
 pub mod services;
 pub mod settings;
 pub mod setup;
@@ -53,6 +54,7 @@ pub struct Control {
     runner: Arc<deployments::Runner>,
     certificates: Arc<certificates::Certificates>,
     logs: Arc<deployments::logs::DeploymentLogs>,
+    sessions: Arc<service_logs::Sessions>,
 }
 
 impl Control {
@@ -60,7 +62,8 @@ impl Control {
         let runner = Arc::new(deployments::Runner::new(DeploymentTimings::default()));
         let certificates = Arc::new(certificates::Certificates::new(Arc::new(InstantAcme::new()), CertificateTimings::default()));
         let logs = Arc::new(deployments::logs::DeploymentLogs::new(None));
-        Self { store, agents: AgentHub::default(), authority: Arc::default(), runner, certificates, logs }
+        let sessions = Arc::default();
+        Self { store, agents: AgentHub::default(), authority: Arc::default(), runner, certificates, logs, sessions }
     }
 
     /// Replaces the ACME client and the certificate manager's timings, such as to use a

@@ -12,6 +12,7 @@ use std::{
 use async_trait::async_trait;
 use bollard::{
     API_DEFAULT_VERSION, Docker, body_try_stream,
+    container::LogOutput,
     errors::Error,
     models::{
         ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EventMessageTypeEnum, HealthStatusEnum,
@@ -19,8 +20,8 @@ use bollard::{
     },
     query_parameters::{
         BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptionsBuilder, CreateImageOptionsBuilder, EventsOptionsBuilder,
-        ListContainersOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RestartContainerOptionsBuilder,
-        StopContainerOptionsBuilder,
+        ListContainersOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder,
+        RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
     },
 };
 use jiff::Timestamp;
@@ -28,7 +29,8 @@ use spinikus_core::server::{InstanceHealth, InstanceStatus, ObservedInstance};
 use tokio_stream::StreamExt;
 
 use super::{
-    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
+    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, LogLine, LogLines, LogOptions, PORT_LABEL,
+    RuntimeError, SERVICE_LABEL, owner,
 };
 
 /// How long to wait for the Engine API to answer, beyond any grace period a call waits for.
@@ -127,6 +129,44 @@ impl ContainerRuntime for DockerRuntime {
     async fn restart(&self, container_id: &str, grace: Duration) -> Result<(), RuntimeError> {
         let options = RestartContainerOptionsBuilder::new().t(seconds(grace)).build();
         self.waiting(grace)?.restart_container(container_id, Some(options)).await.map_err(runtime_error)
+    }
+
+    fn logs(&self, container_id: &str, options: LogOptions) -> LogLines {
+        let docker = match self.client() {
+            Ok(docker) => docker,
+            Err(error) => return Box::pin(tokio_stream::once(Err(error))),
+        };
+        let tail = options.tail.map_or_else(|| "all".to_string(), |tail| tail.to_string());
+        let since = options.since.map_or(0, |since| i32::try_from(since.as_second()).unwrap_or(i32::MAX));
+        let query = LogsOptionsBuilder::new()
+            .follow(options.follow)
+            .stdout(true)
+            .stderr(true)
+            .timestamps(true)
+            .since(since)
+            .tail(&tail)
+            .build();
+        // A task splits Docker's frames into lines; dropping the stream ends it and the request.
+        let mut output = Box::pin(docker.logs(container_id, Some(query)));
+        let (sender, receiver) = tokio::sync::mpsc::channel(256);
+        tokio::spawn(async move {
+            while let Some(output) = output.next().await {
+                let lines = match output {
+                    Ok(LogOutput::StdErr { message }) => log_lines(&message, true).into_iter().map(Ok).collect(),
+                    Ok(LogOutput::StdOut { message } | LogOutput::Console { message }) => {
+                        log_lines(&message, false).into_iter().map(Ok).collect()
+                    }
+                    Ok(LogOutput::StdIn { .. }) => Vec::new(),
+                    Err(error) => vec![Err(runtime_error(error))],
+                };
+                for line in lines {
+                    if sender.send(line).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
     }
 
     fn events(&self) -> ContainerEvents {
@@ -384,6 +424,26 @@ fn runtime_error(error: Error) -> RuntimeError {
     }
 }
 
+/// The lines of a log frame, each written as `<RFC 3339 time> <text>` since timestamps are on.
+fn log_lines(message: &[u8], stderr: bool) -> Vec<LogLine> {
+    String::from_utf8_lossy(message)
+        .lines()
+        .map(|line| {
+            let (at, text) = match line.split_once(' ') {
+                Some((at, text)) => match at.parse::<Timestamp>() {
+                    Ok(at) => (Some(at), text),
+                    Err(_) => (None, line),
+                },
+                None => match line.parse::<Timestamp>() {
+                    Ok(at) => (Some(at), ""),
+                    Err(_) => (None, line),
+                },
+            };
+            LogLine { at, stderr, text: text.to_string() }
+        })
+        .collect()
+}
+
 /// What the agent reports for a container, or `None` if Spinikus does not manage it.
 fn observed(response: ContainerInspectResponse) -> Option<ObservedInstance> {
     let (service_id, deployment_id) = owner(response.config.as_ref().and_then(|config| config.labels.as_ref()))?;
@@ -442,6 +502,19 @@ mod tests {
             (DEPLOYMENT_LABEL.to_string(), deployment.to_string()),
             ("other".to_string(), "label".to_string()),
         ]))
+    }
+
+    #[test]
+    fn splits_log_frames_into_timed_lines() {
+        let frame = b"2026-10-31T12:00:00.123456789Z listening on :3000\n2026-10-31T12:00:01Z ready\nno time here\n";
+
+        let lines = log_lines(frame, true);
+
+        let texts: Vec<_> = lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(texts, ["listening on :3000", "ready", "no time here"]);
+        assert_eq!(lines[1].at, Some("2026-10-31T12:00:01Z".parse().unwrap()));
+        assert_eq!(lines[2].at, None);
+        assert!(lines.iter().all(|line| line.stderr));
     }
 
     #[test]

@@ -792,3 +792,82 @@ async fn on_a_revoked_server_cleaning_up_is_only_recorded() {
     assert!(removals(&mut agent).is_empty());
     assert!(control.store().get_deployment(first.id).await.unwrap().cleaned_at.is_some());
 }
+
+/// Everything a follower gets until the stream ends.
+async fn follow_to_end(control: &Control, admin: &Principal, id: DeploymentId, offset: u64) -> Vec<stream::DeploymentUpdate> {
+    use tokio_stream::StreamExt;
+    let updates = control.follow_deployment(admin, id, offset).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), updates.collect()).await.expect("the stream ended")
+}
+
+fn progress(command: &pb::Command, phase: &str, lines: &[&str]) -> pb::CommandProgress {
+    pb::CommandProgress {
+        command_id: command.command_id.clone(),
+        phase: phase.to_string(),
+        log_lines: lines.iter().map(|text| pb::LogLine { text: text.to_string(), ..Default::default() }).collect(),
+    }
+}
+
+#[tokio::test]
+async fn followers_get_the_log_and_status_as_they_happen() {
+    use stream::DeploymentUpdate::*;
+    use tokio_stream::StreamExt;
+    let logs = tempfile::tempdir().unwrap();
+    let dir = logs.path().to_path_buf();
+    let setup = setup_with(DeploymentTimings::default(), |control| control.with_log_dir(dir)).await;
+    let control = &setup.control;
+    let mut agent = connect(control, setup.server.id);
+    let deployment = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+    control.advance_deployments().await;
+    let prepare = only(sent(&mut agent));
+    control.deployment_progress(setup.server.id, progress(&prepare, "pulling", &[])).await;
+    control.deployment_progress(setup.server.id, progress(&prepare, "pulling", &["Pulling web:1"])).await;
+
+    let mut live = control.follow_deployment(&setup.admin, deployment.id, 0).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), live.next()).await.unwrap().unwrap();
+    control.deployment_progress(setup.server.id, progress(&prepare, "pulling", &["Pulled web:1"])).await;
+    control.deployment_result(setup.server.id, succeeded(&prepare, Some("web@sha256:01"))).await;
+    let start = only(sent(&mut agent));
+    control.deployment_result(setup.server.id, succeeded(&start, None)).await;
+    let rest: Vec<_> = tokio::time::timeout(Duration::from_secs(5), live.collect::<Vec<_>>()).await.unwrap();
+    let offset = rest.iter().find_map(|update| if let Log { offset, .. } = update { Some(*offset) } else { None }).unwrap();
+    let resumed = follow_to_end(control, &setup.admin, deployment.id, offset).await;
+    let mid_line = follow_to_end(control, &setup.admin, deployment.id, offset - 3).await;
+
+    let lines = |updates: &[stream::DeploymentUpdate]| -> Vec<String> {
+        updates
+            .iter()
+            .filter_map(|update| match update {
+                Log { line, .. } => Some(line.split_once(' ').unwrap().1.to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let all: Vec<_> = [first.clone()].into_iter().chain(rest.clone()).collect();
+    assert_eq!(lines(&all), ["==> pulling", "Pulling web:1", "Pulled web:1"]);
+    let statuses: Vec<_> =
+        all.iter().filter_map(|update| if let Status { status, .. } = update { Some(*status) } else { None }).collect();
+    assert_eq!((statuses.first(), statuses.last()), (Some(&Preparing), Some(&Live)));
+    assert!(matches!(first, Status { status: Preparing, .. }), "{first:?}");
+    assert_eq!(all.last(), Some(&End(Live)));
+    // Resuming after the first line starts at the second, and so does an offset inside it.
+    assert_eq!(lines(&resumed), ["Pulling web:1", "Pulled web:1"]);
+    assert_eq!(lines(&mid_line), lines(&resumed));
+}
+
+#[tokio::test]
+async fn a_follower_hears_why_a_deployment_failed() {
+    use stream::DeploymentUpdate::*;
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    let mut agent = connect(control, setup.server.id);
+    let deployment = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+    control.advance_deployments().await;
+    let prepare = only(sent(&mut agent));
+    control.deployment_result(setup.server.id, failed(&prepare, pb::FailureReason::BuildFailed, "cannot pull")).await;
+
+    let updates = follow_to_end(control, &setup.admin, deployment.id, 0).await;
+
+    let failed = Status { status: Failed, reason: Some(EndReason::BuildFailed), message: Some("cannot pull".to_string()) };
+    assert_eq!(updates, [failed, End(Failed)]);
+}

@@ -17,7 +17,7 @@ use spinikus_core::server::{InstanceHealth, InstanceStatus, ObservedInstance};
 use tokio::sync::broadcast;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
-use super::{BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, RuntimeError};
+use super::{BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, LogLine, LogLines, LogOptions, RuntimeError};
 
 #[derive(Clone)]
 enum Event {
@@ -35,6 +35,9 @@ pub struct MemoryRuntime {
     /// Builds so far, and the Dockerfile each one read.
     builds: Mutex<Vec<(BuildSpec, String)>>,
     removed_images: Mutex<Vec<String>>,
+    /// Every line containers wrote, and a channel for followers.
+    logs: Mutex<Vec<(String, LogLine)>>,
+    written: broadcast::Sender<(String, LogLine)>,
     /// Why builds fail, if they do.
     build_failure: Mutex<Option<String>>,
     exit_on_start: AtomicBool,
@@ -58,6 +61,8 @@ impl MemoryRuntime {
             endpoint: Mutex::default(),
             builds: Mutex::default(),
             removed_images: Mutex::default(),
+            logs: Mutex::default(),
+            written: broadcast::channel(256).0,
             build_failure: Mutex::default(),
             exit_on_start: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
@@ -74,6 +79,18 @@ impl MemoryRuntime {
     /// The builds so far, each with the text of the Dockerfile it read.
     pub fn builds(&self) -> Vec<(BuildSpec, String)> {
         lock(&self.builds).clone()
+    }
+
+    /// Writes a line to a container's log, as if the app had.
+    pub fn write_log(&self, container_id: &str, stderr: bool, text: &str) {
+        let line = LogLine { at: Some(Timestamp::now()), stderr, text: text.to_string() };
+        lock(&self.logs).push((container_id.to_string(), line.clone()));
+        let _ = self.written.send((container_id.to_string(), line));
+    }
+
+    /// How many followers a container's log has.
+    pub fn log_followers(&self) -> usize {
+        self.written.receiver_count()
     }
 
     /// The image references removed so far, in order.
@@ -178,6 +195,33 @@ impl ContainerRuntime for MemoryRuntime {
             instance.status = InstanceStatus::Running;
             instance.started_at = Some(Timestamp::now());
         })
+    }
+
+    fn logs(&self, container_id: &str, options: LogOptions) -> LogLines {
+        if let Err(error) = self.check() {
+            return Box::pin(tokio_stream::once(Err(error)));
+        }
+        // Subscribe first, so no line falls between the two.
+        let new = BroadcastStream::new(self.written.subscribe());
+        let mut written: Vec<LogLine> = lock(&self.logs)
+            .iter()
+            .filter(|(container, line)| container == container_id && options.since.is_none_or(|since| line.at >= Some(since)))
+            .map(|(_, line)| line.clone())
+            .collect();
+        if let Some(tail) = options.tail {
+            written.drain(..written.len().saturating_sub(tail as usize));
+        }
+        let written = tokio_stream::iter(written.into_iter().map(Ok));
+        if !options.follow {
+            return Box::pin(written);
+        }
+        let container_id = container_id.to_string();
+        let new = new.filter_map(move |line| match line {
+            Ok((container, line)) if container == container_id => Some(Ok(line)),
+            Ok(_) => None,
+            Err(lagged) => Some(Err(RuntimeError::Failed(lagged.to_string()))),
+        });
+        Box::pin(written.chain(new))
     }
 
     fn events(&self) -> ContainerEvents {

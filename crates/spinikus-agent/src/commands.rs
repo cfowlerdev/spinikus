@@ -107,6 +107,11 @@ impl Progress {
 }
 
 impl Commands {
+    /// The runtime commands run against, for sessions.
+    pub(crate) fn runtime(&self) -> Arc<dyn ContainerRuntime> {
+        self.runtime.clone()
+    }
+
     pub(crate) fn new(runtime: Arc<dyn ContainerRuntime>, build: BuildOptions) -> Self {
         let (progress_sender, progress) = mpsc::channel(PROGRESS_BUFFER);
         Self {

@@ -13,7 +13,8 @@ use jiff::Timestamp;
 use rcgen::{CertificateParams, KeyPair};
 use spinikus_core::secret::Secret;
 use spinikus_proto::agent::v1::{
-    self as pb, AgentMessage, ControlMessage, agent_message, agent_service_client::AgentServiceClient, control_message,
+    self as pb, AgentMessage, ControlMessage, agent_message, agent_service_client::AgentServiceClient, command::Kind,
+    control_message,
 };
 use tokio::{
     net::TcpListener,
@@ -260,7 +261,7 @@ async fn session(
                 }
             }
             received = inbound.message() => match received {
-                Ok(Some(received)) => handle(received, &outbound, commands, proxy).await,
+                Ok(Some(received)) => handle(received, &outbound, commands, proxy, &client).await,
                 Ok(None) => return Ok(lost(true, "the control plane closed the connection")),
                 Err(status) => return refused(status, true),
             },
@@ -291,8 +292,13 @@ async fn handle(
     outbound: &mpsc::Sender<AgentMessage>,
     commands: &mut Commands,
     proxy: &mut ProxyState,
+    client: &AgentServiceClient<Channel>,
 ) {
     match received.message {
+        // Sessions are not commands: they get no result, and live on their own stream.
+        Some(control_message::Message::Command(pb::Command { kind: Some(Kind::OpenSession(open)), .. })) => {
+            crate::sessions::open(client.clone(), commands.runtime(), open);
+        }
         Some(control_message::Message::Command(command)) => {
             if let Some(result) = commands.start(command) {
                 let _ = outbound.send(message(agent_message::Message::CommandResult(result))).await;

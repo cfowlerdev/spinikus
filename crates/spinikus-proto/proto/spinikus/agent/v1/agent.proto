@@ -147,7 +147,8 @@ message CommandProgress {
 message LogLine {
   google.protobuf.Timestamp at = 1;
   LogStream stream = 2;
-  // Already redacted: secret variable values never leave the agent in logs.
+  // In command progress, already redacted: secret variable values never leave the agent in
+  // build output. In a log tail, the app's own output as it wrote it.
   string text = 3;
 }
 
@@ -365,10 +366,17 @@ message TerminalSession {
   uint32 columns = 3;
 }
 
+// The agent sends the container's log as `log_line` frames, then `closed` once there is
+// no more (without `follow`) or it cannot go on. It stops when the control plane closes
+// the stream.
 message LogTailSession {
   string container_id = 1;
-  // Start from logs written at or after this time; unset means only new lines.
+  // Only lines written at or after this time; unset means from the start (or `tail`).
   google.protobuf.Timestamp since = 2;
+  // At most this many of the lines already written; 0 means all of them.
+  uint32 tail = 3;
+  // Keep sending new lines as the container writes them.
+  bool follow = 4;
 }
 
 // Stop working on another command. The canceled command still ends with a result.
@@ -436,6 +444,8 @@ message SessionFrame {
     TerminalSize resize = 3;
     // The session ended, with a reason if it failed.
     SessionClosed closed = 4;
+    // A line of a log tail.
+    LogLine log_line = 5;
   }
 }
 

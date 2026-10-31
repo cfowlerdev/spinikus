@@ -1,14 +1,21 @@
+use std::convert::Infallible;
+
 use axum::{
     extract::State,
-    http::header,
-    response::{IntoResponse, Json, Response},
+    http::{HeaderMap, header},
+    response::{
+        IntoResponse, Json, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
 use serde::Deserialize;
-use spinikus_control::Control;
+use serde_json::json;
+use spinikus_control::{Control, deployments::stream::DeploymentUpdate};
 use spinikus_core::{
     deployment::{Deployment, DeploymentEvent},
     id::{DeploymentId, ServiceId},
 };
+use tokio_stream::StreamExt;
 
 use crate::{
     error::ApiError,
@@ -89,4 +96,32 @@ pub async fn rollback(
     let target = body.and_then(|body| body.deployment_id);
     let deployment = control.rollback_service(&principal, service_id, target).await?;
     Ok(located(format!("/api/v1/deployments/{}", deployment.id), deployment))
+}
+
+/// Follows the deployment as server-sent events: `log` events (a line each, with the byte
+/// offset after it as the event ID), a `status` event first and on every change, and `end`
+/// (with the final status) once it is live or has finished. `Last-Event-ID` resumes after that offset.
+pub async fn stream(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(id): Path<DeploymentId>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let offset = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0);
+    let updates = control.follow_deployment(&principal, id, offset).await?;
+    let events = updates.map(|update| {
+        Ok::<_, Infallible>(match update {
+            DeploymentUpdate::Log { line, offset } => Event::default().event("log").id(offset.to_string()).data(line),
+            DeploymentUpdate::Status { status, reason, message } => Event::default()
+                .event("status")
+                .data(json!({ "status": status, "reason": reason, "message": message }).to_string()),
+            // With data, since EventSource drops events without any.
+            DeploymentUpdate::End(status) => Event::default().event("end").data(status.as_str()),
+        })
+    });
+    Ok(Sse::new(events).keep_alive(KeepAlive::default()).into_response())
 }

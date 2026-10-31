@@ -34,5 +34,6 @@ jiff.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 tempfile.workspace = true
+tokio-stream.workspace = true
 tokio-rustls.workspace = true
 x509-parser.workspace = true

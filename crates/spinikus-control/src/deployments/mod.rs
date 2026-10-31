@@ -11,6 +11,7 @@ mod commands;
 pub(crate) mod logs;
 mod routes;
 mod runner;
+pub mod stream;
 
 use serde_json::json;
 use spinikus_core::{

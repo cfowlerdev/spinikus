@@ -9,7 +9,7 @@ use bollard::{
     query_parameters::{CreateImageOptionsBuilder, RemoveContainerOptionsBuilder},
 };
 use spinikus_agent::runtime::{
-    BuildSpec, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, DockerRuntime, Mount, RuntimeError, SERVICE_LABEL,
+    BuildSpec, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, DockerRuntime, LogOptions, Mount, RuntimeError, SERVICE_LABEL,
 };
 use spinikus_core::{
     id::{DeploymentId, ServiceId, VolumeId},
@@ -224,4 +224,47 @@ async fn builds_with_buildkit() {
         }
         other => panic!("expected a failed build, got {other:?}"),
     }
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn reads_and_follows_a_containers_log() {
+    let runtime = DockerRuntime::new();
+    let docker = runtime.client().unwrap();
+    let pull = CreateImageOptionsBuilder::new().from_image(IMAGE).build();
+    let mut pulling = docker.create_image(Some(pull), None, None);
+    while let Some(progress) = pulling.next().await {
+        progress.unwrap();
+    }
+    let labels = HashMap::from([
+        (SERVICE_LABEL.to_string(), ServiceId::new().to_string()),
+        (DEPLOYMENT_LABEL.to_string(), DeploymentId::new().to_string()),
+    ]);
+    // Apart, since stdout and stderr are separate pipes and lines written together can swap.
+    let script = "echo one; sleep 0.2; echo two >&2; sleep 0.2; echo three; sleep 1; echo four; sleep 300";
+    let body = ContainerCreateBody {
+        image: Some(IMAGE.to_string()),
+        cmd: Some(vec!["sh".to_string(), "-c".to_string(), script.to_string()]),
+        labels: Some(labels),
+        ..Default::default()
+    };
+    let id = docker.create_container(None, body).await.unwrap().id;
+    let _cleanup = Cleanup(runtime.clone(), id.clone());
+    docker.start_container(&id, None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let within = Duration::from_secs(10);
+
+    let tail = LogOptions { tail: Some(2), ..Default::default() };
+    let tail: Vec<_> = timeout(within, runtime.logs(&id, tail).collect::<Vec<_>>()).await.unwrap();
+    let mut followed = runtime.logs(&id, LogOptions { follow: true, ..Default::default() });
+    let mut lines = Vec::new();
+    while lines.len() < 4 {
+        lines.push(timeout(within, followed.next()).await.unwrap().unwrap().unwrap());
+    }
+
+    let tail: Vec<_> = tail.into_iter().map(|line| line.unwrap()).map(|line| (line.stderr, line.text)).collect();
+    assert_eq!(tail, [(true, "two".to_string()), (false, "three".to_string())]);
+    let texts: Vec<_> = lines.iter().map(|line| line.text.as_str()).collect();
+    assert_eq!(texts, ["one", "two", "three", "four"]);
+    assert!(lines.iter().all(|line| line.at.is_some()));
 }

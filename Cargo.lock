@@ -3106,6 +3106,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "x509-parser",
@@ -3148,6 +3149,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "http-body-util",
+ "jiff",
  "serde",
  "serde_json",
  "spinikus-control",
@@ -3155,6 +3157,7 @@ dependencies = [
  "spinikus-store",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http",
  "tracing",

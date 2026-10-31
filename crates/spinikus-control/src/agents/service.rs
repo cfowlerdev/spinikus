@@ -119,8 +119,13 @@ impl AgentService for AgentGrpc {
 
     type OpenSessionStream = BoxStream<pb::SessionFrame>;
 
-    async fn open_session(&self, _: Request<Streaming<pb::SessionFrame>>) -> Result<Response<Self::OpenSessionStream>, Status> {
-        Err(Status::unimplemented("sessions are not available yet"))
+    async fn open_session(
+        &self,
+        request: Request<Streaming<pb::SessionFrame>>,
+    ) -> Result<Response<Self::OpenSessionStream>, Status> {
+        let AgentIdentity(server) = identity(&request)?;
+        let frames = self.control.attach_session(server, request.into_inner()).await?;
+        Ok(Response::new(Box::pin(frames.map(Ok))))
     }
 
     async fn push_stats(&self, _: Request<Streaming<pb::StatsBatch>>) -> Result<Response<pb::PushStatsResponse>, Status> {
