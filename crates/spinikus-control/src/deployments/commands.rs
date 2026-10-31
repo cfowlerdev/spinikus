@@ -22,6 +22,8 @@ pub(crate) enum Step {
     /// A second stop, for what a start finished after the deployment was canceled: the
     /// agent answers a repeated `stop` with its stored result instead of stopping again.
     Cleanup,
+    /// Removes a finished deployment's containers and images (`cleanup.rs`).
+    Remove,
 }
 
 impl Step {
@@ -31,6 +33,7 @@ impl Step {
             Self::Start => "start",
             Self::Stop => "stop",
             Self::Cleanup => "cleanup",
+            Self::Remove => "remove",
         }
     }
 }
@@ -47,6 +50,7 @@ pub(crate) fn parse_command_id(id: &str) -> Option<(DeploymentId, Step)> {
         "start" => Step::Start,
         "stop" => Step::Stop,
         "cleanup" => Step::Cleanup,
+        "remove" => Step::Remove,
         _ => return None,
     };
     Some((deployment.parse().ok()?, step))
@@ -175,7 +179,7 @@ mod tests {
     fn command_ids_name_the_deployment_and_step() {
         let deployment = DeploymentId::new();
 
-        for step in [Step::Prepare, Step::Start, Step::Stop, Step::Cleanup] {
+        for step in [Step::Prepare, Step::Start, Step::Stop, Step::Cleanup, Step::Remove] {
             assert_eq!(parse_command_id(&command_id(deployment, step)), Some((deployment, step)));
         }
         assert_eq!(parse_command_id(&format!("{deployment}/build")), None);

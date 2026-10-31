@@ -3,6 +3,7 @@ use axum::{
     http::header,
     response::{IntoResponse, Json, Response},
 };
+use serde::Deserialize;
 use spinikus_control::Control;
 use spinikus_core::{
     deployment::{Deployment, DeploymentEvent},
@@ -11,7 +12,7 @@ use spinikus_core::{
 
 use crate::{
     error::ApiError,
-    extract::{Authenticated, Path, Query},
+    extract::{Authenticated, OptionalBody, Path, Query},
     response::{PageBody, PageParams, located},
 };
 
@@ -69,4 +70,23 @@ pub async fn logs(
 ) -> Result<Response, ApiError> {
     let text = control.deployment_logs(&principal, id).await?;
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RollbackBody {
+    deployment_id: Option<DeploymentId>,
+}
+
+/// Rolls the service back to an earlier deployment, by default the last one replaced. The
+/// body, `{ "deployment_id": … }`, is optional.
+pub async fn rollback(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+    OptionalBody(body): OptionalBody<RollbackBody>,
+) -> Result<Response, ApiError> {
+    let target = body.and_then(|body| body.deployment_id);
+    let deployment = control.rollback_service(&principal, service_id, target).await?;
+    Ok(located(format!("/api/v1/deployments/{}", deployment.id), deployment))
 }

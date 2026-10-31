@@ -245,6 +245,7 @@ message Command {
     RestartInstance restart_instance = 6;
     OpenSession open_session = 7;
     CancelCommand cancel_command = 8;
+    RemoveDeployment remove_deployment = 9;
   }
 }
 
@@ -335,6 +336,14 @@ message HealthCheck {
 message StopDeployment {
   string deployment_id = 1;
   google.protobuf.Duration grace_period = 2;
+}
+
+// Removes what a finished deployment left on the server: its containers, stopped or not,
+// and the given image references, once no container uses them. Images in use and images
+// already gone are skipped, so repeating it succeeds.
+message RemoveDeployment {
+  string deployment_id = 1;
+  repeated string images = 2;
 }
 
 message RestartInstance {

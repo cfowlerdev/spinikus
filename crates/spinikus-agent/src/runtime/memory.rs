@@ -34,6 +34,7 @@ pub struct MemoryRuntime {
     endpoint: Mutex<Option<SocketAddr>>,
     /// Builds so far, and the Dockerfile each one read.
     builds: Mutex<Vec<(BuildSpec, String)>>,
+    removed_images: Mutex<Vec<String>>,
     /// Why builds fail, if they do.
     build_failure: Mutex<Option<String>>,
     exit_on_start: AtomicBool,
@@ -56,6 +57,7 @@ impl MemoryRuntime {
             images: Mutex::default(),
             endpoint: Mutex::default(),
             builds: Mutex::default(),
+            removed_images: Mutex::default(),
             build_failure: Mutex::default(),
             exit_on_start: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
@@ -72,6 +74,16 @@ impl MemoryRuntime {
     /// The builds so far, each with the text of the Dockerfile it read.
     pub fn builds(&self) -> Vec<(BuildSpec, String)> {
         lock(&self.builds).clone()
+    }
+
+    /// The image references removed so far, in order.
+    pub fn removed_images(&self) -> Vec<String> {
+        lock(&self.removed_images).clone()
+    }
+
+    /// Whether `image` (a reference or what it resolves to) is still there.
+    pub fn has_image(&self, image: &str) -> bool {
+        lock(&self.images).iter().any(|(reference, resolved)| reference == image || resolved == image)
     }
 
     /// Makes builds fail with `message`, or succeed again with `None`.
@@ -196,6 +208,27 @@ impl ContainerRuntime for MemoryRuntime {
         let id = format!("sha256:{:064x}", self.next_id.fetch_add(1, Ordering::SeqCst));
         lock(&self.images).insert(spec.tag.clone(), id.clone());
         Ok(id)
+    }
+
+    /// Removes the references named `image` and those resolving to it, unless a container
+    /// was created from it.
+    async fn remove_image(&self, image: &str) -> Result<(), RuntimeError> {
+        self.check()?;
+        let mut images = lock(&self.images);
+        let resolved: Vec<String> = images
+            .iter()
+            .filter(|(reference, resolved)| *reference == image || *resolved == image)
+            .map(|(_, resolved)| resolved.clone())
+            .collect();
+        if resolved.is_empty() {
+            return Err(RuntimeError::NotFound);
+        }
+        if lock(&self.specs).values().any(|spec| spec.image == image || resolved.contains(&spec.image)) {
+            return Err(RuntimeError::InUse);
+        }
+        images.retain(|reference, resolved| reference != image && resolved != image);
+        lock(&self.removed_images).push(image.to_string());
+        Ok(())
     }
 
     async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError> {

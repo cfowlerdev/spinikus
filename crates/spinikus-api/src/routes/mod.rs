@@ -29,6 +29,7 @@ pub fn v1() -> Router<Control> {
         .route("/services/{id}/source", get(sources::show).post(sources::create).put(sources::replace))
         .route("/services/{id}/source/deploy-key", get(sources::show_deploy_key).post(sources::create_deploy_key))
         .route("/services/{id}/deployments", get(deployments::list).post(deployments::create))
+        .route("/services/{id}/rollback", post(deployments::rollback))
         .route("/deployments/{id}", get(deployments::show))
         .route("/deployments/{id}/events", get(deployments::events))
         .route("/deployments/{id}/logs", get(deployments::logs))

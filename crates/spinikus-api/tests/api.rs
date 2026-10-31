@@ -298,6 +298,21 @@ async fn sets_a_source_and_deploys_it() {
     assert!(key.body["fingerprint"].as_str().unwrap().starts_with("SHA256:"));
     assert_eq!((rotated.status, rotated.header(header::LOCATION)), (StatusCode::CREATED, deploy_key.as_str()));
     assert_ne!(rotated.body["fingerprint"], key.body["fingerprint"]);
+
+    let rollback = format!("/api/v1/services/{}/rollback", service.body["id"].as_str().unwrap());
+    let nothing_earlier = api.send(Method::POST, &rollback, token, &[], None).await;
+    let to_canceled = api.send(Method::POST, &rollback, token, &[], Some(json!({ "deployment_id": deployed.body["id"] }))).await;
+    let typo = api.send(Method::POST, &rollback, token, &[], Some(json!({ "deployment": deployed.body["id"] }))).await;
+    let unknown = format!("dep_{}", "0".repeat(26));
+    let unknown = api.send(Method::POST, &rollback, token, &[], Some(json!({ "deployment_id": unknown }))).await;
+
+    assert_eq!(
+        (nothing_earlier.status, &nothing_earlier.body["field"]),
+        (StatusCode::UNPROCESSABLE_ENTITY, &json!("deployment_id"))
+    );
+    assert!(to_canceled.body["detail"].as_str().unwrap().contains("is canceled"), "{:?}", to_canceled.body);
+    assert_eq!((typo.status, &typo.body["code"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("invalid_body")));
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

@@ -13,12 +13,13 @@ use spinikus_agent::{
     runtime::{ContainerRuntime, DockerRuntime, MemoryRuntime},
 };
 use spinikus_control::ca::AgentCsr;
+use spinikus_core::build::image_tag;
 use spinikus_core::{
     deployment::DeploymentStatus,
     id::{DeploymentId, ServerId, ServiceId},
     secret::Secret,
     server::{InstanceHealth, InstanceStatus, ObservedInstance, ServerStatus},
-    source::{GitSource, SourceSpec},
+    source::{GitSource, ImageSource, SourceSpec},
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, control_message};
 use spinikus_store::{DeploymentRepository, InstanceRepository, ServerRepository, SourceRepository};
@@ -478,18 +479,102 @@ async fn the_agent_builds_from_git_and_deploys_with_docker() {
     });
     control.store().update_source(service, 1, source).await.unwrap();
 
-    let deployment = control.create_deployment(&control_plane.admin, service).await.unwrap();
-    let tag = format!("spinikus/{}:{}", service.to_string().to_lowercase(), deployment.id.to_string().to_lowercase());
-    control_plane.wait_for_deployment(deployment.id, DeploymentStatus::Live, Duration::from_secs(180)).await;
+    let admin = &control_plane.admin;
+    let within = Duration::from_secs(180);
+    let kept = control.set_setting(admin, "releases_kept", 0, json!(1)).await.unwrap();
+
+    let first = control.create_deployment(admin, service).await.unwrap();
+    control_plane.wait_for_deployment(first.id, DeploymentStatus::Live, within).await;
     let served = wait_for_response(proxy, "web-production-shop.localhost", 200, Duration::from_secs(10)).await;
-    let stop = pb::StopDeployment { deployment_id: deployment.id.to_string(), grace_period: None };
+    std::fs::write(repo.join("Dockerfile"), "FROM traefik/whoami:v1.10\nLABEL version=2\n").unwrap();
+    git(&repo, &["commit", "--quiet", "--all", "--message", "second"]);
+    let second = control.create_deployment(admin, service).await.unwrap();
+    control_plane.wait_for_deployment(second.id, DeploymentStatus::Live, within).await;
+    control_plane.wait_for_deployment(first.id, DeploymentStatus::Superseded, within).await;
+    let rollback = control.rollback_service(admin, service, None).await.unwrap();
+    control_plane.wait_for_deployment(rollback.id, DeploymentStatus::Live, within).await;
+    control_plane.wait_for_deployment(second.id, DeploymentStatus::Superseded, within).await;
+    control.set_setting(admin, "releases_kept", kept.revision, json!(0)).await.unwrap();
+    let deadline = tokio::time::Instant::now() + within;
+    while control.store().get_deployment(second.id).await.unwrap().cleaned_at.is_none() {
+        assert!(tokio::time::Instant::now() < deadline, "the second deployment was never cleaned up");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let image_exists = |reference: &str| {
+        std::process::Command::new("docker").args(["image", "inspect", reference]).output().unwrap().status.success()
+    };
+    let (first, second) =
+        (control.store().get_deployment(first.id).await.unwrap(), control.store().get_deployment(second.id).await.unwrap());
+    let (first_tag, second_tag) = (image_tag(service, first.id), image_tag(service, second.id));
+    let (first_image, second_image) = (first.image.clone().unwrap(), second.image.clone().unwrap());
+    let kept_first = (image_exists(&first_tag), image_exists(&first_image));
+    let removed_second = (image_exists(&second_tag), image_exists(&second_image));
+    // Clean up: stop the rollback, then remove the first image.
+    let stop = pb::StopDeployment { deployment_id: rollback.id.to_string(), grace_period: None };
     send_command(&control_plane, server, "cleanup", Kind::StopDeployment(stop)).await;
-    wait_for_deployment(&control_plane, server, deployment.id, None).await;
-    let removed = std::process::Command::new("docker").args(["image", "rm", "--force", &tag]).output().unwrap();
+    wait_for_deployment(&control_plane, server, rollback.id, None).await;
+    let removed = std::process::Command::new("docker").args(["image", "rm", "--force", &first_tag]).output().unwrap();
 
     assert!(served.contains("Host: web-production-shop.localhost"), "{served}");
-    let deployment = control.store().get_deployment(deployment.id).await.unwrap();
-    assert!(deployment.image.as_deref().unwrap().starts_with("sha256:"), "{:?}", deployment.image);
-    assert_eq!(deployment.snapshot.from_file, ["runtime.healthcheck", "runtime.port"]);
+    assert!(first_image.starts_with("sha256:") && first_image != second_image, "{first_image} {second_image}");
+    assert_eq!(first.snapshot.from_file, ["runtime.healthcheck", "runtime.port"]);
+    assert_eq!(rollback.image.as_deref(), Some(first_image.as_str()));
+    assert!(first.cleaned_at.is_some() && second.cleaned_at.is_some());
+    // The rollback runs the first image, so it stays; the second is gone.
+    assert_eq!(kept_first, (true, true));
+    assert_eq!(removed_second, (false, false));
     assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stderr));
+}
+
+#[tokio::test]
+async fn a_rollback_runs_the_earlier_image_and_cleanup_removes_what_no_one_needs() {
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let runtime = Arc::new(MemoryRuntime::new());
+    runtime.add_image("ghcr.io/acme/web:1", "ghcr.io/acme/web@sha256:01");
+    runtime.add_image("ghcr.io/acme/web:2", "ghcr.io/acme/web@sha256:02");
+    let app = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    runtime.set_endpoint(app.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(app, axum::Router::new().route("/", axum::routing::get(|| async { "hello" }))).await });
+    let (listener, _proxy) = proxy_listener().await;
+    let (_stop, _agent) = start_agent_with(&files, runtime.clone(), Some(listener));
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let settings = json!({ "port": 3000, "healthcheck": { "start_period": "0s" } });
+    let service = control_plane.service(server, "ghcr.io/acme/web:1", settings).await;
+    let (control, admin) = (&control_plane.control, &control_plane.admin);
+    let kept = control.set_setting(admin, "releases_kept", 0, json!(1)).await.unwrap();
+    let within = Duration::from_secs(10);
+
+    let first = control.create_deployment(admin, service).await.unwrap();
+    control_plane.wait_for_deployment(first.id, DeploymentStatus::Live, within).await;
+    let source = control.get_source(admin, service).await.unwrap();
+    let image = SourceSpec::Image(ImageSource { image: "ghcr.io/acme/web:2".to_string() });
+    control.replace_source(admin, service, source.revision, image).await.unwrap();
+    let second = control.create_deployment(admin, service).await.unwrap();
+    control_plane.wait_for_deployment(second.id, DeploymentStatus::Live, within).await;
+    control_plane.wait_for_deployment(first.id, DeploymentStatus::Superseded, within).await;
+    let rollback = control.rollback_service(admin, service, None).await.unwrap();
+    control_plane.wait_for_deployment(rollback.id, DeploymentStatus::Live, within).await;
+    control_plane.wait_for_deployment(second.id, DeploymentStatus::Superseded, within).await;
+    // Keeping no releases cleans up both earlier deployments.
+    control.set_setting(admin, "releases_kept", kept.revision, json!(0)).await.unwrap();
+    let deadline = tokio::time::Instant::now() + within;
+    while control.store().get_deployment(second.id).await.unwrap().cleaned_at.is_none() {
+        assert!(tokio::time::Instant::now() < deadline, "the second deployment was never cleaned up");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(rollback.rollback_of, Some(first.id));
+    let instances = control.store().list_server_instances(server).await.unwrap();
+    assert_eq!(instances.iter().map(|instance| instance.observed.deployment_id).collect::<Vec<_>>(), [rollback.id]);
+    assert_eq!(runtime.spec(&instances[0].observed.container_id).unwrap().image, "ghcr.io/acme/web@sha256:01");
+    // The second's image is gone; the first's stays, since the rollback runs it.
+    assert_eq!(runtime.removed_images(), ["ghcr.io/acme/web@sha256:02"]);
+    assert!(runtime.has_image("ghcr.io/acme/web@sha256:01"));
+    let first = control.store().get_deployment(first.id).await.unwrap();
+    assert!(first.cleaned_at.is_some());
+    let gone = control.rollback_service(admin, service, Some(first.id)).await;
+    assert!(gone.is_err());
 }

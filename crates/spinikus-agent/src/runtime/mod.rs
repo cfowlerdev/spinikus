@@ -100,6 +100,11 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// builder's error.
     async fn build(&self, spec: &BuildSpec, progress: &(dyn Fn(String) + Send + Sync)) -> Result<String, RuntimeError>;
 
+    /// Removes an image reference (a tag, a reference pinned by digest, or an ID); the image
+    /// goes once nothing refers to it. `NotFound` if there is no such reference, `InUse` if
+    /// a container uses the image or an ID still has other references.
+    async fn remove_image(&self, image: &str) -> Result<(), RuntimeError>;
+
     /// Creates a container, without starting it, and returns its ID.
     async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError>;
 
@@ -122,6 +127,9 @@ pub enum RuntimeError {
     /// A container with the same name exists.
     #[error("a container with this name exists")]
     Conflict,
+    /// The image is used by a container, or has other references.
+    #[error("the image is in use")]
+    InUse,
 }
 
 /// The service and deployment a container belongs to, from its labels. `None` for

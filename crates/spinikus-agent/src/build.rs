@@ -136,7 +136,7 @@ async fn build(
         dockerfile,
         target: settings.target,
         args,
-        tag: format!("spinikus/{}:{}", service.to_string().to_lowercase(), deployment.to_string().to_lowercase()),
+        tag: spinikus_core::build::image_tag(service, deployment),
     };
     let image = runtime.build(&spec, &|line| progress.line(line)).await.map_err(|error| build_failed(error.to_string()))?;
     progress.line(format!("Built {image}"));

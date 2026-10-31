@@ -90,6 +90,17 @@ impl Control {
         }
     }
 
+    /// Appends a `==> text` line to the deployment's log, such as why it failed.
+    pub(crate) async fn log_line(&self, deployment: DeploymentId, text: &str) {
+        let _servers = self.logs.servers.lock().await;
+        let Some(path) = self.logs.path(deployment) else {
+            return;
+        };
+        if let Err(error) = append(&path, &format!("{} ==> {text}\n", Timestamp::now())).await {
+            tracing::warn!(deployment = %deployment, %error, "failed to write a deployment log");
+        }
+    }
+
     /// Forgets which server finished deployments run on.
     pub(crate) async fn forget_log_servers(&self, active: &[DeploymentId]) {
         self.logs.servers.lock().await.retain(|deployment, _| active.contains(deployment));

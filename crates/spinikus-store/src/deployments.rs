@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use spinikus_core::{
     actor::Actor,
     deployment::{Deployment, DeploymentEvent, DeploymentSnapshot, DeploymentStatus, EndReason, NewDeployment, Transition},
-    id::{DataKeyId, DeploymentEventId, DeploymentId, ServiceId, VariableId},
+    id::{DataKeyId, DeploymentEventId, DeploymentId, ServerId, ServiceId, VariableId},
     secret::Secret,
     variable::{ResolvedVariable, ScopeLevel, VariableAvailability, VariableName},
 };
@@ -43,6 +43,16 @@ pub trait DeploymentRepository: Send + Sync {
     /// Every live deployment, at most one per service, oldest first.
     async fn list_live_deployments(&self) -> Result<Vec<Deployment>, StoreError>;
 
+    /// Every deployment not cleaned up yet, active ones included, oldest first.
+    async fn list_uncleaned_deployments(&self) -> Result<Vec<Deployment>, StoreError>;
+
+    /// The deployments on `server_id` that run `image`, of any service, cleaned or not.
+    async fn list_deployments_with_image(&self, server_id: ServerId, image: &str) -> Result<Vec<Deployment>, StoreError>;
+
+    /// Records that a finished deployment's containers and image are gone. Marking it again
+    /// keeps the first time; a deployment that has not finished is a `Conflict`.
+    async fn mark_deployment_cleaned(&self, id: DeploymentId) -> Result<Deployment, StoreError>;
+
     /// Moves the deployment to `to`, recording an event with an optional `message` (what
     /// went wrong, for a failure). Going `live` moves the service's previous live
     /// deployment to `draining` in the same transaction.
@@ -74,7 +84,7 @@ pub trait DeploymentRepository: Send + Sync {
 macro_rules! columns {
     () => {
         "id, service_id, server_id, trigger_type, strategy, status, reason, rollback_of, snapshot, commit_sha, image,
-         created_at, updated_at"
+         cleaned_at, created_at, updated_at"
     };
 }
 
@@ -91,6 +101,7 @@ struct DeploymentRow {
     snapshot: String,
     commit_sha: Option<String>,
     image: Option<String>,
+    cleaned_at: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -115,6 +126,7 @@ impl TryFrom<DeploymentRow> for Deployment {
             })?,
             commit_sha: row.commit_sha,
             image: row.image,
+            cleaned_at: row.cleaned_at.map(|at| parse_column(ENTITY, "cleaned_at", &at)).transpose()?,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
             updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
         })
@@ -403,6 +415,40 @@ impl DeploymentRepository for SqliteStore {
         rows.into_iter().map(Deployment::try_from).collect()
     }
 
+    async fn list_uncleaned_deployments(&self) -> Result<Vec<Deployment>, StoreError> {
+        let rows: Vec<DeploymentRow> =
+            sqlx::query_as(concat!("SELECT ", columns!(), " FROM deployments WHERE cleaned_at IS NULL ORDER BY id"))
+                .fetch_all(self.pool())
+                .await?;
+        rows.into_iter().map(Deployment::try_from).collect()
+    }
+
+    async fn list_deployments_with_image(&self, server_id: ServerId, image: &str) -> Result<Vec<Deployment>, StoreError> {
+        let rows: Vec<DeploymentRow> =
+            sqlx::query_as(concat!("SELECT ", columns!(), " FROM deployments WHERE server_id = ? AND image = ? ORDER BY id"))
+                .bind(server_id.to_string())
+                .bind(image)
+                .fetch_all(self.pool())
+                .await?;
+        rows.into_iter().map(Deployment::try_from).collect()
+    }
+
+    async fn mark_deployment_cleaned(&self, id: DeploymentId) -> Result<Deployment, StoreError> {
+        let mut tx = self.begin_write().await?;
+        let deployment = fetch(&mut tx, id).await?;
+        if !deployment.status.is_terminal() {
+            return Err(StoreError::Conflict { entity: ENTITY, field: "status", value: deployment.status.to_string() });
+        }
+        sqlx::query("UPDATE deployments SET cleaned_at = coalesce(cleaned_at, ?) WHERE id = ?")
+            .bind(crate::db::format_timestamp(jiff::Timestamp::now()))
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        let deployment = fetch(&mut tx, id).await?;
+        tx.commit().await?;
+        Ok(deployment)
+    }
+
     async fn transition_deployment(
         &self,
         id: DeploymentId,
@@ -484,7 +530,7 @@ mod tests {
     use spinikus_core::{
         deployment::{DeploymentStatus::*, DeploymentStrategy, DeploymentTrigger, TransitionError},
         environment::{EnvironmentFields, EnvironmentKind},
-        id::{ServerId, UserId},
+        id::UserId,
         project::ProjectFields,
         server::ServerFields,
         service::{ServiceFields, ServiceKind},
@@ -583,6 +629,31 @@ mod tests {
         assert_eq!((last.to, last.reason, last.message.as_deref()), (Failed, Some(EndReason::BuildFailed), Some("cannot pull")));
         assert_eq!(last.actor, Actor::Server(server_id));
         assert_eq!(events[0].message, None);
+    }
+
+    #[tokio::test]
+    async fn tracks_what_is_cleaned_up_and_who_shares_an_image() {
+        let (_dir, store) = store().await;
+        let (service_id, server_id) = service(&store).await;
+        let first = deploy_live(&store, service_id, server_id).await;
+        store.record_build(first.id, None, Some("sha256:01".to_string()), None).await.unwrap();
+        let second = deploy_live(&store, service_id, server_id).await;
+        store.record_build(second.id, None, Some("sha256:01".to_string()), None).await.unwrap();
+        store.transition_deployment(first.id, Superseded, None, None, Actor::System).await.unwrap();
+
+        let live = store.mark_deployment_cleaned(second.id).await;
+        let cleaned = store.mark_deployment_cleaned(first.id).await.unwrap();
+        let again = store.mark_deployment_cleaned(first.id).await.unwrap();
+        let uncleaned: Vec<_> = store.list_uncleaned_deployments().await.unwrap().into_iter().map(|d| d.id).collect();
+        let sharing: Vec<_> =
+            store.list_deployments_with_image(server_id, "sha256:01").await.unwrap().into_iter().map(|d| d.id).collect();
+
+        assert!(matches!(live, Err(StoreError::Conflict { field: "status", .. })), "{live:?}");
+        assert!(cleaned.cleaned_at.is_some());
+        assert_eq!(again.cleaned_at, cleaned.cleaned_at);
+        assert_eq!(uncleaned, [second.id]);
+        assert_eq!(sharing, [first.id, second.id]);
+        assert!(store.list_deployments_with_image(server_id, "sha256:02").await.unwrap().is_empty());
     }
 
     #[tokio::test]

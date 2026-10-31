@@ -23,12 +23,21 @@ pub const ACME_DIRECTORY_URL: &str = "acme_directory_url";
 /// Let's Encrypt's production directory.
 pub const DEFAULT_ACME_DIRECTORY_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 
+/// How many earlier deployments per service keep their image, so they can be rolled back to.
+pub const RELEASES_KEPT: &str = "releases_kept";
+
+pub const DEFAULT_RELEASES_KEPT: u64 = 5;
+
+/// The most `releases_kept` can be.
+pub const MAX_RELEASES_KEPT: u64 = 100;
+
 /// The known settings and their defaults.
 fn default(key: &str) -> Option<Value> {
     match key {
         BASE_DOMAIN => Some(json!(DEFAULT_BASE_DOMAIN)),
         ACME_EMAIL => Some(Value::Null),
         ACME_DIRECTORY_URL => Some(json!(DEFAULT_ACME_DIRECTORY_URL)),
+        RELEASES_KEPT => Some(json!(DEFAULT_RELEASES_KEPT)),
         _ => None,
     }
 }
@@ -69,6 +78,10 @@ fn check(key: &str, value: Value) -> Result<Value, ControlError> {
         ACME_DIRECTORY_URL => match value {
             Value::String(url) if url.starts_with("https://") && url.len() > "https://".len() => Ok(json!(url.trim())),
             _ => Err(invalid("give the https URL of an ACME directory".to_string())),
+        },
+        RELEASES_KEPT => match value.as_u64() {
+            Some(count) if count <= MAX_RELEASES_KEPT => Ok(json!(count)),
+            _ => Err(invalid(format!("give a whole number from 0 to {MAX_RELEASES_KEPT}"))),
         },
         _ => Err(not_found("setting", key)),
     }
@@ -122,6 +135,15 @@ impl Control {
         };
         let directory_url = read(self.setting(ACME_DIRECTORY_URL).await?.value)?.unwrap_or_default();
         Ok(Some(AcmeSettings { email, directory_url }))
+    }
+
+    /// How many earlier deployments per service to keep for rollback.
+    pub(crate) async fn releases_kept(&self) -> Result<usize, ControlError> {
+        let value = self.setting(RELEASES_KEPT).await?.value;
+        let count = value.as_u64().ok_or_else(|| {
+            ControlError::internal("reading releases_kept", std::io::Error::other(format!("not a count: {value}")))
+        })?;
+        Ok(count as usize)
     }
 
     /// The base domain, or `None` if generated hostnames are off.
@@ -184,5 +206,23 @@ mod tests {
         let expected =
             AcmeSettings { email: "ops@example.com".to_string(), directory_url: DEFAULT_ACME_DIRECTORY_URL.to_string() };
         assert_eq!(on, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn keeps_a_count_of_releases() {
+        let (_dir, control) = control().await;
+        let admin = user(&control, "admin@example.com", true).await;
+
+        let default = control.releases_kept().await.unwrap();
+        let too_many = control.set_setting(&admin, RELEASES_KEPT, 0, json!(MAX_RELEASES_KEPT + 1)).await;
+        let negative = control.set_setting(&admin, RELEASES_KEPT, 0, json!(-1)).await;
+        let fraction = control.set_setting(&admin, RELEASES_KEPT, 0, json!(2.5)).await;
+        control.set_setting(&admin, RELEASES_KEPT, 0, json!(0)).await.unwrap();
+
+        assert_eq!(default, 5);
+        for refused in [too_many, negative, fraction] {
+            assert!(matches!(refused, Err(ControlError::Invalid { field: "value", .. })), "{refused:?}");
+        }
+        assert_eq!(control.releases_kept().await.unwrap(), 0);
     }
 }

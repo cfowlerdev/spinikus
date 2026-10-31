@@ -34,6 +34,9 @@ pub struct Deployment {
     pub commit_sha: Option<String>,
     /// The image that runs, once known: the source image, or the result of the build.
     pub image: Option<String>,
+    /// When its containers and image were removed from its server, once it was no longer
+    /// kept for rollback. A cleaned deployment cannot be rolled back to.
+    pub cleaned_at: Option<Timestamp>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }

@@ -25,6 +25,24 @@ impl<T: DeserializeOwned, S: Send + Sync> FromRequest<S> for Body<T> {
     }
 }
 
+/// A JSON request body that may be left out, for actions whose input is all optional.
+pub struct OptionalBody<T>(pub Option<T>);
+
+impl<T: DeserializeOwned, S: Send + Sync> FromRequest<S> for OptionalBody<T> {
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let empty = request.headers().get(header::CONTENT_LENGTH).is_some_and(|length| length == "0")
+            || (!request.headers().contains_key(header::CONTENT_LENGTH)
+                && !request.headers().contains_key(header::TRANSFER_ENCODING)
+                && !request.headers().contains_key(header::CONTENT_TYPE));
+        if empty {
+            return Ok(Self(None));
+        }
+        Body::from_request(request, state).await.map(|Body(value)| Self(Some(value)))
+    }
+}
+
 fn body_rejection(rejection: JsonRejection) -> ApiError {
     let status = match rejection {
         JsonRejection::MissingJsonContentType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,

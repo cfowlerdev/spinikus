@@ -6,6 +6,7 @@
 //! (the snapshot), its resolved variables, and the server it runs on (the service's
 //! placement, or the embedded server). Later edits to the service never change it.
 
+mod cleanup;
 mod commands;
 pub(crate) mod logs;
 mod routes;
@@ -73,6 +74,83 @@ impl Control {
         Ok(deployment)
     }
 
+    /// Queues a rollback: a new deployment that runs an earlier one's image, snapshot and
+    /// variables again on its server, without building, starting at `starting`. The target
+    /// must have gone live, been replaced, and still have its image (see `cleanup.rs`);
+    /// without one, it is the newest such deployment.
+    pub async fn rollback_service(
+        &self,
+        principal: &Principal,
+        service_id: ServiceId,
+        target: Option<DeploymentId>,
+    ) -> Result<Deployment, ControlError> {
+        let (service, environment) = self.service_with_access(principal, service_id, Role::Developer).await?;
+        let invalid = |problem: String| ControlError::Invalid { field: "deployment_id", problem };
+        let target = match target {
+            Some(id) => match self.store().get_deployment(id).await {
+                Ok(target) if target.service_id == service_id => target,
+                Ok(_) | Err(StoreError::NotFound { .. }) => return Err(not_found("deployment", id)),
+                Err(error) => return Err(error.into()),
+            },
+            None => self
+                .rollback_target(service_id)
+                .await?
+                .ok_or_else(|| invalid("the service has no earlier deployment to roll back to".to_string()))?,
+        };
+        match (target.status, &target.image, target.cleaned_at) {
+            (DeploymentStatus::Live, _, _) => return Err(invalid(format!("deployment {} is live already", target.id))),
+            (DeploymentStatus::Superseded, Some(_), None) => {}
+            (DeploymentStatus::Superseded, _, _) => {
+                return Err(invalid(format!(
+                    "deployment {} is no longer kept, so its image is gone; the releases_kept setting says how many are",
+                    target.id
+                )));
+            }
+            (status, _, _) => {
+                return Err(invalid(format!(
+                    "deployment {} is {status}; only a deployment that was live and was replaced can be rolled back to",
+                    target.id
+                )));
+            }
+        }
+        let server = self.store().get_server(target.server_id).await?;
+        if server.revoked_at.is_some() {
+            return Err(invalid(format!("deployment {} ran on server `{}`, which is revoked", target.id, server.name)));
+        }
+        let has_volumes = !self.store().list_volumes(service_id).await?.is_empty();
+        let new = NewDeployment {
+            service_id,
+            server_id: target.server_id,
+            trigger: DeploymentTrigger::Rollback,
+            strategy: DeploymentStrategy::default_for(service.kind, has_volumes),
+            rollback_of: Some(target.id),
+            snapshot: target.snapshot.clone(),
+            commit_sha: target.commit_sha.clone(),
+            image: target.image.clone(),
+            variables: self.store().deployment_variables(target.id).await?,
+        };
+        let deployment = self.store().create_deployment(new, principal.actor()).await?;
+        let details = json!({ "service_id": service_id.to_string(), "rollback_of": target.id.to_string() });
+        self.audit_by(principal, "deployment.rollback", deployment.id, Some(environment.project_id), details).await?;
+        self.wake_deployments();
+        Ok(deployment)
+    }
+
+    /// The newest deployment of the service that was replaced and still has its image.
+    async fn rollback_target(&self, service_id: ServiceId) -> Result<Option<Deployment>, ControlError> {
+        let mut after = None;
+        loop {
+            let deployments = self.store().list_deployments(service_id, after, page::MAX_PAGE_SIZE).await?;
+            let found = deployments.iter().find(|deployment| {
+                deployment.status == DeploymentStatus::Superseded && deployment.image.is_some() && deployment.cleaned_at.is_none()
+            });
+            if found.is_some() || deployments.len() < page::MAX_PAGE_SIZE as usize {
+                return Ok(found.cloned());
+            }
+            after = deployments.last().map(|deployment| deployment.id);
+        }
+    }
+
     /// The service's deployments, newest first. The next page starts after the last one.
     pub async fn list_deployments(
         &self,
@@ -109,6 +187,7 @@ impl Control {
         let reason = Some(EndReason::CanceledByUser);
         let canceled = self.store().transition_deployment(id, canceled, reason, None, principal.actor()).await?;
         self.audit_by(principal, "deployment.cancel", id, Some(environment.project_id), json!({})).await?;
+        self.log_line(id, "canceled").await;
         if deployment.status != DeploymentStatus::Queued {
             self.stop_containers(&canceled).await?;
         }

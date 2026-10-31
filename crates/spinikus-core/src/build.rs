@@ -12,7 +12,18 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::{service::ServiceConfig, source::relative_path_problem};
+use crate::{
+    id::{DeploymentId, ServiceId},
+    service::ServiceConfig,
+    source::relative_path_problem,
+};
+
+/// The tag of the image built for a deployment, `spinikus/<service>:<deployment>`, in lower
+/// case as image references require. Deployments run the image by ID; the tag keeps it
+/// until its deployment is cleaned up.
+pub fn image_tag(service: ServiceId, deployment: DeploymentId) -> String {
+    format!("spinikus/{}:{}", service.to_string().to_lowercase(), deployment.to_string().to_lowercase())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]

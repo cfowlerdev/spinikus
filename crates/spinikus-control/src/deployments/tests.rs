@@ -69,11 +69,13 @@ pub(crate) fn connect(control: &Control, server: ServerId) -> mpsc::Receiver<pb:
     receiver
 }
 
-/// The commands and route tables sent so far.
+/// The commands and route tables sent so far. Cleanups are left out; tests about them
+/// read them with [`removals`].
 fn received(agent: &mut mpsc::Receiver<pb::ControlMessage>) -> (Vec<pb::Command>, Vec<pb::SetRoutes>) {
     let (mut commands, mut routes) = (Vec::new(), Vec::new());
     while let Ok(message) = agent.try_recv() {
         match message.message {
+            Some(control_message::Message::Command(command)) if matches!(command.kind, Some(Kind::RemoveDeployment(_))) => {}
             Some(control_message::Message::Command(command)) => commands.push(command),
             Some(control_message::Message::SetRoutes(set)) => routes.push(set),
             _ => {}
@@ -126,11 +128,16 @@ async fn status(control: &Control, id: DeploymentId) -> DeploymentStatus {
 
 /// Walks a new deployment to `live` through the fake agent.
 pub(crate) async fn deploy(setup: &Setup, agent: &mut mpsc::Receiver<pb::ControlMessage>) -> Deployment {
+    deploy_image(setup, agent, "ghcr.io/acme/web@sha256:01").await
+}
+
+/// Like [`deploy`], with the agent reporting `image` as prepared.
+async fn deploy_image(setup: &Setup, agent: &mut mpsc::Receiver<pb::ControlMessage>, image: &str) -> Deployment {
     let control = &setup.control;
     let deployment = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
     control.advance_deployments().await;
     let prepare = only(sent(agent));
-    control.deployment_result(setup.server.id, succeeded(&prepare, Some("ghcr.io/acme/web@sha256:01"))).await;
+    control.deployment_result(setup.server.id, succeeded(&prepare, Some(image))).await;
     let start = only(sent(agent));
     control.deployment_result(setup.server.id, succeeded(&start, None)).await;
     let deployment = control.store().get_deployment(deployment.id).await.unwrap();
@@ -615,4 +622,173 @@ async fn keeps_the_logs_of_the_deployments_own_server() {
     let lines: Vec<_> = logs.lines().map(|line| line.split_once(' ').unwrap().1).collect();
     assert_eq!(lines, ["==> cloning", "Cloning into 'repo'...", "#1 FROM alpine", "done"]);
     assert!(logs.lines().nth(1).unwrap().starts_with("2026-10-31T"), "{logs}");
+}
+
+/// Finishes draining the previous live deployment: the agent applies the new routes, then
+/// stops it.
+async fn drain(setup: &Setup, agent: &mut mpsc::Receiver<pb::ControlMessage>) {
+    let control = &setup.control;
+    control.advance_deployments().await;
+    let (_, routes) = received(agent);
+    control.routes_applied(setup.server.id, routes.last().unwrap().revision).await;
+    control.advance_deployments().await;
+    let stop = only(sent(agent));
+    assert!(matches!(stop.kind, Some(Kind::StopDeployment(_))), "{stop:?}");
+    control.deployment_result(setup.server.id, succeeded(&stop, None)).await;
+}
+
+#[tokio::test]
+async fn rolls_back_to_the_last_release_without_building() {
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    let mut agent = connect(control, setup.server.id);
+    let first = deploy_image(&setup, &mut agent, "web@sha256:01").await;
+    let fields = VariableFields { name: "ADDED".parse().unwrap(), availability: VariableAvailability::Runtime, secret: false };
+    control.store().create_variable(VariableScope::Service(setup.service.id), fields, Secret::new("later")).await.unwrap();
+    let second = deploy_image(&setup, &mut agent, "web@sha256:02").await;
+    drain(&setup, &mut agent).await;
+
+    let live = control.rollback_service(&setup.admin, setup.service.id, Some(second.id)).await;
+    let rollback = control.rollback_service(&setup.admin, setup.service.id, None).await.unwrap();
+    let in_progress = control.rollback_service(&setup.admin, setup.service.id, Some(rollback.id)).await;
+    let other = control.rollback_service(&setup.admin, setup.service.id, Some(DeploymentId::new())).await;
+    control.advance_deployments().await;
+    let start = only(sent(&mut agent));
+    control.deployment_result(setup.server.id, succeeded(&start, None)).await;
+
+    assert!(matches!(&live, Err(ControlError::Invalid { field: "deployment_id", problem }) if problem.contains("live already")));
+    assert!(matches!(&in_progress, Err(ControlError::Invalid { field: "deployment_id", .. })), "{in_progress:?}");
+    assert!(matches!(other, Err(ControlError::NotFound { entity: "deployment", .. })), "{other:?}");
+    assert_eq!((rollback.trigger, rollback.rollback_of), (DeploymentTrigger::Rollback, Some(first.id)));
+    assert_eq!((rollback.image.as_deref(), &rollback.snapshot), (Some("web@sha256:01"), &first.snapshot));
+    let Some(Kind::StartDeployment(start)) = &start.kind else { panic!("{start:?}") };
+    assert_eq!(start.image, "web@sha256:01");
+    // The variables of the deployment rolled back to, not the service's current ones.
+    assert!(start.variables.is_empty(), "{:?}", start.variables);
+    let path: Vec<_> =
+        control.list_deployment_events(&setup.admin, rollback.id).await.unwrap().iter().map(|event| event.to).collect();
+    assert_eq!(path, [Queued, Starting, Verifying, Live]);
+    assert_eq!(status(control, second.id).await, Draining);
+}
+
+/// The `RemoveDeployment` commands sent so far, as (deployment, images), sorted.
+fn removals(agent: &mut mpsc::Receiver<pb::ControlMessage>) -> Vec<(String, Vec<String>)> {
+    let mut removals = Vec::new();
+    while let Ok(message) = agent.try_recv() {
+        if let Some(control_message::Message::Command(pb::Command { kind: Some(Kind::RemoveDeployment(remove)), .. })) =
+            message.message
+        {
+            removals.push((remove.deployment_id, remove.images));
+        }
+    }
+    removals.sort();
+    removals
+}
+
+/// Timings that send unanswered commands again on every pass, so a pass shows what is
+/// still to do.
+fn resending() -> DeploymentTimings {
+    DeploymentTimings { resend_after: Duration::ZERO, ..Default::default() }
+}
+
+#[tokio::test]
+async fn cleans_up_what_is_no_longer_kept_but_not_images_still_needed() {
+    let setup = setup(resending()).await;
+    let control = &setup.control;
+    control.set_setting(&setup.admin, crate::settings::RELEASES_KEPT, 0, json!(1)).await.unwrap();
+    let mut agent = connect(control, setup.server.id);
+    let first = deploy_image(&setup, &mut agent, "web@sha256:01").await;
+    let second = deploy_image(&setup, &mut agent, "web@sha256:02").await;
+    drain(&setup, &mut agent).await;
+    // The same image as the second: it stays when the second is cleaned up.
+    let third = deploy_image(&setup, &mut agent, "web@sha256:02").await;
+    drain(&setup, &mut agent).await;
+    let fourth = deploy_image(&setup, &mut agent, "web@sha256:04").await;
+    drain(&setup, &mut agent).await;
+
+    // Kept: the fourth (live) and the third (the one release kept).
+    control.advance_deployments().await;
+    let removed = removals(&mut agent);
+    let remove = pb::Command { command_id: format!("{}/remove", first.id), kind: None };
+    control.deployment_result(setup.server.id, succeeded(&remove, None)).await;
+    control.advance_deployments().await;
+    let left = removals(&mut agent);
+
+    let mut expected = vec![(first.id.to_string(), vec!["web@sha256:01".to_string()]), (second.id.to_string(), Vec::new())];
+    expected.sort();
+    assert_eq!(removed, expected);
+    assert_eq!(left, [(second.id.to_string(), Vec::new())]);
+
+    let cleaned = control.store().get_deployment(first.id).await.unwrap();
+    assert!(cleaned.cleaned_at.is_some());
+    assert!(control.store().get_deployment(second.id).await.unwrap().cleaned_at.is_none());
+    let gone = control.rollback_service(&setup.admin, setup.service.id, Some(first.id)).await;
+    assert!(matches!(&gone, Err(ControlError::Invalid { problem, .. }) if problem.contains("no longer kept")), "{gone:?}");
+    let default = control.rollback_service(&setup.admin, setup.service.id, None).await.unwrap();
+    assert_eq!(default.rollback_of, Some(third.id));
+    assert_eq!(status(control, fourth.id).await, Live);
+}
+
+#[tokio::test]
+async fn keeps_failures_until_a_newer_deployment_goes_live() {
+    let setup = setup(resending()).await;
+    let control = &setup.control;
+    let mut agent = connect(control, setup.server.id);
+    let first = deploy_image(&setup, &mut agent, "web@sha256:01").await;
+    let broken = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+    control.advance_deployments().await;
+    let prepare = only(sent(&mut agent));
+    control.deployment_result(setup.server.id, succeeded(&prepare, Some("web@sha256:bad"))).await;
+    let start = only(sent(&mut agent));
+    control.deployment_result(setup.server.id, failed(&start, pb::FailureReason::HealthCheckFailed, "status 500")).await;
+
+    control.advance_deployments().await;
+    let while_broken = removals(&mut agent);
+    let fixed = deploy_image(&setup, &mut agent, "web@sha256:03").await;
+    drain(&setup, &mut agent).await;
+    control.advance_deployments().await;
+    let after_the_fix = removals(&mut agent);
+
+    assert!(while_broken.is_empty(), "{while_broken:?}");
+    assert_eq!(after_the_fix, [(broken.id.to_string(), vec!["web@sha256:bad".to_string()])]);
+    assert_eq!((status(control, first.id).await, status(control, fixed.id).await), (Superseded, Live));
+}
+
+#[tokio::test]
+async fn a_failure_ends_the_log_with_why() {
+    let logs = tempfile::tempdir().unwrap();
+    let dir = logs.path().to_path_buf();
+    let setup = setup_with(DeploymentTimings::default(), |control| control.with_log_dir(dir)).await;
+    let control = &setup.control;
+    let mut agent = connect(control, setup.server.id);
+
+    let deployment = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+    control.advance_deployments().await;
+    let prepare = only(sent(&mut agent));
+    control.deployment_result(setup.server.id, failed(&prepare, pb::FailureReason::BuildFailed, "cannot pull: not found")).await;
+    let canceled = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+    control.cancel_deployment(&setup.admin, canceled.id).await.unwrap();
+
+    let log = control.deployment_logs(&setup.admin, deployment.id).await.unwrap();
+    assert!(log.trim_end().ends_with("==> failed (build_failed): cannot pull: not found"), "{log}");
+    let log = control.deployment_logs(&setup.admin, canceled.id).await.unwrap();
+    assert!(log.trim_end().ends_with("==> canceled"), "{log}");
+}
+
+#[tokio::test]
+async fn on_a_revoked_server_cleaning_up_is_only_recorded() {
+    let setup = setup(resending()).await;
+    let control = &setup.control;
+    control.set_setting(&setup.admin, crate::settings::RELEASES_KEPT, 0, json!(0)).await.unwrap();
+    let mut agent = connect(control, setup.server.id);
+    let first = deploy(&setup, &mut agent).await;
+    deploy(&setup, &mut agent).await;
+    drain(&setup, &mut agent).await;
+    removals(&mut agent);
+
+    control.revoke_server(&setup.admin, setup.server.id).await.unwrap();
+    control.advance_deployments().await;
+
+    assert!(removals(&mut agent).is_empty());
+    assert!(control.store().get_deployment(first.id).await.unwrap().cleaned_at.is_some());
 }

@@ -158,6 +158,10 @@ impl Commands {
                 tracing::info!(command = id, deployment = stop.deployment_id, "stopping a deployment");
                 Box::pin(async move { stop_deployment(&*runtime, stop).await.map(|()| pb::CommandSucceeded::default()) })
             }
+            Some(Kind::RemoveDeployment(remove)) => {
+                tracing::info!(command = id, deployment = remove.deployment_id, "removing a deployment");
+                Box::pin(async move { remove_deployment(&*runtime, remove).await.map(|()| pb::CommandSucceeded::default()) })
+            }
             Some(Kind::RestartInstance(restart)) => {
                 tracing::info!(command = id, container = restart.container_id, "restarting a container");
                 Box::pin(async move { restart_instance(&*runtime, restart).await.map(|()| pb::CommandSucceeded::default()) })
@@ -232,6 +236,7 @@ fn name(kind: &Kind) -> &'static str {
         Kind::RestartInstance(_) => "RestartInstance",
         Kind::OpenSession(_) => "OpenSession",
         Kind::CancelCommand(_) => "CancelCommand",
+        Kind::RemoveDeployment(_) => "RemoveDeployment",
     }
 }
 
@@ -286,6 +291,23 @@ pub(crate) async fn stop_containers(
     for container in containers {
         gone_is_done(runtime.stop(&container.container_id, grace).await)?;
         gone_is_done(runtime.remove(&container.container_id).await)?;
+    }
+    Ok(())
+}
+
+/// Removes a finished deployment's containers, then its images. An image still in use stays,
+/// such as one a container outside Spinikus runs.
+async fn remove_deployment(runtime: &dyn ContainerRuntime, remove: pb::RemoveDeployment) -> Result<(), pb::CommandFailed> {
+    let deployment = parse_id("deployment ID", &remove.deployment_id)?;
+    // Its containers stopped long ago, or never ran.
+    stop_containers(runtime, deployment, Duration::from_secs(1)).await?;
+    for image in &remove.images {
+        match runtime.remove_image(image).await {
+            Ok(()) => tracing::info!(deployment = %deployment, image, "removed an image"),
+            Err(RuntimeError::NotFound) => {}
+            Err(RuntimeError::InUse) => tracing::info!(deployment = %deployment, image, "kept an image that is in use"),
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }
@@ -390,6 +412,36 @@ mod tests {
         assert_eq!(left, ["new"]);
         assert!(commands.in_flight().is_empty());
         assert!(!commands.busy());
+    }
+
+    #[tokio::test]
+    async fn removes_a_deployments_containers_and_images_but_not_images_in_use() {
+        let runtime = Arc::new(MemoryRuntime::new());
+        let (old, live) = (DeploymentId::new(), DeploymentId::new());
+        runtime.add_image("web:1", "web@sha256:01");
+        runtime.add_image("web:2", "web@sha256:02");
+        runtime.put(container("old", old));
+        let spec = crate::runtime::ContainerSpec {
+            name: "spinikus-live".to_string(),
+            image: "web@sha256:02".to_string(),
+            service_id: ServiceId::new(),
+            deployment_id: live,
+            env: Vec::new(),
+            port: None,
+            volumes: Vec::new(),
+        };
+        runtime.create(&spec).await.unwrap();
+        let mut commands = Commands::new(runtime.clone(), builds());
+        let images = ["web@sha256:01", "web@sha256:02", "gone@sha256:03"].map(str::to_string).to_vec();
+        let remove = pb::RemoveDeployment { deployment_id: old.to_string(), images };
+
+        commands.start(command("cmd-1", Kind::RemoveDeployment(remove)));
+        let result = finish(&mut commands).await;
+
+        assert!(succeeded(&result), "{result:?}");
+        assert!(runtime.get("old").is_none());
+        assert_eq!(runtime.removed_images(), ["web@sha256:01"]);
+        assert!(!runtime.has_image("web@sha256:01") && runtime.has_image("web@sha256:02"));
     }
 
     #[tokio::test]

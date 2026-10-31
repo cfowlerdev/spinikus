@@ -19,7 +19,8 @@ use bollard::{
     },
     query_parameters::{
         BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptionsBuilder, CreateImageOptionsBuilder, EventsOptionsBuilder,
-        ListContainersOptionsBuilder, RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
+        ListContainersOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RestartContainerOptionsBuilder,
+        StopContainerOptionsBuilder,
     },
 };
 use jiff::Timestamp;
@@ -262,6 +263,16 @@ impl ContainerRuntime for DockerRuntime {
             Ok(created) => Ok(created.id),
             Err(Error::DockerResponseServerError { status_code: 409, .. }) => Err(RuntimeError::Conflict),
             Err(Error::DockerResponseServerError { status_code: 404, message }) => Err(RuntimeError::Failed(message)),
+            Err(error) => Err(runtime_error(error)),
+        }
+    }
+
+    async fn remove_image(&self, image: &str) -> Result<(), RuntimeError> {
+        // Never forced: an image a container uses stays.
+        let options = RemoveImageOptionsBuilder::new().force(false).noprune(false).build();
+        match self.client()?.remove_image(image, Some(options), None).await {
+            Ok(_) => Ok(()),
+            Err(Error::DockerResponseServerError { status_code: 409, .. }) => Err(RuntimeError::InUse),
             Err(error) => Err(runtime_error(error)),
         }
     }

@@ -86,7 +86,7 @@ impl Runner {
     }
 }
 
-type Sent = HashMap<String, (ServerId, Instant)>;
+pub(super) type Sent = HashMap<String, (ServerId, Instant)>;
 
 /// The deployment's snapshot with the settings from its `spinikus.json` merged in.
 fn with_app_file(deployment: &Deployment, text: &str) -> Result<DeploymentSnapshot, String> {
@@ -132,16 +132,22 @@ impl Control {
 
     pub(crate) async fn advance_deployments(&self) {
         let mut sent = self.runner().sent.lock().await;
-        let active = match self.store().list_active_deployments().await {
-            Ok(active) => active,
+        // Active deployments are never cleaned up, so these include them.
+        let uncleaned = match self.store().list_uncleaned_deployments().await {
+            Ok(uncleaned) => uncleaned,
             Err(error) => {
-                tracing::error!(%error, "failed to list the active deployments");
+                tracing::error!(%error, "failed to list the deployments");
                 return;
             }
         };
-        // Forget commands of deployments that have finished.
+        let active: Vec<Deployment> = uncleaned
+            .iter()
+            .filter(|deployment| deployment.status.is_in_progress() || deployment.status == DeploymentStatus::Draining)
+            .cloned()
+            .collect();
         self.forget_log_servers(&active.iter().map(|deployment| deployment.id).collect::<Vec<_>>()).await;
-        let ids: HashSet<String> = active.iter().map(|deployment| deployment.id.to_string()).collect();
+        // Forget commands of deployments that are cleaned up.
+        let ids: HashSet<String> = uncleaned.iter().map(|deployment| deployment.id.to_string()).collect();
         sent.retain(|command, _| command.split_once('/').is_some_and(|(deployment, _)| ids.contains(deployment)));
         // Before draining deployments are looked at, so they see the routes that replace them.
         if let Err(error) = self.sync_routes().await {
@@ -158,6 +164,9 @@ impl Control {
             if let Err(error) = self.advance(&mut sent, deployment, &mut busy).await {
                 tracing::error!(deployment = %id, %error, "failed to advance a deployment");
             }
+        }
+        if let Err(error) = self.clean_up_deployments(&mut sent, &uncleaned).await {
+            tracing::error!(%error, "failed to clean up deployments");
         }
     }
 
@@ -219,7 +228,7 @@ impl Control {
     }
 
     /// Sends a command unless it was sent recently. A disconnected agent gets it later.
-    async fn send_command(&self, sent: &mut Sent, server: ServerId, command: pb::Command) {
+    pub(super) async fn send_command(&self, sent: &mut Sent, server: ServerId, command: pb::Command) {
         let id = command.command_id.clone();
         if let Some((to, at)) = sent.get(&id)
             && *to == server
@@ -262,6 +271,7 @@ impl Control {
         tracing::warn!(deployment = %deployment.id, %reason, problem, "deployment failed");
         let failed = DeploymentStatus::Failed;
         self.store().transition_deployment(deployment.id, failed, Some(reason), Some(problem), actor).await?;
+        self.log_line(deployment.id, &format!("failed ({reason}): {problem}")).await;
         Ok(())
     }
 
@@ -377,6 +387,14 @@ impl Control {
             (Step::Stop, Some(Outcome::Failed(failed)), DeploymentStatus::Draining) => {
                 // Sent again after a while.
                 tracing::warn!(deployment = %id, problem = failed.message, "failed to stop a draining deployment");
+            }
+            (Step::Remove, Some(Outcome::Succeeded(_)), _) => {
+                self.store().mark_deployment_cleaned(id).await?;
+                tracing::info!(deployment = %id, "cleaned up a deployment");
+            }
+            (Step::Remove, Some(Outcome::Failed(failed)), _) => {
+                // Sent again after a while.
+                tracing::warn!(deployment = %id, problem = failed.message, "failed to clean up a deployment");
             }
             // Started after it was canceled: stop what it started.
             (Step::Start, Some(Outcome::Succeeded(_)), DeploymentStatus::Canceled) => {
