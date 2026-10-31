@@ -100,7 +100,7 @@ impl AgentService for AgentGrpc {
         let (connection, stopped) = self.control.agents().register(server, sender);
         drop(transition);
         tracing::info!(server = %server, agent_version = hello.agent_version, "agent connected");
-        self.control.agent_connected(server).await;
+        self.control.agent_connected(server, hello.routes_revision).await;
 
         let control = self.control.clone();
         let idle_timeout = self.timings.idle_timeout;
@@ -196,9 +196,12 @@ async fn handle(control: &Control, server: ServerId, message: AgentMessage) -> R
             control.deployment_result(server, result).await;
             Ok(())
         }
-        // Handled once the proxy takes routes and certificates.
-        agent_message::Message::SnapshotApplied(_) => {
-            tracing::debug!(server = %server, "ignored a message that is not handled yet");
+        agent_message::Message::SnapshotApplied(applied) => {
+            match applied.kind() {
+                pb::SnapshotKind::Routes => control.routes_applied(server, applied.revision).await,
+                // Certificates come with HTTPS.
+                _ => tracing::debug!(server = %server, "ignored a snapshot kind that is not handled yet"),
+            }
             Ok(())
         }
     }

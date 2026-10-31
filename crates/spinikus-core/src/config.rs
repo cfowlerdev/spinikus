@@ -77,6 +77,32 @@ fn default_agents_listen() -> SocketAddr {
     (Ipv4Addr::UNSPECIFIED, 8443).into()
 }
 
+/// Proxy settings from the `[proxy]` table of `spinikus.toml`, for the agent on this
+/// machine (embedded or standalone).
+#[derive(Deserialize)]
+pub struct ProxyConfig {
+    /// Serve apps on this machine. On by default.
+    #[serde(default = "default_proxy_enabled")]
+    pub enabled: bool,
+    /// Where the proxy serves plain HTTP. Defaults to `0.0.0.0:80`.
+    #[serde(default = "default_proxy_listen")]
+    pub listen: SocketAddr,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self { enabled: default_proxy_enabled(), listen: default_proxy_listen() }
+    }
+}
+
+fn default_proxy_enabled() -> bool {
+    true
+}
+
+fn default_proxy_listen() -> SocketAddr {
+    (Ipv4Addr::UNSPECIFIED, 80).into()
+}
+
 /// Instance configuration, the schema of `spinikus.toml`.
 #[derive(Deserialize)]
 pub struct SpinikusConfig {
@@ -92,6 +118,8 @@ pub struct SpinikusConfig {
     pub http: HttpConfig,
     #[serde(default)]
     pub agents: AgentsConfig,
+    #[serde(default)]
+    pub proxy: ProxyConfig,
 }
 
 impl SpinikusConfig {
@@ -121,6 +149,7 @@ impl Default for SpinikusConfig {
             secrets: SecretsConfig::default(),
             http: HttpConfig::default(),
             agents: AgentsConfig::default(),
+            proxy: ProxyConfig::default(),
         }
     }
 }

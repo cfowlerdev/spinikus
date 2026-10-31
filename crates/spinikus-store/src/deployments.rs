@@ -40,6 +40,9 @@ pub trait DeploymentRepository: Send + Sync {
     /// `draining`), oldest first.
     async fn list_active_deployments(&self) -> Result<Vec<Deployment>, StoreError>;
 
+    /// Every live deployment, at most one per service, oldest first.
+    async fn list_live_deployments(&self) -> Result<Vec<Deployment>, StoreError>;
+
     /// Moves the deployment to `to`, recording an event with an optional `message` (what
     /// went wrong, for a failure). Going `live` moves the service's previous live
     /// deployment to `draining` in the same transaction.
@@ -390,6 +393,14 @@ impl DeploymentRepository for SqliteStore {
         rows.into_iter().map(Deployment::try_from).collect()
     }
 
+    async fn list_live_deployments(&self) -> Result<Vec<Deployment>, StoreError> {
+        let rows: Vec<DeploymentRow> =
+            sqlx::query_as(concat!("SELECT ", columns!(), " FROM deployments WHERE status = 'live' ORDER BY id"))
+                .fetch_all(self.pool())
+                .await?;
+        rows.into_iter().map(Deployment::try_from).collect()
+    }
+
     async fn transition_deployment(
         &self,
         id: DeploymentId,
@@ -561,6 +572,8 @@ mod tests {
         // The first live one is draining now; the queued one was superseded by the second.
         assert_eq!(active, vec![(live.id, Draining)]);
         assert_eq!(second_live.status, Live);
+        let live: Vec<_> = store.list_live_deployments().await.unwrap().into_iter().map(|d| d.id).collect();
+        assert_eq!(live, vec![second_live.id]);
         let last = events.last().unwrap();
         assert_eq!((last.to, last.reason, last.message.as_deref()), (Failed, Some(EndReason::BuildFailed), Some("cannot pull")));
         assert_eq!(last.actor, Actor::Server(server_id));

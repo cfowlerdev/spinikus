@@ -14,9 +14,10 @@ use tokio::{sync::oneshot, task::JoinHandle};
 fn start(control_plane: &ControlPlane, files: &AgentFiles) -> (oneshot::Sender<()>, JoinHandle<anyhow::Result<()>>) {
     let (stop, stopped) = oneshot::channel::<()>();
     let runtime = Arc::new(MemoryRuntime::new());
-    let run = spinikus::embedded::run(control_plane.control.clone(), files.clone(), control_plane.address, runtime, async move {
-        let _ = stopped.await;
-    });
+    let run =
+        spinikus::embedded::run(control_plane.control.clone(), files.clone(), control_plane.address, runtime, None, async move {
+            let _ = stopped.await;
+        });
     (stop, tokio::spawn(run))
 }
 

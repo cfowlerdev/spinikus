@@ -1,7 +1,9 @@
 //! The agent's state on disk, in its own directory:
 //!
 //! - `agent.json`: the control plane's URL, this server's ID and the CA certificate;
-//! - `identity.json`: the client certificate and its private key, readable by the owner only.
+//! - `identity.json`: the client certificate and its private key, readable by the owner only;
+//! - `routes.json`: the last route table from the control plane, so the proxy serves it
+//!   from the start, even while the control plane is unreachable.
 //!
 //! Each file is replaced atomically, so a crash never leaves a certificate next to the
 //! wrong key.
@@ -13,12 +15,13 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use spinikus_core::{id::ServerId, secret::Secret};
+use spinikus_core::{id::ServerId, route::RouteTable, secret::Secret};
 
 use crate::AgentError;
 
 const ENROLLMENT_FILE: &str = "agent.json";
 const IDENTITY_FILE: &str = "identity.json";
+const ROUTES_FILE: &str = "routes.json";
 
 /// What the agent needs to connect.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +96,19 @@ impl AgentFiles {
         let identity = Identity { certificate_pem: certificate_pem.to_string(), key_pem: key_pem.expose().to_string() };
         write_json(&self.dir.join(IDENTITY_FILE), &identity, true)
     }
+
+    /// The saved route table, or an empty one at revision 0 if there is none yet.
+    pub fn load_routes(&self) -> Result<RouteTable, AgentError> {
+        let path = self.dir.join(ROUTES_FILE);
+        if !path.exists() {
+            return Ok(RouteTable::default());
+        }
+        read_json(&path)
+    }
+
+    pub fn save_routes(&self, table: &RouteTable) -> Result<(), AgentError> {
+        write_json(&self.dir.join(ROUTES_FILE), table, false)
+    }
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, AgentError> {
@@ -164,6 +180,24 @@ mod tests {
         renewed.key_pem = Secret::new("new key");
 
         assert_eq!(files.load().unwrap(), renewed);
+    }
+
+    #[test]
+    fn saves_and_loads_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = AgentFiles::new(dir.path().join("agent"));
+        let table = RouteTable {
+            revision: 7,
+            routes: vec![spinikus_core::route::Route {
+                hostname: "app.example.com".parse().unwrap(),
+                action: spinikus_core::route::RouteAction::Redirect { to: "example.com".parse().unwrap() },
+            }],
+        };
+
+        assert_eq!(files.load_routes().unwrap(), RouteTable::default());
+        files.save_routes(&table).unwrap();
+
+        assert_eq!(files.load_routes().unwrap(), table);
     }
 
     #[cfg(unix)]

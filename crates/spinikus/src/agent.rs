@@ -8,6 +8,7 @@ use spinikus_agent::{
     runtime::{ContainerRuntime, DockerRuntime},
 };
 use spinikus_core::{config::SpinikusConfig, secret::Secret};
+use tokio::net::TcpListener;
 
 use crate::cli::AgentJoinArgs;
 
@@ -42,7 +43,12 @@ pub async fn join(config: &SpinikusConfig, args: AgentJoinArgs) -> anyhow::Resul
 }
 
 pub async fn run(config: &SpinikusConfig) -> anyhow::Result<()> {
-    let options = RunOptions { facts: spinikus_agent::server_facts(), backoff: Backoff::default(), runtime: runtime() };
+    let options = RunOptions {
+        facts: spinikus_agent::server_facts(),
+        backoff: Backoff::default(),
+        runtime: runtime(),
+        proxy: proxy_listener(config).await?,
+    };
     let shutdown = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
             tracing::error!(%error, "Failed to listen for the shutdown signal");
@@ -51,6 +57,20 @@ pub async fn run(config: &SpinikusConfig) -> anyhow::Result<()> {
         tracing::info!("Shutting down");
     };
     spinikus_agent::run(&files(config), options, shutdown).await.context("The agent stopped")
+}
+
+/// The proxy's listener, if the proxy is on. Bound before the agent starts, so a port that
+/// is taken stops it right away.
+pub async fn proxy_listener(config: &SpinikusConfig) -> anyhow::Result<Option<TcpListener>> {
+    if !config.proxy.enabled {
+        return Ok(None);
+    }
+    let address = config.proxy.listen;
+    let listener = TcpListener::bind(address).await.with_context(|| {
+        format!("Failed to listen for the proxy on {address}; set [proxy] listen, or [proxy] enabled = false")
+    })?;
+    tracing::info!(%address, "The proxy serves apps");
+    Ok(Some(listener))
 }
 
 /// The container runtime on this machine: Docker, at `DOCKER_HOST` or the local socket.

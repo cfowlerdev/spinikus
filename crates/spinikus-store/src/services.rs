@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use spinikus_core::{
     id::{EnvironmentId, ServiceId},
+    route::ServiceNames,
     service::{Service, ServiceConfig, ServiceFields, ServiceKind},
 };
 
@@ -20,6 +21,10 @@ pub trait ServiceRepository: Send + Sync {
 
     /// Fails with `NotFound` for deleted services too.
     async fn get_service(&self, id: ServiceId) -> Result<Service, StoreError>;
+
+    /// The slugs of every app service that is not deleted, with its environment's and
+    /// project's, for generated hostnames.
+    async fn list_app_service_names(&self) -> Result<Vec<ServiceNames>, StoreError>;
 
     /// The environment's services in creation order, starting after the `after` cursor.
     async fn list_services(
@@ -111,6 +116,29 @@ impl ServiceRepository for SqliteStore {
             Some(row) => row.try_into(),
             None => Err(StoreError::NotFound { entity: "environment", id: environment_id.to_string() }),
         }
+    }
+
+    async fn list_app_service_names(&self) -> Result<Vec<ServiceNames>, StoreError> {
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT services.id, services.slug, environments.slug, projects.slug
+             FROM services
+             JOIN environments ON environments.id = services.environment_id
+             JOIN projects ON projects.id = environments.project_id
+             WHERE services.kind = 'app' AND services.deleted_at IS NULL
+             ORDER BY services.id",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|(id, service, environment, project)| {
+                Ok(ServiceNames {
+                    service_id: parse_column(ENTITY, "id", &id)?,
+                    service: parse_column(ENTITY, "slug", &service)?,
+                    environment: parse_column("environment", "slug", &environment)?,
+                    project: parse_column("project", "slug", &project)?,
+                })
+            })
+            .collect()
     }
 
     async fn get_service(&self, id: ServiceId) -> Result<Service, StoreError> {
@@ -224,6 +252,23 @@ mod tests {
         let project_id = store.create_project(project).await.unwrap().id;
         let env = EnvironmentFields { name: "Staging".to_string(), slug: "staging".parse().unwrap() };
         store.create_environment(project_id, EnvironmentKind::Staging, env).await.unwrap().id
+    }
+
+    #[tokio::test]
+    async fn lists_the_names_of_app_services() {
+        let (_dir, store) = store().await;
+        let environment = environment(&store, "shop").await;
+        let web = store.create_service(environment, ServiceKind::App, fields("Web", "web", json!({}))).await.unwrap();
+        store.create_service(environment, ServiceKind::Database, fields("DB", "db", json!({}))).await.unwrap();
+        let old = store.create_service(environment, ServiceKind::App, fields("Old", "old", json!({}))).await.unwrap();
+        store.delete_service(old.id).await.unwrap();
+
+        let names = store.list_app_service_names().await.unwrap();
+
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].service_id, web.id);
+        let slugs = (names[0].service.as_str(), names[0].environment.as_str(), names[0].project.as_str());
+        assert_eq!(slugs, ("web", "staging", "shop"));
     }
 
     #[tokio::test]

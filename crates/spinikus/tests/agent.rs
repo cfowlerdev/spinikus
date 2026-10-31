@@ -1,7 +1,7 @@
 //! A real agent against a real control plane over mutual TLS: joining, staying connected,
 //! renewing the certificate, being revoked, reporting its containers and running commands.
 
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 mod common;
 
@@ -21,16 +21,22 @@ use spinikus_core::{
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, control_message};
 use spinikus_store::{DeploymentRepository, InstanceRepository, ServerRepository};
-use tokio::{sync::oneshot, task::JoinHandle};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::oneshot,
+    task::JoinHandle,
+};
 
 /// Starts the agent in the background, with no containers. Dropping the sender stops it.
 fn start_agent(files: &AgentFiles) -> (oneshot::Sender<()>, JoinHandle<Result<(), AgentError>>) {
-    start_agent_with(files, Arc::new(MemoryRuntime::new()))
+    start_agent_with(files, Arc::new(MemoryRuntime::new()), None)
 }
 
 fn start_agent_with(
     files: &AgentFiles,
     runtime: Arc<dyn ContainerRuntime>,
+    proxy: Option<TcpListener>,
 ) -> (oneshot::Sender<()>, JoinHandle<Result<(), AgentError>>) {
     let files = files.clone();
     let (stop, stopped) = oneshot::channel::<()>();
@@ -38,6 +44,7 @@ fn start_agent_with(
         facts: spinikus_agent::server_facts(),
         backoff: Backoff::new(Duration::from_millis(50), Duration::from_millis(200)),
         runtime,
+        proxy,
     };
     let handle = tokio::spawn(async move {
         spinikus_agent::run(&files, options, async move {
@@ -195,7 +202,7 @@ async fn the_agent_reports_its_containers_and_stops_a_deployment() {
     runtime.put(container("old", draining));
     runtime.put(container("new", live));
 
-    let (_stop, _agent) = start_agent_with(&files, runtime.clone());
+    let (_stop, _agent) = start_agent_with(&files, runtime.clone(), None);
     wait_for_containers(&control_plane, server, &["new", "old"]).await;
     runtime.put(container("newer", live));
     wait_for_containers(&control_plane, server, &["new", "newer", "old"]).await;
@@ -220,27 +227,74 @@ fn send_command(control_plane: &ControlPlane, server: ServerId, id: &str, kind: 
     async move { agents.send(server, message).await.unwrap() }
 }
 
+/// A proxy listener on a free loopback port.
+async fn proxy_listener() -> (TcpListener, SocketAddr) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    (listener, address)
+}
+
+/// A raw HTTP/1.1 GET through the proxy, returning the status and body.
+async fn get(proxy: SocketAddr, host: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(proxy).await.unwrap();
+    let request = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    (head[9..12].parse().unwrap(), body.to_string())
+}
+
+/// Waits until the proxy answers for `host` with `status`, as routes arrive after go-live.
+async fn wait_for_response(proxy: SocketAddr, host: &str, status: u16, within: Duration) -> String {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let (current, body) = get(proxy, host).await;
+        if current == status {
+            return body;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the proxy answers {current} for {host}, expected {status}: {body}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
-async fn a_deployment_goes_live_and_the_next_one_supersedes_it() {
+async fn a_deployment_goes_live_behind_the_proxy_and_the_next_one_supersedes_it() {
     let control_plane = ControlPlane::start().await;
     let dir = tempfile::tempdir().unwrap();
     let files = AgentFiles::new(dir.path().join("agent"));
     let server = enroll(&control_plane, &files).await;
     let runtime = Arc::new(MemoryRuntime::new());
     runtime.add_image("ghcr.io/acme/web:1", "ghcr.io/acme/web@sha256:01");
-    let (_stop, _agent) = start_agent_with(&files, runtime.clone());
+    // Every container's app port is this little app.
+    let app = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    runtime.set_endpoint(app.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(app, axum::Router::new().route("/", axum::routing::get(|| async { "hello" }))).await });
+    let (listener, proxy) = proxy_listener().await;
+    let (_stop, _agent) = start_agent_with(&files, runtime.clone(), Some(listener));
     control_plane.wait_for_status(server, ServerStatus::Connected).await;
-    let service = control_plane.service(server, "ghcr.io/acme/web:1", json!({ "healthcheck": { "start_period": "0s" } })).await;
+    let settings = json!({ "port": 3000, "healthcheck": { "start_period": "0s" } });
+    let service = control_plane.service(server, "ghcr.io/acme/web:1", settings).await;
     let control = &control_plane.control;
+    let host = "web-production-shop.localhost";
 
+    let before = get(proxy, host).await.0;
     let first = control.create_deployment(&control_plane.admin, service).await.unwrap();
     control_plane.wait_for_deployment(first.id, DeploymentStatus::Live, Duration::from_secs(10)).await;
     wait_for_deployment(&control_plane, server, first.id, Some(InstanceStatus::Running)).await;
+    let served = wait_for_response(proxy, host, 200, Duration::from_secs(10)).await;
     let second = control.create_deployment(&control_plane.admin, service).await.unwrap();
     control_plane.wait_for_deployment(second.id, DeploymentStatus::Live, Duration::from_secs(10)).await;
     control_plane.wait_for_deployment(first.id, DeploymentStatus::Superseded, Duration::from_secs(10)).await;
     wait_for_deployment(&control_plane, server, first.id, None).await;
 
+    let after = get(proxy, host).await;
+
+    assert_eq!(before, 404);
+    assert_eq!(served, "hello");
+    assert_eq!(after, (200, "hello".to_string()));
+    let routes = files.load_routes().unwrap();
+    assert!(routes.targets(second.id) && !routes.targets(first.id), "{routes:?}");
     let first = control.store().get_deployment(first.id).await.unwrap();
     assert_eq!(first.image.as_deref(), Some("ghcr.io/acme/web@sha256:01"));
     let path: Vec<_> = control.store().list_deployment_events(first.id).await.unwrap().iter().map(|event| event.to).collect();
@@ -280,18 +334,44 @@ async fn the_agent_deploys_an_image_with_docker() {
     let dir = tempfile::tempdir().unwrap();
     let files = AgentFiles::new(dir.path().join("agent"));
     let server = enroll(&control_plane, &files).await;
-    let (_stop, _agent) = start_agent_with(&files, Arc::new(DockerRuntime::new()));
+    let (listener, proxy) = proxy_listener().await;
+    let (_stop, _agent) = start_agent_with(&files, Arc::new(DockerRuntime::new()), Some(listener));
     control_plane.wait_for_status(server, ServerStatus::Connected).await;
     let runtime = json!({ "port": 80, "healthcheck": { "path": "/" }, "shutdown_timeout": "2s" });
     let service = control_plane.service(server, "traefik/whoami:v1.10", runtime).await;
     let control = &control_plane.control;
+    let host = "web-production-shop.localhost";
 
     let first = control.create_deployment(&control_plane.admin, service).await.unwrap();
     control_plane.wait_for_deployment(first.id, DeploymentStatus::Live, Duration::from_secs(120)).await;
+    let served = wait_for_response(proxy, host, 200, Duration::from_secs(10)).await;
+    // Requests keep going through the cutover; none may fail.
+    let (stop_requests, mut requests_stopped) = oneshot::channel::<()>();
+    let requests = tokio::spawn(async move {
+        let mut failures = Vec::new();
+        let mut count = 0;
+        while requests_stopped.try_recv().is_err() {
+            let (status, body) = get(proxy, host).await;
+            count += 1;
+            if status != 200 {
+                failures.push((status, body));
+            }
+        }
+        (count, failures)
+    });
     let second = control.create_deployment(&control_plane.admin, service).await.unwrap();
     control_plane.wait_for_deployment(second.id, DeploymentStatus::Live, Duration::from_secs(60)).await;
     control_plane.wait_for_deployment(first.id, DeploymentStatus::Superseded, Duration::from_secs(30)).await;
     wait_for_deployment(&control_plane, server, first.id, None).await;
+    let _ = stop_requests.send(());
+    let (count, failures) = requests.await.unwrap();
+    let (status, body) = get(proxy, host).await;
+
+    // whoami answers with the request it saw, including the forwarding headers.
+    assert!(served.contains(&format!("Host: {host}")), "{served}");
+    assert!(served.contains("X-Forwarded-For: 127.0.0.1"), "{served}");
+    assert_eq!(status, 200, "{body}");
+    assert!(count > 10 && failures.is_empty(), "{} of {count} requests failed: {failures:?}", failures.len());
     // Clean up: stop the live one too.
     let stop = pb::StopDeployment { deployment_id: second.id.to_string(), grace_period: None };
     send_command(&control_plane, server, "cleanup", Kind::StopDeployment(stop)).await;

@@ -24,6 +24,9 @@ pub trait DomainRepository: Send + Sync {
     /// The service's domains, by hostname.
     async fn list_domains(&self, service_id: ServiceId) -> Result<Vec<Domain>, StoreError>;
 
+    /// Every domain that is not deleted, by hostname.
+    async fn list_all_domains(&self) -> Result<Vec<Domain>, StoreError>;
+
     /// Replaces the domain's fields if it is still at `revision`. Changing the hostname
     /// removes the certificate, which no longer applies.
     async fn update_domain(&self, id: DomainId, revision: i64, fields: DomainFields) -> Result<Domain, StoreError>;
@@ -193,6 +196,14 @@ impl DomainRepository for SqliteStore {
         rows.into_iter().map(Domain::try_from).collect()
     }
 
+    async fn list_all_domains(&self) -> Result<Vec<Domain>, StoreError> {
+        let rows: Vec<DomainRow> =
+            sqlx::query_as(concat!("SELECT ", columns!(), " FROM domains WHERE deleted_at IS NULL ORDER BY hostname"))
+                .fetch_all(self.pool())
+                .await?;
+        rows.into_iter().map(Domain::try_from).collect()
+    }
+
     async fn update_domain(&self, id: DomainId, revision: i64, fields: DomainFields) -> Result<Domain, StoreError> {
         let mut tx = self.begin_write().await?;
         let current = fetch(&mut tx, id).await?;
@@ -329,6 +340,8 @@ mod tests {
         assert_eq!(store.find_domain_by_hostname(&"example.com".parse().unwrap()).await.unwrap(), Some(apex.clone()));
         let listed: Vec<_> = store.list_domains(app).await.unwrap().into_iter().map(|d| d.id).collect();
         assert_eq!(listed, vec![apex.id, www.id]);
+        let all: Vec<_> = store.list_all_domains().await.unwrap().into_iter().map(|d| d.id).collect();
+        assert_eq!(all, vec![apex.id, www.id]);
     }
 
     #[tokio::test]

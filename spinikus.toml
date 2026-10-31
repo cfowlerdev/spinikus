@@ -21,3 +21,10 @@ listen = "0.0.0.0:8443"
 # <data_dir>/master.key, generated on first start.
 # master_key_file = "/etc/spinikus/master.key"   # relative paths resolve against data_dir
 # Or set SPINIKUS_SECRETS__MASTER_KEY to a base64 key (openssl rand -base64 32).
+
+[proxy]
+# Where the agent on this machine serves apps over plain HTTP. Defaults to 0.0.0.0:80;
+# in development a high loopback port needs no privileges. Generated hostnames such as
+# http://web-production-shop.localhost:8000 resolve to this machine without DNS.
+listen = "127.0.0.1:8000"
+# enabled = false   # run the agent without a proxy

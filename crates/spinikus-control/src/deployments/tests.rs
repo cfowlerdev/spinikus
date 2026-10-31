@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::{
-    NewEnvironment, NewProject, NewServer, NewService,
+    NewDomain, NewEnvironment, NewProject, NewServer, NewService,
     test_support::{control, grant, user},
 };
 
@@ -64,15 +64,37 @@ fn connect(control: &Control, server: ServerId) -> mpsc::Receiver<pb::ControlMes
     receiver
 }
 
-/// The commands sent so far.
-fn sent(agent: &mut mpsc::Receiver<pb::ControlMessage>) -> Vec<pb::Command> {
-    let mut commands = Vec::new();
+/// The commands and route tables sent so far.
+fn received(agent: &mut mpsc::Receiver<pb::ControlMessage>) -> (Vec<pb::Command>, Vec<pb::SetRoutes>) {
+    let (mut commands, mut routes) = (Vec::new(), Vec::new());
     while let Ok(message) = agent.try_recv() {
-        if let Some(control_message::Message::Command(command)) = message.message {
-            commands.push(command);
+        match message.message {
+            Some(control_message::Message::Command(command)) => commands.push(command),
+            Some(control_message::Message::SetRoutes(set)) => routes.push(set),
+            _ => {}
         }
     }
-    commands
+    (commands, routes)
+}
+
+/// The commands sent so far.
+fn sent(agent: &mut mpsc::Receiver<pb::ControlMessage>) -> Vec<pb::Command> {
+    received(agent).0
+}
+
+/// The hostnames and target deployments of a route table.
+fn table(set: &pb::SetRoutes) -> Vec<(&str, String)> {
+    set.routes
+        .iter()
+        .map(|route| {
+            let action = match &route.action {
+                Some(pb::route::Action::Proxy(target)) => format!("{}:{}", target.deployment_id, target.port),
+                Some(pb::route::Action::RedirectTo(to)) => format!("-> {to}"),
+                None => String::new(),
+            };
+            (route.hostname.as_str(), action)
+        })
+        .collect()
 }
 
 fn only(mut commands: Vec<pb::Command>) -> pb::Command {
@@ -176,6 +198,15 @@ async fn a_new_live_deployment_drains_the_previous_one() {
     let second = deploy(&setup, &mut agent).await;
     assert_eq!(status(control, first.id).await, Draining);
     control.advance_deployments().await;
+    // The routes move to the new deployment first; the old one drains once they are applied.
+    let (commands, routes) = received(&mut agent);
+    assert!(commands.is_empty(), "{commands:?}");
+    let routes = routes.last().unwrap();
+    assert_eq!(table(routes), [("web-production-shop.localhost", format!("{}:3000", second.id))]);
+    control.advance_deployments().await;
+    assert!(sent(&mut agent).is_empty());
+    control.routes_applied(setup.server.id, routes.revision).await;
+    control.advance_deployments().await;
     let stop = only(sent(&mut agent));
     let Some(Kind::StopDeployment(stop_deployment)) = &stop.kind else { panic!("{stop:?}") };
     assert_eq!(stop_deployment.deployment_id, first.id.to_string());
@@ -267,7 +298,7 @@ async fn commands_are_sent_again_when_the_agent_reconnects() {
     control.advance_deployments().await;
     assert_eq!(only(sent(&mut agent)).command_id, format!("{}/prepare", deployment.id));
 
-    control.agent_connected(setup.server.id).await;
+    control.agent_connected(setup.server.id, 0).await;
     control.advance_deployments().await;
 
     assert_eq!(only(sent(&mut agent)).command_id, format!("{}/prepare", deployment.id));
@@ -363,4 +394,75 @@ async fn checks_access_the_source_and_the_placement() {
     assert!(matches!(no_source, Err(ControlError::Invalid { field: "source", .. })), "{no_source:?}");
     assert!(matches!(no_server, Err(ControlError::Invalid { field: "server_id", .. })), "{no_server:?}");
     assert_eq!(on_embedded.server_id, embedded.id);
+}
+
+#[tokio::test]
+async fn routes_follow_live_deployments_domains_and_the_base_domain() {
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    let mut agent = connect(control, setup.server.id);
+    let other = control.create_server(&setup.admin, NewServer { name: "web-2".to_string() }).await.unwrap();
+    let mut other_agent = connect(control, other.id);
+    let apex = NewDomain { hostname: "shop.example.com".to_string(), redirect_to: None };
+    let apex = control.create_domain(&setup.admin, setup.service.id, apex).await.unwrap();
+    let www = NewDomain { hostname: "www.shop.example.com".to_string(), redirect_to: Some(apex.id) };
+    control.create_domain(&setup.admin, setup.service.id, www).await.unwrap();
+
+    control.advance_deployments().await;
+    let (_, before) = received(&mut agent);
+    let live = deploy(&setup, &mut agent).await;
+    control.advance_deployments().await;
+    let (_, after) = received(&mut agent);
+    let after = after.last().unwrap();
+    control.routes_applied(setup.server.id, after.revision).await;
+    control.advance_deployments().await;
+    let (_, unchanged) = received(&mut agent);
+    control.set_setting(&setup.admin, crate::settings::BASE_DOMAIN, 0, json!("apps.example.com")).await.unwrap();
+    control.advance_deployments().await;
+    let (_, moved) = received(&mut agent);
+    let (_, elsewhere) = received(&mut other_agent);
+
+    assert_eq!(before.iter().map(|set| set.routes.len()).collect::<Vec<_>>(), [0]);
+    let target = format!("{}:3000", live.id);
+    assert_eq!(
+        table(after),
+        [
+            ("shop.example.com", target.clone()),
+            ("web-production-shop.localhost", target.clone()),
+            ("www.shop.example.com", "-> shop.example.com".to_string()),
+        ]
+    );
+    assert!(unchanged.is_empty(), "{unchanged:?}");
+    assert_eq!(table(&moved[0])[1], ("web-production-shop.apps.example.com", target));
+    assert!(moved[0].revision > after.revision);
+    assert_eq!(elsewhere.iter().map(|set| set.routes.len()).collect::<Vec<_>>(), [0]);
+}
+
+#[tokio::test]
+async fn an_agent_with_the_current_routes_needs_none() {
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    let mut agent = connect(control, setup.server.id);
+    let first = deploy(&setup, &mut agent).await;
+    control.advance_deployments().await;
+    let (_, routes) = received(&mut agent);
+    let revision = routes.last().unwrap().revision;
+
+    // Reconnects with the routes it has: nothing to send, and they count as applied.
+    control.agent_connected(setup.server.id, revision).await;
+    control.advance_deployments().await;
+    let (_, again) = received(&mut agent);
+    let second = deploy(&setup, &mut agent).await;
+    control.advance_deployments().await;
+    let (_, moved) = received(&mut agent);
+    // Reconnects with older routes: they are sent again.
+    control.agent_connected(setup.server.id, revision).await;
+    control.advance_deployments().await;
+    let (commands, resent) = received(&mut agent);
+
+    assert!(again.is_empty(), "{again:?}");
+    assert_eq!(table(&moved[0])[0].1, format!("{}:3000", second.id));
+    assert_eq!(resent.iter().map(|set| set.revision).collect::<Vec<_>>(), [moved[0].revision]);
+    assert!(commands.is_empty(), "the old deployment waits for the routes: {commands:?}");
+    assert_eq!(status(control, first.id).await, Draining);
 }

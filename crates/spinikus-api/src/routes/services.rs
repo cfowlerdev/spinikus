@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     response::{Json, Response},
 };
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use spinikus_control::{Control, NewService, ServiceChanges};
 use spinikus_core::{
     id::{EnvironmentId, ServerId, ServiceId},
@@ -14,6 +14,7 @@ use crate::{
     error::ApiError,
     extract::{Authenticated, Body, IfMatch, Path, Query},
     response::{PageBody, PageParams, created, tagged},
+    routes::present,
 };
 
 #[derive(Deserialize)]
@@ -38,11 +39,6 @@ pub struct Update {
     /// `null` moves the service back to the embedded server; omitted keeps the placement.
     #[serde(default, deserialize_with = "present")]
     server_id: Option<Option<ServerId>>,
-}
-
-/// Tells an explicit `null` (`Some(None)`) apart from a missing field (`None`, by default).
-fn present<'de, T: Deserialize<'de>, D: Deserializer<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
-    T::deserialize(deserializer).map(Some)
 }
 
 pub async fn list(

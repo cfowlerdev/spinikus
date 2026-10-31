@@ -12,6 +12,9 @@
 //! image leads to starting, a verified start to `live` (which drains the previous live
 //! deployment), and a stopped draining deployment to `superseded`. A result only counts
 //! from the agent of the server the deployment runs on.
+//!
+//! Each pass also brings the servers' route tables up to date ([`super::routes`]), and a
+//! draining deployment is stopped only once no applied route points at it.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -27,7 +30,7 @@ use spinikus_core::{
     server::Server,
 };
 use spinikus_proto::agent::v1::{self as pb, FailureReason, command_result::Outcome, control_message};
-use spinikus_store::{DeploymentRepository, ServerRepository, StoreError};
+use spinikus_store::{DeploymentRepository, RouteRepository, ServerRepository, StoreError};
 use tokio::{
     sync::{Mutex, Notify},
     time::Instant,
@@ -63,11 +66,14 @@ impl Default for DeploymentTimings {
 }
 
 pub(crate) struct Runner {
-    timings: DeploymentTimings,
+    pub(super) timings: DeploymentTimings,
     wake: Notify,
     /// When each unanswered command was last sent, and to which server. Held across a whole
     /// pass or result, so they never interleave.
     sent: Mutex<HashMap<String, (ServerId, Instant)>>,
+    /// The route table revision last sent to each server's agent, and when. Locked inside
+    /// `sent`, never on its own while waiting for `sent`.
+    pub(super) routes_sent: Mutex<HashMap<ServerId, (u64, Instant)>>,
     /// Timeouts and lost agents count from here at the earliest, so a restarted control
     /// plane gives agents time to reconnect and report.
     started_at: Timestamp,
@@ -75,7 +81,7 @@ pub(crate) struct Runner {
 
 impl Runner {
     pub(crate) fn new(timings: DeploymentTimings) -> Self {
-        Self { timings, wake: Notify::new(), sent: Mutex::default(), started_at: Timestamp::now() }
+        Self { timings, wake: Notify::new(), sent: Mutex::default(), routes_sent: Mutex::default(), started_at: Timestamp::now() }
     }
 }
 
@@ -105,10 +111,14 @@ impl Control {
         self.runner().wake.notify_one();
     }
 
-    /// The agent may have lost what it was sent: send it again now.
-    pub(crate) async fn agent_connected(&self, server: ServerId) {
-        self.runner().sent.lock().await.retain(|_, (to, _)| *to != server);
-        self.wake_deployments();
+    /// The agent may have lost what it was sent: send it again now. `routes_revision` is the
+    /// route table it already has.
+    pub(crate) async fn agent_connected(&self, server: ServerId, routes_revision: u64) {
+        let mut sent = self.runner().sent.lock().await;
+        sent.retain(|_, (to, _)| *to != server);
+        self.runner().routes_sent.lock().await.remove(&server);
+        drop(sent);
+        self.routes_applied(server, routes_revision).await;
     }
 
     pub(crate) async fn advance_deployments(&self) {
@@ -123,6 +133,10 @@ impl Control {
         // Forget commands of deployments that have finished.
         let ids: HashSet<String> = active.iter().map(|deployment| deployment.id.to_string()).collect();
         sent.retain(|command, _| command.split_once('/').is_some_and(|(deployment, _)| ids.contains(deployment)));
+        // Before draining deployments are looked at, so they see the routes that replace them.
+        if let Err(error) = self.sync_routes().await {
+            tracing::error!(%error, "failed to update the route tables");
+        }
 
         let mut busy: HashSet<ServiceId> = active
             .iter()
@@ -179,7 +193,15 @@ impl Control {
                 self.store().transition_deployment(deployment.id, superseded, None, None, Actor::System).await?;
                 return Ok(());
             }
-            DeploymentStatus::Draining => self.stop_command(&deployment, Step::Stop)?,
+            DeploymentStatus::Draining => {
+                // Wait until the proxy no longer sends it requests.
+                if let Some(routes) = self.store().get_route_table(deployment.server_id).await?
+                    && (!routes.applied() || routes.table.targets(deployment.id))
+                {
+                    return Ok(());
+                }
+                self.stop_command(&deployment, Step::Stop)?
+            }
             _ => return Ok(()),
         };
         self.send_command(sent, deployment.server_id, command).await;

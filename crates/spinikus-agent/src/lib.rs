@@ -4,8 +4,9 @@
 //! reconnects with backoff, and certificate renewal. Over that stream it reports the
 //! containers Spinikus manages on this server, through the container [`runtime`], and
 //! runs commands: pulling an image, starting a deployment and verifying it with its health
-//! check, and stopping and restarting containers. The builder, release commands and proxy
-//! come next.
+//! check, and stopping and restarting containers. It applies the route tables it is sent
+//! to its proxy ([`spinikus_proxy`]), which serves the apps on this server. The builder,
+//! release commands and TLS come next.
 
 mod backoff;
 mod certificate;
@@ -18,6 +19,7 @@ mod facts;
 mod files;
 mod health;
 mod report;
+mod routes;
 pub mod runtime;
 
 pub use backoff::Backoff;

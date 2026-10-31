@@ -1,0 +1,212 @@
+//! The proxy over real connections, in front of a small HTTP backend.
+
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::{Request, Response, StatusCode, body::Incoming, header, service::service_fn};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use spinikus_core::{
+    id::{DeploymentId, ServiceId},
+    route::{ProxyTarget, Route, RouteAction},
+};
+use spinikus_proxy::{Proxy, Upstreams, serve};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::oneshot,
+};
+
+#[derive(Default)]
+struct FixedUpstreams {
+    addresses: Mutex<HashMap<DeploymentId, SocketAddr>>,
+    failed: Mutex<Vec<SocketAddr>>,
+}
+
+#[async_trait]
+impl Upstreams for FixedUpstreams {
+    async fn resolve(&self, target: &ProxyTarget) -> Option<SocketAddr> {
+        self.addresses.lock().unwrap().get(&target.deployment_id).copied()
+    }
+
+    fn failed(&self, _: &ProxyTarget, address: SocketAddr) {
+        self.failed.lock().unwrap().push(address);
+    }
+}
+
+/// Answers with the request's path and forwarding headers, and switches `/echo` to an
+/// echoing protocol.
+async fn backend() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|mut request: Request<Incoming>| async move {
+                if request.uri().path() == "/echo" {
+                    let upgrade = hyper::upgrade::on(&mut request);
+                    tokio::spawn(async move {
+                        let mut io = TokioIo::new(upgrade.await.unwrap());
+                        let mut buffer = [0; 64];
+                        let read = io.read(&mut buffer).await.unwrap();
+                        io.write_all(&buffer[..read]).await.unwrap();
+                    });
+                    let response = Response::builder()
+                        .status(StatusCode::SWITCHING_PROTOCOLS)
+                        .header(header::CONNECTION, "upgrade")
+                        .header(header::UPGRADE, "echo")
+                        .body(Full::new(Bytes::new()))
+                        .unwrap();
+                    return Ok::<_, Infallible>(response);
+                }
+                let header =
+                    |name: &str| request.headers().get(name).map(|value| value.to_str().unwrap().to_string()).unwrap_or_default();
+                let body = format!(
+                    "path={} host={} xff={} xfh={} xfp={} te={}",
+                    request.uri().path_and_query().unwrap(),
+                    header("host"),
+                    header("x-forwarded-for"),
+                    header("x-forwarded-host"),
+                    header("x-forwarded-proto"),
+                    header("te"),
+                );
+                Ok(Response::builder().header("keep-alive", "timeout=5").body(Full::new(Bytes::from(body))).unwrap())
+            });
+            tokio::spawn(async move {
+                let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                    .serve_connection_with_upgrades(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    address
+}
+
+struct Running {
+    proxy: Arc<Proxy>,
+    upstreams: Arc<FixedUpstreams>,
+    address: SocketAddr,
+    _stop: oneshot::Sender<()>,
+}
+
+async fn start() -> Running {
+    let upstreams = Arc::new(FixedUpstreams::default());
+    let proxy = Proxy::new(upstreams.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    tokio::spawn(serve(proxy.clone(), listener, async move {
+        let _ = stopped.await;
+    }));
+    Running { proxy, upstreams, address, _stop: stop }
+}
+
+fn proxy_route(hostname: &str) -> (Route, ProxyTarget) {
+    let target = ProxyTarget { service_id: ServiceId::new(), deployment_id: DeploymentId::new(), port: 80 };
+    (Route { hostname: hostname.parse().unwrap(), action: RouteAction::Proxy(target.clone()) }, target)
+}
+
+/// Sends a raw HTTP/1.1 request and returns the status, headers and body.
+async fn get(address: SocketAddr, host: &str, path: &str, extra: &str) -> (u16, String, String) {
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n{extra}\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let status = head[9..12].parse().unwrap();
+    (status, head.to_ascii_lowercase(), body.to_string())
+}
+
+#[tokio::test]
+async fn forwards_by_host_with_forwarding_headers() {
+    let running = start().await;
+    let backend = backend().await;
+    let (route, target) = proxy_route("app.example.com");
+    running.upstreams.addresses.lock().unwrap().insert(target.deployment_id, backend);
+    running.proxy.set_routes(&[route]);
+
+    let (status, head, body) = get(running.address, "App.Example.com:8000", "/a?b=c", "TE: trailers\r\n").await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body, "path=/a?b=c host=App.Example.com:8000 xff=127.0.0.1 xfh=App.Example.com:8000 xfp=http te=");
+    assert!(!head.contains("keep-alive: timeout"), "{head}");
+}
+
+#[tokio::test]
+async fn redirects_unknown_hosts_and_missing_apps() {
+    let running = start().await;
+    let (route, _) = proxy_route("app.example.com");
+    let (stopped, _) = proxy_route("stopped.example.com");
+    let (gone, gone_target) = proxy_route("gone.example.com");
+    // Nothing listens on a port taken from a listener that is dropped.
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+    running.upstreams.addresses.lock().unwrap().insert(gone_target.deployment_id, closed);
+    let redirect = Route {
+        hostname: "www.example.com".parse().unwrap(),
+        action: RouteAction::Redirect { to: "app.example.com".parse().unwrap() },
+    };
+    running.proxy.set_routes(&[route, stopped, gone, redirect]);
+
+    let (moved, head, _) = get(running.address, "www.example.com:8000", "/x?y=1", "").await;
+    let (unknown, _, unknown_body) = get(running.address, "nope.example.com", "/", "").await;
+    let (not_running, _, _) = get(running.address, "stopped.example.com", "/", "").await;
+    let (unreachable, _, _) = get(running.address, "gone.example.com", "/", "").await;
+
+    assert_eq!(moved, 308);
+    assert!(head.contains("location: http://app.example.com:8000/x?y=1"), "{head}");
+    assert_eq!((unknown, unknown_body.trim()), (404, "no app is served at nope.example.com"));
+    assert_eq!(not_running, 503);
+    assert_eq!(unreachable, 502);
+    assert_eq!(*running.upstreams.failed.lock().unwrap(), [closed]);
+}
+
+#[tokio::test]
+async fn new_routes_replace_the_old() {
+    let running = start().await;
+    let backend = backend().await;
+    let (old, old_target) = proxy_route("old.example.com");
+    let (new, new_target) = proxy_route("new.example.com");
+    for target in [&old_target, &new_target] {
+        running.upstreams.addresses.lock().unwrap().insert(target.deployment_id, backend);
+    }
+    running.proxy.set_routes(&[old]);
+    let (before, _, _) = get(running.address, "old.example.com", "/", "").await;
+
+    running.proxy.set_routes(&[new]);
+
+    assert_eq!(before, 200);
+    assert_eq!(get(running.address, "old.example.com", "/", "").await.0, 404);
+    assert_eq!(get(running.address, "new.example.com", "/", "").await.0, 200);
+}
+
+#[tokio::test]
+async fn splices_upgraded_connections() {
+    let running = start().await;
+    let backend = backend().await;
+    let (route, target) = proxy_route("app.example.com");
+    running.upstreams.addresses.lock().unwrap().insert(target.deployment_id, backend);
+    running.proxy.set_routes(&[route]);
+
+    let mut stream = TcpStream::connect(running.address).await.unwrap();
+    let request = "GET /echo HTTP/1.1\r\nHost: app.example.com\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n";
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(stream.read_u8().await.unwrap());
+    }
+    stream.write_all(b"hello").await.unwrap();
+    let mut echoed = [0; 5];
+    stream.read_exact(&mut echoed).await.unwrap();
+
+    let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 101"), "{head}");
+    assert!(head.contains("upgrade: echo"), "{head}");
+    assert_eq!(&echoed, b"hello");
+}

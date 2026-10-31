@@ -7,6 +7,7 @@
 //! placement, or the embedded server). Later edits to the service never change it.
 
 mod commands;
+mod routes;
 mod runner;
 
 use serde_json::json;

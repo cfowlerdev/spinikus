@@ -284,3 +284,56 @@ async fn sets_a_source_and_deploys_it() {
     assert_eq!(path, ["queued", "canceled"]);
     assert_eq!(again.status, StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn manages_domains_and_the_base_domain() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+    let project = api.send(Method::POST, "/api/v1/projects", token, &[], Some(json!({ "name": "Shop" }))).await;
+    let environments = format!("/api/v1/projects/{}/environments", project.body["id"].as_str().unwrap());
+    let production =
+        api.send(Method::POST, &environments, token, &[], Some(json!({ "name": "Production", "kind": "production" }))).await;
+    let services = format!("/api/v1/environments/{}/services", production.body["id"].as_str().unwrap());
+    let service = api.send(Method::POST, &services, token, &[], Some(json!({ "name": "Web", "kind": "app" }))).await;
+    let domains = format!("/api/v1/services/{}/domains", service.body["id"].as_str().unwrap());
+
+    let base = api.send(Method::GET, "/api/v1/settings/base_domain", token, &[], None).await;
+    let set = api
+        .send(
+            Method::PUT,
+            "/api/v1/settings/base_domain",
+            token,
+            &[(header::IF_MATCH, base.header(header::ETAG))],
+            Some(json!({ "value": "apps.example.com" })),
+        )
+        .await;
+    let unknown = api.send(Method::GET, "/api/v1/settings/theme", token, &[], None).await;
+    let apex = api.send(Method::POST, &domains, token, &[], Some(json!({ "hostname": "shop.example.com" }))).await;
+    let www = json!({ "hostname": "www.shop.example.com", "redirect_to": apex.body["id"] });
+    let www = api.send(Method::POST, &domains, token, &[], Some(www)).await;
+    let reserved = api.send(Method::POST, &domains, token, &[], Some(json!({ "hostname": "x.apps.example.com" }))).await;
+    let www_path = www.header(header::LOCATION).to_string();
+    let unredirected = api
+        .send(
+            Method::PATCH,
+            &www_path,
+            token,
+            &[(header::IF_MATCH, www.header(header::ETAG))],
+            Some(json!({ "redirect_to": null })),
+        )
+        .await;
+    let listed = api.send(Method::GET, &domains, token, &[], None).await;
+    let deleted = api.send(Method::DELETE, &www_path, token, &[], None).await;
+
+    assert_eq!((base.body["value"].as_str(), base.header(header::ETAG)), (Some("localhost"), "\"0\""));
+    assert_eq!((set.status, &set.body["value"], set.header(header::ETAG)), (StatusCode::OK, &json!("apps.example.com"), "\"1\""));
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert_eq!(apex.status, StatusCode::CREATED);
+    assert_eq!(www.body["redirect_to"], apex.body["id"]);
+    assert_eq!((reserved.status, &reserved.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("hostname")));
+    assert_eq!((unredirected.status, &unredirected.body["redirect_to"]), (StatusCode::OK, &json!(null)));
+    assert_eq!(listed.body["generated_hostname"], "web-production-shop.apps.example.com");
+    assert_eq!(listed.body["domains"].as_array().unwrap().len(), 2);
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+}
