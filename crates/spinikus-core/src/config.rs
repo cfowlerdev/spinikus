@@ -49,6 +49,26 @@ fn default_http_listen() -> SocketAddr {
     (Ipv4Addr::LOCALHOST, 8080).into()
 }
 
+/// Agent listener settings from the `[agents]` table of `spinikus.toml`.
+#[derive(Deserialize)]
+pub struct AgentsConfig {
+    /// Where agents connect, over mutual TLS. Defaults to `0.0.0.0:8443`, so agents on
+    /// other servers can reach it: every call but enrollment needs a client certificate
+    /// from the internal CA, and enrollment needs a join token.
+    #[serde(default = "default_agents_listen")]
+    pub listen: SocketAddr,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self { listen: default_agents_listen() }
+    }
+}
+
+fn default_agents_listen() -> SocketAddr {
+    (Ipv4Addr::UNSPECIFIED, 8443).into()
+}
+
 /// Instance configuration, the schema of `spinikus.toml`.
 #[derive(Deserialize)]
 pub struct SpinikusConfig {
@@ -62,6 +82,8 @@ pub struct SpinikusConfig {
     pub secrets: SecretsConfig,
     #[serde(default)]
     pub http: HttpConfig,
+    #[serde(default)]
+    pub agents: AgentsConfig,
 }
 
 impl SpinikusConfig {
@@ -90,6 +112,7 @@ impl Default for SpinikusConfig {
             database: DatabaseConfig::default(),
             secrets: SecretsConfig::default(),
             http: HttpConfig::default(),
+            agents: AgentsConfig::default(),
         }
     }
 }

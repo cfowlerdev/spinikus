@@ -5,7 +5,7 @@ use spinikus_control::Control;
 use spinikus_core::config::SpinikusConfig;
 use spinikus_store::SqliteStore;
 use sqlx::SqlitePool;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::watch};
 
 use crate::{cli::ServerRunArgs, secrets};
 
@@ -15,20 +15,57 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
         tracing::warn!("No users yet: create the first admin with `spinikus admin create-user`");
     }
 
-    let address = args.listen.unwrap_or(config.http.listen);
-    let listener = TcpListener::bind(address).await.with_context(|| format!("Failed to listen on {address}"))?;
-    let app = spinikus_api::router(control).into_make_service_with_connect_info::<SocketAddr>();
-    tracing::info!(%address, "Server started, press Ctrl+C to stop");
-    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await.context("HTTP server failed")?;
+    let http_address = args.listen.unwrap_or(config.http.listen);
+    let agent_address = args.agent_listen.unwrap_or(config.agents.listen);
+    let http_listener = TcpListener::bind(http_address).await.with_context(|| format!("Failed to listen on {http_address}"))?;
+    let agent_listener =
+        TcpListener::bind(agent_address).await.with_context(|| format!("Failed to listen for agents on {agent_address}"))?;
+
+    let (stop, stopped) = watch::channel(false);
+    let http =
+        axum::serve(http_listener, spinikus_api::router(control.clone()).into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(until(stopped.clone()));
+    let agents = spinikus_control::agents::serve(control, agent_listener, until(stopped));
+    tracing::info!(%http_address, "Server started, press Ctrl+C to stop");
+
+    let mut http = tokio::spawn(async move { http.await.context("HTTP server failed") });
+    let mut agents =
+        tokio::spawn(async move { agents.await.map_err(|error| anyhow::anyhow!(error)).context("Agent listener failed") });
+
+    // Run until Ctrl+C or until either listener stops, then stop both and wait for them.
+    let first = tokio::select! {
+        signal = tokio::signal::ctrl_c() => Stopped::Signal(signal),
+        result = &mut http => Stopped::Http(joined(result)),
+        result = &mut agents => Stopped::Agents(joined(result)),
+    };
+    let _ = stop.send(true);
+    let result = match first {
+        Stopped::Signal(signal) => {
+            tracing::info!("Shutting down");
+            let (http, agents) = tokio::join!(http, agents);
+            signal.context("Failed to listen for the shutdown signal").and(joined(http)).and(joined(agents))
+        }
+        Stopped::Http(result) => result.and(joined(agents.await)),
+        Stopped::Agents(result) => result.and(joined(http.await)),
+    };
     tracing::info!("Shut down");
-    Ok(())
+    result
 }
 
-async fn shutdown_signal() {
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => tracing::info!("Shutting down"),
-        Err(error) => tracing::error!(%error, "Failed to listen for the shutdown signal"),
-    }
+/// What ended the server first.
+enum Stopped {
+    Signal(std::io::Result<()>),
+    Http(anyhow::Result<()>),
+    Agents(anyhow::Result<()>),
+}
+
+fn joined(result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> anyhow::Result<()> {
+    result.context("Listener task panicked")?
+}
+
+/// Resolves once `stopped` turns true.
+async fn until(mut stopped: watch::Receiver<bool>) {
+    let _ = stopped.wait_for(|stopped| *stopped).await;
 }
 
 pub async fn migrate(config: &SpinikusConfig) -> anyhow::Result<()> {

@@ -6,18 +6,22 @@
 //! messages for it through the [`AgentHub`].
 //!
 //! The server an agent speaks for comes from an [`AgentIdentity`] in the request
-//! extensions, which the mTLS layer sets from the client certificate. Without one, a
-//! connection is refused.
+//! extensions, which [`serve`] sets from the verified client certificate. Without one,
+//! only `Enroll` is allowed.
 
 mod convert;
 mod hub;
+mod listener;
 mod service;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tls_tests;
 
 use std::time::Duration;
 
 pub use hub::{AgentHub, NotConnected};
+pub use listener::{ListenerError, serve};
 pub use service::AgentGrpc;
 use spinikus_core::id::ServerId;
 

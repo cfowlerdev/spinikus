@@ -1,5 +1,6 @@
 mod environments;
 mod projects;
+mod servers;
 mod services;
 mod session;
 
@@ -20,4 +21,8 @@ pub fn v1() -> Router<Control> {
         .route("/environments/{id}", get(environments::show).patch(environments::update).delete(environments::delete))
         .route("/environments/{id}/services", get(services::list).post(services::create))
         .route("/services/{id}", get(services::show).patch(services::update).delete(services::delete))
+        .route("/servers", get(servers::list).post(servers::create))
+        .route("/servers/{id}", get(servers::show))
+        .route("/servers/{id}/revoke", post(servers::revoke))
+        .route("/servers/{id}/enrollment-tokens", post(servers::create_join_token))
 }

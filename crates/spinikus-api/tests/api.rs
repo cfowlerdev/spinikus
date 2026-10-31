@@ -217,3 +217,26 @@ async fn malformed_requests_are_problems_too() {
     assert_eq!((bad_if_match.status, &bad_if_match.body["code"]), (StatusCode::BAD_REQUEST, &json!("invalid_header")));
     assert_eq!(not_json.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn admins_create_servers_and_join_tokens() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+
+    let created = api.send(Method::POST, "/api/v1/servers", token, &[], Some(json!({ "name": "web-1" }))).await;
+    let id = created.body["id"].as_str().unwrap().to_string();
+    let join = api.send(Method::POST, &format!("/api/v1/servers/{id}/enrollment-tokens"), token, &[], None).await;
+    let revoked = api.send(Method::POST, &format!("/api/v1/servers/{id}/revoke"), token, &[], None).await;
+    let shown = api.send(Method::GET, &format!("/api/v1/servers/{id}"), token, &[], None).await;
+    let listed = api.send(Method::GET, "/api/v1/servers", token, &[], None).await;
+
+    assert_eq!((created.status, &created.body["status"]), (StatusCode::CREATED, &json!("pending")));
+    assert_eq!(join.status, StatusCode::CREATED);
+    assert!(join.body["token"].as_str().unwrap().starts_with("spj_"));
+    assert!(join.body["ca_fingerprint"].as_str().unwrap().starts_with("sha256:"));
+    assert_eq!(join.body["enrollment_token"]["server_id"], id.as_str());
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT);
+    assert_eq!(shown.body["status"], "revoked");
+    assert_eq!(listed.body["items"], json!([]), "revoked servers are not listed");
+}

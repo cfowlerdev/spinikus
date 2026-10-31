@@ -34,6 +34,9 @@ pub struct ServerRunArgs {
     /// Address for the API and web UI, overriding `[http] listen`, e.g. 0.0.0.0:8080
     #[arg(long)]
     pub listen: Option<std::net::SocketAddr>,
+    /// Address for agents to connect to, overriding `[agents] listen`, e.g. 0.0.0.0:8443
+    #[arg(long)]
+    pub agent_listen: Option<std::net::SocketAddr>,
 }
 
 #[derive(clap::Args)]

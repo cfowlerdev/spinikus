@@ -15,7 +15,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use super::{AgentIdentity, AgentTimings, MIN_PROTOCOL_VERSION, convert, hub::OUTBOUND_BUFFER};
-use crate::Control;
+use crate::{Control, ControlError};
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
@@ -39,22 +39,30 @@ impl AgentGrpc {
 
 #[tonic::async_trait]
 impl AgentService for AgentGrpc {
-    async fn enroll(&self, _: Request<pb::EnrollRequest>) -> Result<Response<pb::EnrollResponse>, Status> {
-        Err(Status::unimplemented("enrollment is not available yet"))
+    async fn enroll(&self, request: Request<pb::EnrollRequest>) -> Result<Response<pb::EnrollResponse>, Status> {
+        let request = request.into_inner();
+        let enrolled = self.control.enroll_agent(&request.join_token, &request.csr_der).await.map_err(status)?;
+        Ok(Response::new(pb::EnrollResponse {
+            server_id: enrolled.server_id.to_string(),
+            certificate_chain_pem: enrolled.certificate_chain_pem,
+            ca_certificate_pem: enrolled.ca_certificate_pem,
+        }))
     }
 
     async fn renew_certificate(
         &self,
-        _: Request<pb::RenewCertificateRequest>,
+        request: Request<pb::RenewCertificateRequest>,
     ) -> Result<Response<pb::RenewCertificateResponse>, Status> {
-        Err(Status::unimplemented("certificate renewal is not available yet"))
+        let AgentIdentity(server) = identity(&request)?;
+        let certificate_chain_pem =
+            self.control.renew_agent_certificate(server, &request.into_inner().csr_der).await.map_err(status)?;
+        Ok(Response::new(pb::RenewCertificateResponse { certificate_chain_pem }))
     }
 
     type ConnectStream = BoxStream<ControlMessage>;
 
     async fn connect(&self, request: Request<Streaming<AgentMessage>>) -> Result<Response<Self::ConnectStream>, Status> {
-        let AgentIdentity(server) =
-            request.extensions().get::<AgentIdentity>().copied().ok_or_else(|| Status::unauthenticated("no agent identity"))?;
+        let AgentIdentity(server) = identity(&request)?;
         let mut inbound = request.into_inner();
 
         let hello = match timeout(self.timings.hello_timeout, inbound.message()).await {
@@ -116,6 +124,21 @@ impl AgentService for AgentGrpc {
 
     async fn push_stats(&self, _: Request<Streaming<pb::StatsBatch>>) -> Result<Response<pb::PushStatsResponse>, Status> {
         Err(Status::unimplemented("stats are not available yet"))
+    }
+}
+
+/// The server the request is from, proven by its client certificate.
+fn identity<T>(request: &Request<T>) -> Result<AgentIdentity, Status> {
+    request.extensions().get::<AgentIdentity>().copied().ok_or_else(|| Status::unauthenticated("no agent identity"))
+}
+
+/// A gRPC status for a service layer error. Internal details stay in the log.
+fn status(error: ControlError) -> Status {
+    match error {
+        ControlError::Invalid { .. } => Status::invalid_argument(error.to_string()),
+        ControlError::InvalidCredentials => Status::unauthenticated("the join token is invalid, used or expired"),
+        ControlError::NotFound { .. } | ControlError::Forbidden => Status::permission_denied("the server is unknown or revoked"),
+        _ => Status::internal("internal error"),
     }
 }
 

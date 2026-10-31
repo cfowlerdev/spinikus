@@ -8,6 +8,11 @@ json = false
 # Where the API and web UI listen. 127.0.0.1 is this machine only.
 listen = "127.0.0.1:8080"
 
+[agents]
+# Where agents connect, over mutual TLS. Every call but enrollment needs a client
+# certificate from the internal CA, and enrollment needs a join token.
+listen = "0.0.0.0:8443"
+
 [database]
 # path = "spinikus.db"   # relative paths resolve against data_dir
 

@@ -32,7 +32,7 @@ pub enum ControlError {
     AlreadySetUp,
     /// Something went wrong that the caller cannot fix, such as a database error.
     #[error("internal error")]
-    Internal(#[source] StoreError),
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl ControlError {
@@ -55,6 +55,14 @@ impl ControlError {
     }
 }
 
+impl ControlError {
+    /// An internal error, logged here since clients only see "internal error".
+    pub(crate) fn internal(context: &'static str, error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        tracing::error!(%error, "{context}");
+        Self::Internal(Box::new(error))
+    }
+}
+
 impl From<StoreError> for ControlError {
     fn from(error: StoreError) -> Self {
         match error {
@@ -68,7 +76,7 @@ impl From<StoreError> for ControlError {
             StoreError::InvalidTransition(transition) => Self::InvalidTransition(transition),
             other => {
                 tracing::error!(error = %other, "store error");
-                Self::Internal(other)
+                Self::Internal(Box::new(other))
             }
         }
     }
