@@ -2,22 +2,29 @@
 //! waiting out its grace period) never holds up the connection, and its result goes out
 //! on whichever connection is open when it finishes. Delivery is at-least-once: a command
 //! ID that is still running is ignored, and one that finished is answered with its stored
-//! result.
+//! result. Progress (phases and log lines) is best effort: it is dropped while
+//! disconnected, unlike results.
 //!
 //! Commands only live in memory so far: if the agent restarts, the control plane has to
 //! send them again.
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use spinikus_core::id::DeploymentId;
 use spinikus_proto::agent::v1::{self as pb, FailureReason, command::Kind, command_result::Outcome};
-use tokio::task::{self, JoinSet};
+use tokio::{
+    sync::mpsc,
+    task::{self, JoinSet},
+};
 
-use crate::runtime::{ContainerRuntime, RuntimeError};
+use crate::{
+    deploy::{prepare_deployment, start_deployment},
+    runtime::{ContainerRuntime, RuntimeError},
+};
 
 /// How long a container gets to stop when the command does not say.
 const DEFAULT_GRACE: Duration = Duration::from_secs(10);
@@ -26,22 +33,71 @@ const MAX_GRACE: Duration = Duration::from_secs(10 * 60);
 /// How many finished results are kept to answer repeated commands.
 const KEPT_RESULTS: usize = 1024;
 
+/// How many progress messages wait for the connection before new ones are dropped.
+const PROGRESS_BUFFER: usize = 256;
+
 pub(crate) struct Commands {
     runtime: Arc<dyn ContainerRuntime>,
     tasks: JoinSet<pb::CommandResult>,
     running: HashMap<task::Id, String>,
     finished: HashMap<String, pb::CommandResult>,
     finished_order: VecDeque<String>,
+    progress_sender: mpsc::Sender<pb::CommandProgress>,
+    progress: mpsc::Receiver<pb::CommandProgress>,
+    /// Results waiting for their commands' progress to go out first.
+    ready: VecDeque<pb::CommandResult>,
+}
+
+/// Something to send the control plane about a command.
+#[derive(Debug, PartialEq)]
+pub(crate) enum CommandEvent {
+    Progress(pb::CommandProgress),
+    Finished(pb::CommandResult),
+}
+
+/// A running command's way to report its progress.
+pub(crate) struct Progress {
+    command_id: String,
+    phase: Mutex<String>,
+    sender: mpsc::Sender<pb::CommandProgress>,
+}
+
+impl Progress {
+    pub(crate) fn new(command_id: String, sender: mpsc::Sender<pb::CommandProgress>) -> Self {
+        Self { command_id, phase: Mutex::default(), sender }
+    }
+
+    /// Moves on to a new step, such as "pulling image".
+    pub(crate) fn phase(&self, phase: &str) {
+        *self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = phase.to_string();
+        self.send(Vec::new());
+    }
+
+    /// A log line for the current step. Never pass it a secret.
+    pub(crate) fn line(&self, text: String) {
+        let line = pb::LogLine { at: Some(std::time::SystemTime::now().into()), stream: pb::LogStream::Stdout.into(), text };
+        self.send(vec![line]);
+    }
+
+    fn send(&self, log_lines: Vec<pb::LogLine>) {
+        let phase = self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let progress = pb::CommandProgress { command_id: self.command_id.clone(), phase, log_lines };
+        let _ = self.sender.try_send(progress);
+    }
 }
 
 impl Commands {
     pub(crate) fn new(runtime: Arc<dyn ContainerRuntime>) -> Self {
+        let (progress_sender, progress) = mpsc::channel(PROGRESS_BUFFER);
         Self {
             runtime,
             tasks: JoinSet::new(),
             running: HashMap::new(),
             finished: HashMap::new(),
             finished_order: VecDeque::new(),
+            progress_sender,
+            progress,
+            ready: VecDeque::new(),
         }
     }
 
@@ -50,8 +106,9 @@ impl Commands {
         self.running.values().cloned().collect()
     }
 
+    /// Whether there is anything to wait for with [`Commands::next`].
     pub(crate) fn busy(&self) -> bool {
-        !self.tasks.is_empty()
+        !self.tasks.is_empty() || !self.progress.is_empty() || !self.ready.is_empty()
     }
 
     /// Starts a command. Returns a result to send right away instead: the stored one for a
@@ -65,14 +122,23 @@ impl Commands {
             return None;
         }
         let runtime = self.runtime.clone();
+        let progress = Progress::new(id.clone(), self.progress_sender.clone());
         let work = match command.kind {
+            Some(Kind::PrepareDeployment(prepare)) => {
+                tracing::info!(command = id, deployment = prepare.deployment_id, "preparing a deployment");
+                Box::pin(async move { prepare_deployment(&*runtime, prepare, &progress).await }) as Work
+            }
+            Some(Kind::StartDeployment(start)) => {
+                tracing::info!(command = id, deployment = start.deployment_id, "starting a deployment");
+                Box::pin(async move { start_deployment(&*runtime, start, &progress).await })
+            }
             Some(Kind::StopDeployment(stop)) => {
                 tracing::info!(command = id, deployment = stop.deployment_id, "stopping a deployment");
-                Box::pin(async move { stop_deployment(&*runtime, stop).await }) as Work
+                Box::pin(async move { stop_deployment(&*runtime, stop).await.map(|()| pb::CommandSucceeded::default()) })
             }
             Some(Kind::RestartInstance(restart)) => {
                 tracing::info!(command = id, container = restart.container_id, "restarting a container");
-                Box::pin(async move { restart_instance(&*runtime, restart).await })
+                Box::pin(async move { restart_instance(&*runtime, restart).await.map(|()| pb::CommandSucceeded::default()) })
             }
             kind => {
                 // The rest come with the builder, proxy and sessions.
@@ -90,12 +156,32 @@ impl Commands {
         None
     }
 
-    /// The next command to finish, once it is recorded as finished. Pends while none run.
-    pub(crate) async fn next_finished(&mut self) -> pb::CommandResult {
-        let (task, finished) = match self.tasks.join_next_with_id().await {
-            Some(Ok((task, finished))) => (task, Ok(finished)),
-            Some(Err(error)) => (error.id(), Err(error)),
-            None => std::future::pending().await,
+    /// The next progress report, or the next command to finish (recorded as finished by
+    /// then). A command's progress always comes before its result. Pends while not busy.
+    pub(crate) async fn next(&mut self) -> CommandEvent {
+        loop {
+            if let Ok(progress) = self.progress.try_recv() {
+                return CommandEvent::Progress(progress);
+            }
+            if let Some(finished) = self.ready.pop_front() {
+                return CommandEvent::Finished(finished);
+            }
+            tokio::select! {
+                biased;
+                Some(progress) = self.progress.recv() => return CommandEvent::Progress(progress),
+                // Progress the task sent before it ended is now queued, and goes first.
+                joined = self.tasks.join_next_with_id(), if !self.tasks.is_empty() => {
+                    let finished = self.record(joined);
+                    self.ready.push_back(finished);
+                }
+            }
+        }
+    }
+
+    fn record(&mut self, joined: Option<Result<(task::Id, pb::CommandResult), task::JoinError>>) -> pb::CommandResult {
+        let (task, finished) = match joined.expect("only joined while tasks run") {
+            Ok((task, finished)) => (task, Ok(finished)),
+            Err(error) => (error.id(), Err(error)),
         };
         let id = self.running.remove(&task).expect("every task is recorded when spawned");
         let finished = finished.unwrap_or_else(|error| {
@@ -113,7 +199,7 @@ impl Commands {
     }
 }
 
-type Work = std::pin::Pin<Box<dyn Future<Output = Result<(), pb::CommandFailed>> + Send>>;
+type Work = std::pin::Pin<Box<dyn Future<Output = Result<pb::CommandSucceeded, pb::CommandFailed>> + Send>>;
 
 fn name(kind: &Kind) -> &'static str {
     match kind {
@@ -127,15 +213,15 @@ fn name(kind: &Kind) -> &'static str {
     }
 }
 
-fn result(command_id: String, outcome: Result<(), pb::CommandFailed>) -> pb::CommandResult {
+fn result(command_id: String, outcome: Result<pb::CommandSucceeded, pb::CommandFailed>) -> pb::CommandResult {
     let outcome = match outcome {
-        Ok(()) => Outcome::Succeeded(pb::CommandSucceeded::default()),
+        Ok(succeeded) => Outcome::Succeeded(succeeded),
         Err(failed) => Outcome::Failed(failed),
     };
     pb::CommandResult { command_id, outcome: Some(outcome) }
 }
 
-fn failure(reason: FailureReason, message: impl Into<String>) -> pb::CommandFailed {
+pub(crate) fn failure(reason: FailureReason, message: impl Into<String>) -> pb::CommandFailed {
     pb::CommandFailed { reason: reason.into(), message: message.into() }
 }
 
@@ -145,7 +231,7 @@ impl From<RuntimeError> for pb::CommandFailed {
     }
 }
 
-fn grace(period: Option<prost_types::Duration>) -> Duration {
+pub(crate) fn grace(period: Option<prost_types::Duration>) -> Duration {
     period.and_then(|period| Duration::try_from(period).ok()).unwrap_or(DEFAULT_GRACE).min(MAX_GRACE)
 }
 
@@ -157,14 +243,23 @@ fn gone_is_done(outcome: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
     }
 }
 
-/// Stops and removes every container of a deployment. Containers already gone count as
-/// stopped, so repeating the command succeeds.
+/// Parses an ID field of a command.
+pub(crate) fn parse_id<T: std::str::FromStr>(field: &str, value: &str) -> Result<T, pb::CommandFailed> {
+    value.parse().map_err(|_| failure(FailureReason::Internal, format!("invalid {field} `{value}`")))
+}
+
 async fn stop_deployment(runtime: &dyn ContainerRuntime, stop: pb::StopDeployment) -> Result<(), pb::CommandFailed> {
-    let deployment: DeploymentId = stop
-        .deployment_id
-        .parse()
-        .map_err(|_| failure(FailureReason::Internal, format!("invalid deployment ID `{}`", stop.deployment_id)))?;
-    let grace = grace(stop.grace_period);
+    let deployment = parse_id("deployment ID", &stop.deployment_id)?;
+    Ok(stop_containers(runtime, deployment, grace(stop.grace_period)).await?)
+}
+
+/// Stops and removes every container of a deployment. Containers already gone count as
+/// stopped, so repeating it succeeds.
+pub(crate) async fn stop_containers(
+    runtime: &dyn ContainerRuntime,
+    deployment: DeploymentId,
+    grace: Duration,
+) -> Result<(), RuntimeError> {
     let containers = runtime.list().await?.into_iter().filter(|instance| instance.deployment_id == deployment);
     for container in containers {
         gone_is_done(runtime.stop(&container.container_id, grace).await)?;
@@ -217,7 +312,14 @@ mod tests {
     }
 
     async fn finish(commands: &mut Commands) -> pb::CommandResult {
-        timeout(Duration::from_secs(5), commands.next_finished()).await.expect("a command finished")
+        let finished = async {
+            loop {
+                if let CommandEvent::Finished(result) = commands.next().await {
+                    return result;
+                }
+            }
+        };
+        timeout(Duration::from_secs(5), finished).await.expect("a command finished")
     }
 
     fn failed(result: &pb::CommandResult) -> &pb::CommandFailed {
@@ -316,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn refuses_commands_it_cannot_run_yet() {
         let mut commands = Commands::new(Arc::new(MemoryRuntime::new()));
-        let start = Kind::StartDeployment(pb::StartDeployment::default());
+        let start = Kind::RunRelease(pb::RunRelease::default());
         let invalid = Kind::StopDeployment(pb::StopDeployment { deployment_id: "web".to_string(), grace_period: None });
 
         let refused = commands.start(command("cmd-1", start)).unwrap();
@@ -324,9 +426,40 @@ mod tests {
         commands.start(command("cmd-3", invalid));
         let invalid = finish(&mut commands).await;
 
-        assert_eq!(failed(&refused).message, "this agent cannot run StartDeployment yet");
+        assert_eq!(failed(&refused).message, "this agent cannot run RunRelease yet");
         assert_eq!(failed(&unknown).message, "this agent does not know this kind of command");
         assert_eq!(failed(&invalid).message, "invalid deployment ID `web`");
+    }
+
+    #[tokio::test]
+    async fn progress_comes_before_the_result() {
+        let runtime = Arc::new(MemoryRuntime::new());
+        runtime.add_image("web:1", "web@sha256:01");
+        let mut commands = Commands::new(runtime);
+        let prepare = pb::PrepareDeployment {
+            deployment_id: DeploymentId::new().to_string(),
+            source: Some(pb::prepare_deployment::Source::Image(pb::ImageSource { image: "web:1".to_string() })),
+            ..Default::default()
+        };
+
+        commands.start(command("cmd-1", Kind::PrepareDeployment(prepare)));
+        let mut events = Vec::new();
+        while commands.busy() {
+            events.push(timeout(Duration::from_secs(5), commands.next()).await.unwrap());
+        }
+
+        let Some((CommandEvent::Finished(result), progress)) = events.split_last() else { panic!("{events:?}") };
+        assert!(succeeded(result));
+        let Some(Outcome::Succeeded(succeeded)) = &result.outcome else { unreachable!() };
+        assert_eq!(succeeded.prepared.as_ref().unwrap().image, "web@sha256:01");
+        let lines: Vec<_> = progress
+            .iter()
+            .flat_map(|event| match event {
+                CommandEvent::Progress(progress) => progress.log_lines.iter().map(|line| line.text.as_str()),
+                CommandEvent::Finished(_) => panic!("a second result"),
+            })
+            .collect();
+        assert_eq!(lines, ["Pulling web:1", "Pinned web:1 as web@sha256:01"]);
     }
 
     #[test]

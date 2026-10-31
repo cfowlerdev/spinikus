@@ -1,8 +1,11 @@
 //! The container runtime, behind a trait so Docker is one driver among later ones
 //! (Podman, containerd). The agent only sees containers Spinikus manages: those with the
 //! [`SERVICE_LABEL`] and [`DEPLOYMENT_LABEL`] labels, which say what they belong to.
+//!
+//! An app container's port is published on `127.0.0.1` with a host port the runtime picks
+//! ([`ContainerRuntime::endpoint`]); the health check and the proxy connect there.
 
-use std::{pin::Pin, time::Duration};
+use std::{net::SocketAddr, pin::Pin, time::Duration};
 
 use async_trait::async_trait;
 use spinikus_core::server::ObservedInstance;
@@ -20,6 +23,31 @@ pub use memory::MemoryRuntime;
 pub const SERVICE_LABEL: &str = "spinikus.service";
 /// The label holding the deployment ID (`dep_…`) on every container Spinikus starts.
 pub const DEPLOYMENT_LABEL: &str = "spinikus.deployment";
+/// The label holding the port the app listens on inside the container, if it has one.
+pub const PORT_LABEL: &str = "spinikus.port";
+
+/// A container to create for a deployment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerSpec {
+    /// Unique on the server; creating a second container with the same name fails.
+    pub name: String,
+    /// The image, pinned by digest.
+    pub image: String,
+    pub service_id: spinikus_core::id::ServiceId,
+    pub deployment_id: spinikus_core::id::DeploymentId,
+    /// Environment variables. Values may be secrets: never log them.
+    pub env: Vec<(String, String)>,
+    /// The port the app listens on, published on `127.0.0.1`.
+    pub port: Option<u16>,
+    /// Named runtime volumes and where to mount them.
+    pub volumes: Vec<Mount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mount {
+    pub volume: String,
+    pub path: String,
+}
 
 /// The IDs of managed containers as they change (created, started, stopped, removed, or
 /// their health changed). An item can repeat a change already seen. The stream fails or
@@ -47,6 +75,20 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// Changes to managed containers from now on, including any that happen while the
     /// stream is being set up.
     fn events(&self) -> ContainerEvents;
+
+    /// Pulls an image and returns the reference to run, pinned by digest. `progress` gets
+    /// a line for each step of the pull.
+    async fn pull(&self, image: &str, progress: &(dyn Fn(String) + Send + Sync)) -> Result<String, RuntimeError>;
+
+    /// Creates a container, without starting it, and returns its ID.
+    async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError>;
+
+    /// Starts a created or stopped container. Starting a running one succeeds.
+    async fn start(&self, container_id: &str) -> Result<(), RuntimeError>;
+
+    /// Where the container's app port is published on this host, or `None` if it has no
+    /// port or is not running.
+    async fn endpoint(&self, container_id: &str) -> Result<Option<SocketAddr>, RuntimeError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -57,6 +99,9 @@ pub enum RuntimeError {
     Unavailable(String),
     #[error("the container runtime failed: {0}")]
     Failed(String),
+    /// A container with the same name exists.
+    #[error("a container with this name exists")]
+    Conflict,
 }
 
 /// The service and deployment a container belongs to, from its labels. `None` for

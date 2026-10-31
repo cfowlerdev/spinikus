@@ -25,6 +25,7 @@ spinikus-store.workspace = true
 anyhow.workspace = true
 spinikus-agent = { workspace = true, features = ["test-support"] }
 spinikus-proto.workspace = true
+prost-types.workspace = true
 jiff.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true

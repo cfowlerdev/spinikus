@@ -3,16 +3,20 @@
 //! It enrolls ([`join`]) and holds the control stream open ([`run`]): hello, heartbeats,
 //! reconnects with backoff, and certificate renewal. Over that stream it reports the
 //! containers Spinikus manages on this server, through the container [`runtime`], and
-//! runs the commands that stop and restart them. The builder and proxy come next.
+//! runs commands: pulling an image, starting a deployment and verifying it with its health
+//! check, and stopping and restarting containers. The builder, release commands and proxy
+//! come next.
 
 mod backoff;
 mod certificate;
 mod commands;
 mod connection;
+mod deploy;
 mod enroll;
 mod error;
 mod facts;
 mod files;
+mod health;
 mod report;
 pub mod runtime;
 

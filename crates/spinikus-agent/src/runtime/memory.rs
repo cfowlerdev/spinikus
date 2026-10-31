@@ -2,21 +2,22 @@
 //! events like Docker's, and a switch to make the runtime unreachable.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
+    net::SocketAddr,
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
 use async_trait::async_trait;
 use jiff::Timestamp;
-use spinikus_core::server::{InstanceStatus, ObservedInstance};
+use spinikus_core::server::{InstanceHealth, InstanceStatus, ObservedInstance};
 use tokio::sync::broadcast;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
-use super::{ContainerEvents, ContainerRuntime, RuntimeError};
+use super::{ContainerEvents, ContainerRuntime, ContainerSpec, RuntimeError};
 
 #[derive(Clone)]
 enum Event {
@@ -27,6 +28,12 @@ enum Event {
 
 pub struct MemoryRuntime {
     containers: Mutex<BTreeMap<String, ObservedInstance>>,
+    specs: Mutex<HashMap<String, ContainerSpec>>,
+    /// Images that can be pulled, and the pinned reference each one resolves to.
+    images: Mutex<HashMap<String, String>>,
+    endpoint: Mutex<Option<SocketAddr>>,
+    exit_on_start: AtomicBool,
+    next_id: AtomicU64,
     events: broadcast::Sender<Event>,
     available: AtomicBool,
 }
@@ -39,7 +46,36 @@ impl Default for MemoryRuntime {
 
 impl MemoryRuntime {
     pub fn new() -> Self {
-        Self { containers: Mutex::default(), events: broadcast::channel(256).0, available: AtomicBool::new(true) }
+        Self {
+            containers: Mutex::default(),
+            specs: Mutex::default(),
+            images: Mutex::default(),
+            endpoint: Mutex::default(),
+            exit_on_start: AtomicBool::new(false),
+            next_id: AtomicU64::new(1),
+            events: broadcast::channel(256).0,
+            available: AtomicBool::new(true),
+        }
+    }
+
+    /// Makes `image` pullable, resolving to `pinned`.
+    pub fn add_image(&self, image: &str, pinned: &str) {
+        lock(&self.images).insert(image.to_string(), pinned.to_string());
+    }
+
+    /// Where running containers with a port are published: a server the test runs.
+    pub fn set_endpoint(&self, endpoint: SocketAddr) {
+        *lock(&self.endpoint) = Some(endpoint);
+    }
+
+    /// Makes containers exit as soon as they start, like an app that crashes on boot.
+    pub fn exit_on_start(&self, exit: bool) {
+        self.exit_on_start.store(exit, Ordering::SeqCst);
+    }
+
+    /// What a container was created with.
+    pub fn spec(&self, container_id: &str) -> Option<ContainerSpec> {
+        lock(&self.specs).get(container_id).cloned()
     }
 
     /// Adds or replaces a container, as if the runtime had changed it.
@@ -67,7 +103,7 @@ impl MemoryRuntime {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, ObservedInstance>> {
-        self.containers.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        lock(&self.containers)
     }
 
     fn check(&self) -> Result<(), RuntimeError> {
@@ -104,6 +140,7 @@ impl ContainerRuntime for MemoryRuntime {
     async fn remove(&self, container_id: &str) -> Result<(), RuntimeError> {
         self.check()?;
         self.lock().remove(container_id).ok_or(RuntimeError::NotFound)?;
+        lock(&self.specs).remove(container_id);
         let _ = self.events.send(Event::Changed(container_id.to_string()));
         Ok(())
     }
@@ -123,4 +160,53 @@ impl ContainerRuntime for MemoryRuntime {
         });
         Box::pin(events)
     }
+
+    async fn pull(&self, image: &str, progress: &(dyn Fn(String) + Send + Sync)) -> Result<String, RuntimeError> {
+        self.check()?;
+        progress(format!("Pulling {image}"));
+        lock(&self.images).get(image).cloned().ok_or_else(|| RuntimeError::Failed(format!("cannot pull {image}: not found")))
+    }
+
+    async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError> {
+        self.check()?;
+        let mut specs = lock(&self.specs);
+        if specs.values().any(|existing| existing.name == spec.name) {
+            return Err(RuntimeError::Conflict);
+        }
+        let id = format!("mem-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        specs.insert(id.clone(), spec.clone());
+        drop(specs);
+        self.put(ObservedInstance {
+            service_id: spec.service_id,
+            deployment_id: spec.deployment_id,
+            container_id: id.clone(),
+            status: InstanceStatus::Created,
+            health: InstanceHealth::None,
+            restart_count: 0,
+            started_at: None,
+        });
+        Ok(id)
+    }
+
+    async fn start(&self, container_id: &str) -> Result<(), RuntimeError> {
+        let status = match self.exit_on_start.load(Ordering::SeqCst) {
+            true => InstanceStatus::Exited,
+            false => InstanceStatus::Running,
+        };
+        self.change(container_id, |instance| {
+            instance.status = status;
+            instance.started_at = Some(Timestamp::now());
+        })
+    }
+
+    async fn endpoint(&self, container_id: &str) -> Result<Option<SocketAddr>, RuntimeError> {
+        self.check()?;
+        let running = self.get(container_id).is_some_and(|instance| instance.status == InstanceStatus::Running);
+        let has_port = self.spec(container_id).is_some_and(|spec| spec.port.is_some());
+        Ok((running && has_port).then(|| *lock(&self.endpoint)).flatten())
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

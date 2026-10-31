@@ -23,7 +23,7 @@ use tonic::{
 use crate::{
     AgentError, AgentFiles, Backoff, Credentials,
     certificate::{renewal_due, until, validity},
-    commands::Commands,
+    commands::{CommandEvent, Commands},
     enroll::channel,
     report::report,
     runtime::ContainerRuntime,
@@ -192,8 +192,12 @@ async fn session(
             },
             // Returns only once the stream has closed.
             () = reporter.as_mut() => return Ok(lost(true, "the stream closed")),
-            finished = commands.next_finished(), if commands.busy() => {
-                if outbound.send(message(agent_message::Message::CommandResult(finished))).await.is_err() {
+            event = commands.next(), if commands.busy() => {
+                let event = match event {
+                    CommandEvent::Progress(progress) => agent_message::Message::CommandProgress(progress),
+                    CommandEvent::Finished(result) => agent_message::Message::CommandResult(result),
+                };
+                if outbound.send(message(event)).await.is_err() {
                     return Ok(lost(true, "the stream closed"));
                 }
             }

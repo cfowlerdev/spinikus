@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -11,17 +12,20 @@ use async_trait::async_trait;
 use bollard::{
     API_DEFAULT_VERSION, Docker,
     errors::Error,
-    models::{ContainerInspectResponse, ContainerStateStatusEnum, EventMessageTypeEnum, HealthStatusEnum},
+    models::{
+        ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EventMessageTypeEnum, HealthStatusEnum,
+        HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+    },
     query_parameters::{
-        EventsOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder,
-        StopContainerOptionsBuilder,
+        CreateContainerOptionsBuilder, CreateImageOptionsBuilder, EventsOptionsBuilder, ListContainersOptionsBuilder,
+        RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
     },
 };
 use jiff::Timestamp;
 use spinikus_core::server::{InstanceHealth, InstanceStatus, ObservedInstance};
 use tokio_stream::StreamExt;
 
-use super::{ContainerEvents, ContainerRuntime, DEPLOYMENT_LABEL, RuntimeError, SERVICE_LABEL, owner};
+use super::{ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner};
 
 /// How long to wait for the Engine API to answer, beyond any grace period a call waits for.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -143,6 +147,106 @@ impl ContainerRuntime for DockerRuntime {
         });
         Box::pin(events)
     }
+
+    async fn pull(&self, image: &str, progress: &(dyn Fn(String) + Send + Sync)) -> Result<String, RuntimeError> {
+        let docker = self.client()?;
+        // Without a tag, Docker would pull every tag of the repository.
+        let reference = with_tag(image);
+        let options = CreateImageOptionsBuilder::new().from_image(&reference).build();
+        let mut pulling = docker.create_image(Some(options), None, None);
+        while let Some(step) = pulling.next().await {
+            let step = step.map_err(|error| match runtime_error(error) {
+                // The registry's message, such as an unknown image or a denied pull.
+                RuntimeError::NotFound => RuntimeError::Failed(format!("cannot pull {reference}: not found")),
+                error => error,
+            })?;
+            // Skip the byte counts of layers being downloaded and extracted.
+            if let Some(status) = step.status.filter(|_| step.progress_detail.is_none()) {
+                progress(match step.id {
+                    Some(id) => format!("{id}: {status}"),
+                    None => status,
+                });
+            }
+        }
+        let inspected = docker.inspect_image(&reference).await.map_err(runtime_error)?;
+        pinned(&reference, inspected.repo_digests.unwrap_or_default(), inspected.id)
+            .ok_or_else(|| RuntimeError::Failed(format!("{reference} has no digest")))
+    }
+
+    async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError> {
+        let mut labels = HashMap::from([
+            (SERVICE_LABEL.to_string(), spec.service_id.to_string()),
+            (DEPLOYMENT_LABEL.to_string(), spec.deployment_id.to_string()),
+        ]);
+        let port = spec.port.map(|port| format!("{port}/tcp"));
+        if let Some(app_port) = spec.port {
+            labels.insert(PORT_LABEL.to_string(), app_port.to_string());
+        }
+        // An empty host port lets Docker pick a free one.
+        let loopback = PortBinding { host_ip: Some(Ipv4Addr::LOCALHOST.to_string()), host_port: Some(String::new()) };
+        let host_config = HostConfig {
+            port_bindings: port.clone().map(|port| HashMap::from([(port, Some(vec![loopback]))])),
+            binds: Some(spec.volumes.iter().map(|mount| format!("{}:{}", mount.volume, mount.path)).collect()),
+            // Containers come back after a reboot or a daemon restart, without the agent.
+            restart_policy: Some(RestartPolicy { name: Some(RestartPolicyNameEnum::UNLESS_STOPPED), ..Default::default() }),
+            ..Default::default()
+        };
+        let body = ContainerCreateBody {
+            image: Some(spec.image.clone()),
+            env: Some(spec.env.iter().map(|(name, value)| format!("{name}={value}")).collect()),
+            labels: Some(labels),
+            exposed_ports: port.map(|port| vec![port]),
+            host_config: Some(host_config),
+            ..Default::default()
+        };
+        let options = CreateContainerOptionsBuilder::new().name(&spec.name).build();
+        match self.client()?.create_container(Some(options), body).await {
+            Ok(created) => Ok(created.id),
+            Err(Error::DockerResponseServerError { status_code: 409, .. }) => Err(RuntimeError::Conflict),
+            Err(Error::DockerResponseServerError { status_code: 404, message }) => Err(RuntimeError::Failed(message)),
+            Err(error) => Err(runtime_error(error)),
+        }
+    }
+
+    async fn start(&self, container_id: &str) -> Result<(), RuntimeError> {
+        self.client()?.start_container(container_id, None).await.map_err(runtime_error)
+    }
+
+    async fn endpoint(&self, container_id: &str) -> Result<Option<SocketAddr>, RuntimeError> {
+        let inspected = match self.client()?.inspect_container(container_id, None).await.map_err(runtime_error) {
+            Ok(inspected) => inspected,
+            Err(RuntimeError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(published(&inspected))
+    }
+}
+
+/// `image` with `:latest` added when it names neither a tag nor a digest.
+fn with_tag(image: &str) -> String {
+    let name = image.rsplit('/').next().unwrap_or(image);
+    if image.contains('@') || name.contains(':') { image.to_string() } else { format!("{image}:latest") }
+}
+
+/// The digest reference for `reference`'s repository among `repo_digests`, else the first
+/// one, else the image ID (for images that were never pushed or pulled by digest).
+fn pinned(reference: &str, repo_digests: Vec<String>, id: Option<String>) -> Option<String> {
+    let repository = match reference.split_once('@') {
+        Some((repository, _)) => repository,
+        None => reference.rsplit_once(':').filter(|(_, tag)| !tag.contains('/')).map_or(reference, |(repository, _)| repository),
+    };
+    let matching = repo_digests.iter().find(|digest| digest.split_once('@').is_some_and(|(repo, _)| repo == repository));
+    matching.or(repo_digests.first()).cloned().or(id)
+}
+
+/// The loopback address the container's app port is published on, while it runs.
+fn published(inspected: &ContainerInspectResponse) -> Option<SocketAddr> {
+    let running = inspected.state.as_ref().and_then(|state| state.running).unwrap_or(false);
+    let labels = inspected.config.as_ref()?.labels.as_ref()?;
+    let port: u16 = labels.get(PORT_LABEL)?.parse().ok()?;
+    let bindings = inspected.network_settings.as_ref()?.ports.as_ref()?.get(&format!("{port}/tcp"))?.as_ref()?;
+    let host_port = bindings.iter().find_map(|binding| binding.host_port.as_deref()?.parse::<u16>().ok())?;
+    running.then_some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port))
 }
 
 fn seconds(duration: Duration) -> i32 {
@@ -264,6 +368,46 @@ mod tests {
         assert_eq!(observed(inspected(None, running())), None);
         assert_eq!(observed(inspected(Some(HashMap::new()), running())), None);
         assert_eq!(observed(inspected(Some(invalid), running())), None);
+    }
+
+    #[test]
+    fn tags_and_pins_images() {
+        let digest = "sha256:0123";
+
+        assert_eq!(with_tag("busybox"), "busybox:latest");
+        assert_eq!(with_tag("busybox:1.37"), "busybox:1.37");
+        assert_eq!(with_tag("localhost:5000/app"), "localhost:5000/app:latest");
+        assert_eq!(with_tag("ghcr.io/acme/app@sha256:0123"), "ghcr.io/acme/app@sha256:0123");
+
+        let digests = vec![format!("mirror/app@{digest}"), format!("localhost:5000/app@{digest}")];
+        assert_eq!(pinned("localhost:5000/app:v2", digests.clone(), None).unwrap(), format!("localhost:5000/app@{digest}"));
+        assert_eq!(pinned("other:latest", digests, None).unwrap(), format!("mirror/app@{digest}"));
+        assert_eq!(pinned("local:dev", Vec::new(), Some("sha256:abcd".to_string())).unwrap(), "sha256:abcd");
+    }
+
+    #[test]
+    fn finds_the_published_loopback_port() {
+        use bollard::models::NetworkSettings;
+        let inspected = |running: bool, label: Option<&str>| ContainerInspectResponse {
+            config: Some(ContainerConfig {
+                labels: Some(label.map(|port| (PORT_LABEL.to_string(), port.to_string())).into_iter().collect()),
+                ..Default::default()
+            }),
+            state: Some(ContainerState { running: Some(running), ..Default::default() }),
+            network_settings: Some(NetworkSettings {
+                ports: Some(HashMap::from([(
+                    "3000/tcp".to_string(),
+                    Some(vec![PortBinding { host_ip: Some("127.0.0.1".to_string()), host_port: Some("49153".to_string()) }]),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(published(&inspected(true, Some("3000"))), Some("127.0.0.1:49153".parse().unwrap()));
+        assert_eq!(published(&inspected(false, Some("3000"))), None);
+        assert_eq!(published(&inspected(true, Some("8080"))), None);
+        assert_eq!(published(&inspected(true, None)), None);
     }
 
     #[test]
