@@ -1,0 +1,191 @@
+//! A real agent against a real control plane over mutual TLS: joining, staying connected,
+//! renewing the certificate, and being revoked.
+
+use std::time::Duration;
+
+use jiff::{SignedDuration, Timestamp};
+use spinikus_agent::{AgentError, AgentFiles, Backoff, RunOptions};
+use spinikus_control::{Control, NewServer, Principal, ca::AgentCsr};
+use spinikus_core::{
+    id::{ServerId, SessionId},
+    secret::Secret,
+    server::ServerStatus,
+    user::UserFields,
+};
+use spinikus_store::{MasterKey, ServerRepository, SqliteStore, UserRepository, connect, migrate};
+use tokio::{sync::oneshot, task::JoinHandle};
+
+struct ControlPlane {
+    _dir: tempfile::TempDir,
+    control: Control,
+    admin: Principal,
+    url: String,
+    fingerprint: String,
+    _stop: oneshot::Sender<()>,
+}
+
+impl ControlPlane {
+    async fn start() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = connect(&dir.path().join("spinikus.db")).await.unwrap();
+        migrate(&pool).await.unwrap();
+        let control = Control::new(SqliteStore::open(pool, &MasterKey::generate()).await.unwrap());
+        let fields = UserFields { email: "admin@example.com".parse().unwrap(), name: "Admin".to_string(), admin: true };
+        let user = control.store().create_user(fields, None).await.unwrap();
+        let admin = Principal { user, credential: spinikus_control::Credential::Session(SessionId::new()) };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("https://{}", listener.local_addr().unwrap());
+        let (stop, stopped) = oneshot::channel::<()>();
+        tokio::spawn(spinikus_control::agents::serve(control.clone(), listener, async move {
+            let _ = stopped.await;
+        }));
+        let fingerprint = control.certificate_authority().await.unwrap().fingerprint();
+        Self { _dir: dir, control, admin, url, fingerprint, _stop: stop }
+    }
+
+    async fn join_token(&self) -> (ServerId, Secret) {
+        let server = self.control.create_server(&self.admin, NewServer { name: "web-1".to_string() }).await.unwrap();
+        (server.id, self.control.create_join_token(&self.admin, server.id).await.unwrap().secret)
+    }
+
+    async fn status(&self, server: ServerId) -> ServerStatus {
+        self.control.store().get_server(server).await.unwrap().status
+    }
+
+    async fn wait_for_status(&self, server: ServerId, status: ServerStatus) {
+        for _ in 0..250 {
+            if self.status(server).await == status {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the server never became {status}");
+    }
+}
+
+/// Starts the agent in the background. Dropping the sender stops it.
+fn start_agent(files: &AgentFiles) -> (oneshot::Sender<()>, JoinHandle<Result<(), AgentError>>) {
+    let files = files.clone();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let options = RunOptions {
+        facts: spinikus_agent::server_facts(),
+        backoff: Backoff::new(Duration::from_millis(50), Duration::from_millis(200)),
+    };
+    let handle = tokio::spawn(async move {
+        spinikus_agent::run(&files, options, async move {
+            let _ = stopped.await;
+        })
+        .await
+    });
+    (stop, handle)
+}
+
+async fn enroll(control_plane: &ControlPlane, files: &AgentFiles) -> ServerId {
+    let (server, token) = control_plane.join_token().await;
+    let credentials =
+        spinikus_agent::join(&control_plane.url, &token, &control_plane.fingerprint, spinikus_agent::server_facts())
+            .await
+            .unwrap();
+    files.save(&credentials).unwrap();
+    assert_eq!(credentials.server_id, server);
+    server
+}
+
+fn not_after(certificate_pem: &str) -> i64 {
+    let (_, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes()).unwrap();
+    let (_, certificate) = x509_parser::parse_x509_certificate(&pem.contents).unwrap();
+    certificate.validity().not_after.timestamp()
+}
+
+#[tokio::test]
+async fn an_agent_joins_connects_and_is_revoked() {
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+
+    let server = enroll(&control_plane, &files).await;
+    let (_stop, agent) = start_agent(&files);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let stored = control_plane.control.store().get_server(server).await.unwrap();
+
+    assert_eq!(stored.agent.unwrap().agent_version, spinikus_agent::AGENT_VERSION);
+    assert!(control_plane.control.agents().is_connected(server));
+
+    control_plane.control.revoke_server(&control_plane.admin, server).await.unwrap();
+    let stopped = tokio::time::timeout(Duration::from_secs(10), agent).await.unwrap().unwrap();
+
+    assert!(matches!(stopped, Err(AgentError::Revoked)), "{stopped:?}");
+}
+
+#[tokio::test]
+async fn the_agent_stops_cleanly_and_reconnects_after_a_restart() {
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+
+    let (stop, agent) = start_agent(&files);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    drop(stop);
+    let stopped = tokio::time::timeout(Duration::from_secs(10), agent).await.unwrap().unwrap();
+    control_plane.wait_for_status(server, ServerStatus::Disconnected).await;
+    let (_stop, _agent) = start_agent(&files);
+
+    assert!(stopped.is_ok(), "{stopped:?}");
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+}
+
+#[tokio::test]
+async fn an_old_certificate_is_renewed_on_connect() {
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    // Swap in a certificate that is 25 days into its 30, past the renewal point.
+    let credentials = files.load().unwrap();
+    let key = rcgen::KeyPair::from_pem(credentials.key_pem.expose()).unwrap();
+    let csr = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap().serialize_request(&key).unwrap();
+    let authority = control_plane.control.certificate_authority().await.unwrap();
+    let issued = Timestamp::now() - SignedDuration::from_hours(25 * 24);
+    let old = authority
+        .issue_agent_certificate(server, &AgentCsr::from_der(csr.der()).unwrap(), issued, SignedDuration::from_hours(30 * 24))
+        .unwrap();
+    files.save_identity(&old, &credentials.key_pem).unwrap();
+
+    let (_stop, _agent) = start_agent(&files);
+    let mut renewed = None;
+    for _ in 0..250 {
+        let current = files.load().unwrap();
+        if current.certificate_pem != old {
+            renewed = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let renewed = renewed.expect("the certificate was never renewed");
+
+    assert!(not_after(&renewed.certificate_pem) > Timestamp::now().as_second() + 29 * 86_400);
+    assert_ne!(renewed.key_pem, credentials.key_pem, "renewal uses a fresh key");
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+}
+
+#[tokio::test]
+async fn joining_checks_the_ca_fingerprint_and_the_token() {
+    let control_plane = ControlPlane::start().await;
+    let (_, token) = control_plane.join_token().await;
+    let facts = spinikus_agent::server_facts;
+    let wrong = format!("sha256:{}", "00".repeat(32));
+
+    let impostor = spinikus_agent::join(&control_plane.url, &token, &wrong, facts()).await;
+    let bad_token = spinikus_agent::join(&control_plane.url, &Secret::new("spj_nope"), &control_plane.fingerprint, facts()).await;
+    let good = spinikus_agent::join(&control_plane.url, &token, &control_plane.fingerprint, facts()).await;
+    let reused = spinikus_agent::join(&control_plane.url, &token, &control_plane.fingerprint, facts()).await;
+    let not_https = spinikus_agent::join("http://127.0.0.1:1", &token, &control_plane.fingerprint, facts()).await;
+
+    assert!(matches!(impostor, Err(AgentError::FingerprintMismatch { .. })), "{impostor:?}");
+    assert!(matches!(bad_token, Err(AgentError::Refused(_))), "{bad_token:?}");
+    assert!(good.is_ok(), "the token was not used up by the failed attempts: {good:?}");
+    assert!(matches!(reused, Err(AgentError::Refused(_))), "{reused:?}");
+    assert!(matches!(not_https, Err(AgentError::InvalidUrl(_))), "{not_https:?}");
+}

@@ -23,8 +23,11 @@ pub type ListenerError = Box<dyn std::error::Error + Send + Sync>;
 pub async fn serve(control: Control, listener: TcpListener, shutdown: impl Future<Output = ()>) -> Result<(), ListenerError> {
     let authority = control.certificate_authority().await?;
     let (certificate_pem, key_pem) = authority.issue_listener_certificate(Timestamp::now())?;
+    // The CA goes in the chain too, so a joining agent can find it and check it against the
+    // fingerprint from its join command before trusting it.
+    let chain = format!("{certificate_pem}\n{}", authority.certificate_pem());
     let tls = ServerTlsConfig::new()
-        .identity(Identity::from_pem(certificate_pem, key_pem.expose()))
+        .identity(Identity::from_pem(chain, key_pem.expose()))
         .client_ca_root(Certificate::from_pem(authority.certificate_pem()))
         .client_auth_optional(true);
     tracing::info!(address = %listener.local_addr()?, ca_fingerprint = authority.fingerprint(), "Agent listener started");

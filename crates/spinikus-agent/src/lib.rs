@@ -1,14 +1,23 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! The agent: what runs on each server and dials out to the control plane.
+//!
+//! So far it enrolls ([`join`]) and holds the control stream open ([`run`]): hello,
+//! heartbeats, reconnects with backoff, and certificate renewal. The container runtime,
+//! builder and proxy come next, behind the same connection.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod backoff;
+mod certificate;
+mod connection;
+mod enroll;
+mod error;
+mod facts;
+mod files;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use backoff::Backoff;
+pub use connection::{RunOptions, run};
+pub use enroll::join;
+pub use error::AgentError;
+pub use facts::server_facts;
+pub use files::{AgentFiles, Credentials};
+
+/// This agent's version, sent in `Hello`.
+pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");

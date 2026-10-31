@@ -15,10 +15,14 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+spinikus-agent.workspace = true
 spinikus-api.workspace = true
 spinikus-control.workspace = true
 spinikus-core.workspace = true
 spinikus-store.workspace = true
 
 [dev-dependencies]
+jiff.workspace = true
+rcgen.workspace = true
 tempfile.workspace = true
+x509-parser.workspace = true

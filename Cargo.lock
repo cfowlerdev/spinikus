@@ -875,6 +875,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gethostname"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
+dependencies = [
+ "rustix",
+ "windows-link",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2266,8 +2276,11 @@ dependencies = [
  "axum",
  "clap",
  "config",
+ "jiff",
+ "rcgen",
  "rpassword",
  "serde",
+ "spinikus-agent",
  "spinikus-api",
  "spinikus-control",
  "spinikus-core",
@@ -2277,11 +2290,34 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "x509-parser",
 ]
 
 [[package]]
 name = "spinikus-agent"
 version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "gethostname",
+ "jiff",
+ "prost-types",
+ "rand",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "spinikus-core",
+ "spinikus-proto",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "x509-parser",
+]
 
 [[package]]
 name = "spinikus-api"

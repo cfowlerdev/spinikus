@@ -61,6 +61,26 @@ pub struct CreateUserArgs {
 
 #[derive(clap::Args)]
 pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: AgentCommand,
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommand {
+    /// Enroll this server's agent with a join token. The token comes from --token or SPINIKUS_JOIN_TOKEN
+    Join(AgentJoinArgs),
+    /// Run the agent: connect to the control plane and stay connected
+    Run,
+}
+
+#[derive(clap::Args)]
+pub struct AgentJoinArgs {
+    /// The control plane's agent address, such as https://spinikus.example.com:8443
+    pub url: String,
+    /// The join token. Prefer SPINIKUS_JOIN_TOKEN, which does not show up in the process list
     #[arg(long)]
-    pub command: Option<String>,
+    pub token: Option<String>,
+    /// The control plane's CA fingerprint from the join command, such as sha256:9e38…
+    #[arg(long)]
+    pub ca_fingerprint: String,
 }
