@@ -2,10 +2,10 @@
 
 mod common;
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use common::ControlPlane;
-use spinikus_agent::{AgentFiles, Credentials};
+use spinikus_agent::{AgentFiles, Credentials, runtime::MemoryRuntime};
 use spinikus_core::server::ServerStatus;
 use spinikus_store::AuditLogRepository;
 use tokio::{sync::oneshot, task::JoinHandle};
@@ -13,7 +13,8 @@ use tokio::{sync::oneshot, task::JoinHandle};
 /// Runs the embedded agent in the background. Dropping the sender stops it.
 fn start(control_plane: &ControlPlane, files: &AgentFiles) -> (oneshot::Sender<()>, JoinHandle<anyhow::Result<()>>) {
     let (stop, stopped) = oneshot::channel::<()>();
-    let run = spinikus::embedded::run(control_plane.control.clone(), files.clone(), control_plane.address, async move {
+    let runtime = Arc::new(MemoryRuntime::new());
+    let run = spinikus::embedded::run(control_plane.control.clone(), files.clone(), control_plane.address, runtime, async move {
         let _ = stopped.await;
     });
     (stop, tokio::spawn(run))

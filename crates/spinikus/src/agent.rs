@@ -1,7 +1,12 @@
 //! `spinikus agent join` and `spinikus agent run`.
 
+use std::sync::Arc;
+
 use anyhow::{Context, bail};
-use spinikus_agent::{AgentFiles, Backoff, RunOptions};
+use spinikus_agent::{
+    AgentFiles, Backoff, RunOptions,
+    runtime::{ContainerRuntime, DockerRuntime},
+};
 use spinikus_core::{config::SpinikusConfig, secret::Secret};
 
 use crate::cli::AgentJoinArgs;
@@ -37,7 +42,7 @@ pub async fn join(config: &SpinikusConfig, args: AgentJoinArgs) -> anyhow::Resul
 }
 
 pub async fn run(config: &SpinikusConfig) -> anyhow::Result<()> {
-    let options = RunOptions { facts: spinikus_agent::server_facts(), backoff: Backoff::default() };
+    let options = RunOptions { facts: spinikus_agent::server_facts(), backoff: Backoff::default(), runtime: runtime() };
     let shutdown = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
             tracing::error!(%error, "Failed to listen for the shutdown signal");
@@ -46,4 +51,9 @@ pub async fn run(config: &SpinikusConfig) -> anyhow::Result<()> {
         tracing::info!("Shutting down");
     };
     spinikus_agent::run(&files(config), options, shutdown).await.context("The agent stopped")
+}
+
+/// The container runtime on this machine: Docker, at `DOCKER_HOST` or the local socket.
+pub fn runtime() -> Arc<dyn ContainerRuntime> {
+    Arc::new(DockerRuntime::new())
 }

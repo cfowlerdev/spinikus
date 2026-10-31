@@ -3,8 +3,14 @@ name = "spinikus-agent"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# The in-memory container runtime, for tests in other crates.
+test-support = []
+
 [dependencies]
+async-trait.workspace = true
 base64.workspace = true
+bollard.workspace = true
 gethostname.workspace = true
 jiff.workspace = true
 prost-types.workspace = true
@@ -17,7 +23,7 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
-tokio-stream.workspace = true
+tokio-stream = { workspace = true, features = ["sync"] }
 tonic = { workspace = true, features = ["tls-ring"] }
 tracing.workspace = true
 x509-parser.workspace = true

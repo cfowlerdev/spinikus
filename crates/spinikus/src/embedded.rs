@@ -2,10 +2,10 @@
 //! agent inside the control plane's process. It is not a shortcut: it enrolls with a join
 //! token and connects over loopback mutual TLS, through the same calls as any remote agent.
 
-use std::{future::Future, net::SocketAddr};
+use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use anyhow::Context;
-use spinikus_agent::{AgentError, AgentFiles, Backoff, Credentials, RunOptions};
+use spinikus_agent::{AgentError, AgentFiles, Backoff, Credentials, RunOptions, runtime::ContainerRuntime};
 use spinikus_control::{Control, ca};
 
 /// Enrolls the embedded agent if it has not been (or its files belong to another server or
@@ -15,6 +15,7 @@ pub async fn run(
     control: Control,
     files: AgentFiles,
     agent_address: SocketAddr,
+    runtime: Arc<dyn ContainerRuntime>,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
     let facts = spinikus_agent::server_facts();
@@ -54,7 +55,7 @@ pub async fn run(
     // The agent listener's port may have changed since the agent enrolled.
     files.save(&Credentials { control_plane: url, ..credentials }).context("Failed to save the embedded agent's files")?;
 
-    let options = RunOptions { facts, backoff: Backoff::default() };
+    let options = RunOptions { facts, backoff: Backoff::default(), runtime };
     spinikus_agent::run(&files, options, shutdown).await.context("The embedded agent stopped")
 }
 

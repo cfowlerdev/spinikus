@@ -2,8 +2,10 @@
 //! heartbeats and the control plane's messages until the connection drops, after which
 //! the agent reconnects with backoff. The certificate is renewed on the open connection
 //! once two thirds of its lifetime has passed, and the agent reconnects with the new one.
+//! While connected, the reporter keeps the control plane's view of this server's
+//! containers current, and commands run as they arrive.
 
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use jiff::Timestamp;
 use rcgen::{CertificateParams, KeyPair};
@@ -21,7 +23,10 @@ use tonic::{
 use crate::{
     AgentError, AgentFiles, Backoff, Credentials,
     certificate::{renewal_due, until, validity},
+    commands::Commands,
     enroll::channel,
+    report::report,
+    runtime::ContainerRuntime,
 };
 
 /// How long to wait for `Welcome` after sending `Hello`.
@@ -30,9 +35,13 @@ const WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait before retrying a renewal that failed for a passing reason.
 const RENEWAL_RETRY: Duration = Duration::from_secs(5 * 60);
 
+/// How long to wait before listing the containers again after the runtime failed.
+const RESYNC_DELAY: Duration = Duration::from_secs(5);
+
 pub struct RunOptions {
     pub facts: pb::ServerFacts,
     pub backoff: Backoff,
+    pub runtime: Arc<dyn ContainerRuntime>,
 }
 
 /// Keeps the agent connected until `shutdown` resolves. Returns an error only for what
@@ -40,7 +49,9 @@ pub struct RunOptions {
 /// expired, or the control plane does not support it.
 pub async fn run(files: &AgentFiles, options: RunOptions, shutdown: impl Future<Output = ()>) -> Result<(), AgentError> {
     let mut shutdown = std::pin::pin!(shutdown);
-    let mut backoff = options.backoff;
+    let RunOptions { facts, mut backoff, runtime } = options;
+    // Outlives connections: a command that finishes while disconnected reports on the next.
+    let mut commands = Commands::new(runtime.clone());
     loop {
         let credentials = files.load()?;
         let invalid =
@@ -50,7 +61,8 @@ pub async fn run(files: &AgentFiles, options: RunOptions, shutdown: impl Future<
             return Err(AgentError::CertificateExpired(not_after));
         }
 
-        let reason = match session(files, &credentials, &options.facts, shutdown.as_mut()).await? {
+        let ended = session(files, &credentials, &facts, &*runtime, &mut commands, shutdown.as_mut()).await?;
+        let reason = match ended {
             Ended::Shutdown => return Ok(()),
             Ended::Renewed => {
                 backoff.reset();
@@ -102,6 +114,8 @@ async fn session(
     files: &AgentFiles,
     credentials: &Credentials,
     facts: &pb::ServerFacts,
+    runtime: &dyn ContainerRuntime,
+    commands: &mut Commands,
     mut shutdown: Pin<&mut impl Future<Output = ()>>,
 ) -> Result<Ended, AgentError> {
     let tls = ClientTlsConfig::new()
@@ -123,6 +137,7 @@ async fn session(
         protocol_version: pb::PROTOCOL_VERSION,
         agent_version: crate::AGENT_VERSION.to_string(),
         facts: Some(facts.clone()),
+        in_flight_command_ids: commands.in_flight(),
         ..Default::default()
     };
     outbound.send(message(agent_message::Message::Hello(hello))).await.expect("the receiver is held below");
@@ -155,6 +170,8 @@ async fn session(
     let (not_before, not_after) = validity(&credentials.certificate_pem).expect("checked before connecting");
     let renewal = tokio::time::sleep(until(renewal_due(not_before, not_after)));
     let mut renewal = std::pin::pin!(renewal);
+    let reporter = report(runtime, &outbound, RESYNC_DELAY);
+    let mut reporter = std::pin::pin!(reporter);
 
     loop {
         tokio::select! {
@@ -173,8 +190,15 @@ async fn session(
                     renewal.as_mut().reset(tokio::time::Instant::now() + RENEWAL_RETRY);
                 }
             },
+            // Returns only once the stream has closed.
+            () = reporter.as_mut() => return Ok(lost(true, "the stream closed")),
+            finished = commands.next_finished(), if commands.busy() => {
+                if outbound.send(message(agent_message::Message::CommandResult(finished))).await.is_err() {
+                    return Ok(lost(true, "the stream closed"));
+                }
+            }
             received = inbound.message() => match received {
-                Ok(Some(received)) => handle(received, &outbound).await,
+                Ok(Some(received)) => handle(received, &outbound, commands).await,
                 Ok(None) => return Ok(lost(true, "the control plane closed the connection")),
                 Err(status) => return refused(status, true),
             },
@@ -200,19 +224,12 @@ async fn renew(client: &mut AgentServiceClient<Channel>, files: &AgentFiles) -> 
     Ok(())
 }
 
-async fn handle(received: ControlMessage, outbound: &mpsc::Sender<AgentMessage>) {
+async fn handle(received: ControlMessage, outbound: &mpsc::Sender<AgentMessage>, commands: &mut Commands) {
     match received.message {
         Some(control_message::Message::Command(command)) => {
-            // Until the runtime and builder exist, say so, so the control plane does not wait.
-            tracing::warn!(command = command.command_id, "cannot run commands yet");
-            let result = pb::CommandResult {
-                command_id: command.command_id,
-                outcome: Some(pb::command_result::Outcome::Failed(pb::CommandFailed {
-                    reason: pb::FailureReason::Internal.into(),
-                    message: "this agent cannot run commands yet".to_string(),
-                })),
-            };
-            let _ = outbound.send(message(agent_message::Message::CommandResult(result))).await;
+            if let Some(result) = commands.start(command) {
+                let _ = outbound.send(message(agent_message::Message::CommandResult(result))).await;
+            }
         }
         Some(control_message::Message::SetRoutes(_) | control_message::Message::SetCertificates(_)) => {
             tracing::debug!("ignored a snapshot this agent cannot apply yet");

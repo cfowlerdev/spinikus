@@ -1,25 +1,41 @@
 //! A real agent against a real control plane over mutual TLS: joining, staying connected,
-//! renewing the certificate, and being revoked.
+//! renewing the certificate, being revoked, reporting its containers and running commands.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 mod common;
 
 use common::ControlPlane;
 use jiff::{SignedDuration, Timestamp};
-use spinikus_agent::{AgentError, AgentFiles, Backoff, RunOptions};
+use spinikus_agent::{
+    AgentError, AgentFiles, Backoff, RunOptions,
+    runtime::{ContainerRuntime, MemoryRuntime},
+};
 use spinikus_control::ca::AgentCsr;
-use spinikus_core::{id::ServerId, secret::Secret, server::ServerStatus};
-use spinikus_store::ServerRepository;
+use spinikus_core::{
+    id::{DeploymentId, ServerId, ServiceId},
+    secret::Secret,
+    server::{InstanceHealth, InstanceStatus, ObservedInstance, ServerStatus},
+};
+use spinikus_proto::agent::v1::{self as pb, command::Kind, control_message};
+use spinikus_store::{InstanceRepository, ServerRepository};
 use tokio::{sync::oneshot, task::JoinHandle};
 
-/// Starts the agent in the background. Dropping the sender stops it.
+/// Starts the agent in the background, with no containers. Dropping the sender stops it.
 fn start_agent(files: &AgentFiles) -> (oneshot::Sender<()>, JoinHandle<Result<(), AgentError>>) {
+    start_agent_with(files, Arc::new(MemoryRuntime::new()))
+}
+
+fn start_agent_with(
+    files: &AgentFiles,
+    runtime: Arc<dyn ContainerRuntime>,
+) -> (oneshot::Sender<()>, JoinHandle<Result<(), AgentError>>) {
     let files = files.clone();
     let (stop, stopped) = oneshot::channel::<()>();
     let options = RunOptions {
         facts: spinikus_agent::server_facts(),
         backoff: Backoff::new(Duration::from_millis(50), Duration::from_millis(200)),
+        runtime,
     };
     let handle = tokio::spawn(async move {
         spinikus_agent::run(&files, options, async move {
@@ -137,4 +153,60 @@ async fn joining_checks_the_ca_fingerprint_and_the_token() {
     assert!(good.is_ok(), "the token was not used up by the failed attempts: {good:?}");
     assert!(matches!(reused, Err(AgentError::Refused(_))), "{reused:?}");
     assert!(matches!(not_https, Err(AgentError::InvalidUrl(_))), "{not_https:?}");
+}
+
+fn container(id: &str, deployment: DeploymentId) -> ObservedInstance {
+    ObservedInstance {
+        service_id: ServiceId::new(),
+        deployment_id: deployment,
+        container_id: id.to_string(),
+        status: InstanceStatus::Running,
+        health: InstanceHealth::Healthy,
+        restart_count: 0,
+        started_at: Some(Timestamp::now()),
+    }
+}
+
+/// Waits until the control plane knows exactly these containers on `server`.
+async fn wait_for_containers(control_plane: &ControlPlane, server: ServerId, expected: &[&str]) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let instances = control_plane.control.store().list_server_instances(server).await.unwrap();
+        let mut containers: Vec<_> = instances.iter().map(|instance| instance.observed.container_id.as_str()).collect();
+        containers.sort_unstable();
+        if containers == expected {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "expected containers {expected:?}, the control plane has {containers:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn the_agent_reports_its_containers_and_stops_a_deployment() {
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let runtime = Arc::new(MemoryRuntime::new());
+    let (draining, live) = (DeploymentId::new(), DeploymentId::new());
+    runtime.put(container("old", draining));
+    runtime.put(container("new", live));
+
+    let (_stop, _agent) = start_agent_with(&files, runtime.clone());
+    wait_for_containers(&control_plane, server, &["new", "old"]).await;
+    runtime.put(container("newer", live));
+    wait_for_containers(&control_plane, server, &["new", "newer", "old"]).await;
+
+    let stop = pb::StopDeployment { deployment_id: draining.to_string(), grace_period: None };
+    let command = pb::Command { command_id: "cmd-1".to_string(), kind: Some(Kind::StopDeployment(stop)) };
+    let message = pb::ControlMessage { message: Some(control_message::Message::Command(command)) };
+    control_plane.control.agents().send(server, message).await.unwrap();
+    wait_for_containers(&control_plane, server, &["new", "newer"]).await;
+
+    assert_eq!(runtime.get("old"), None);
+    let instances = control_plane.control.store().list_server_instances(server).await.unwrap();
+    let new = instances.iter().find(|instance| instance.observed.container_id == "new").unwrap();
+    assert_eq!(new.observed.deployment_id, live);
+    assert_eq!(new.observed.health, InstanceHealth::Healthy);
 }

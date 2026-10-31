@@ -23,6 +23,8 @@ spinikus-store.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+spinikus-agent = { workspace = true, features = ["test-support"] }
+spinikus-proto.workspace = true
 jiff.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true

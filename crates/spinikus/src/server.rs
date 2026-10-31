@@ -27,8 +27,9 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
             .with_graceful_shutdown(until(stopped.clone()));
     let agent_address = agent_listener.local_addr().context("Failed to read the agent listener's address")?;
     let embedded = config.agents.embedded.then(|| {
-        let run = crate::embedded::run(control.clone(), crate::agent::files(config), agent_address, until(stopped.clone()));
+        let (control, files, shutdown) = (control.clone(), crate::agent::files(config), until(stopped.clone()));
         tokio::spawn(async move {
+            let run = crate::embedded::run(control, files, agent_address, crate::agent::runtime(), shutdown);
             // The control plane keeps running without it; the error says why it stopped.
             if let Err(error) = run.await {
                 tracing::error!("{error:#}");
