@@ -17,7 +17,10 @@ use spinikus_core::server::{InstanceHealth, InstanceStatus, ObservedInstance};
 use tokio::sync::broadcast;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
-use super::{BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, LogLine, LogLines, LogOptions, RuntimeError};
+use super::{
+    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, ExecOutput, ExecStream, LogLine, LogLines, LogOptions,
+    RuntimeError,
+};
 
 #[derive(Clone)]
 enum Event {
@@ -40,6 +43,9 @@ pub struct MemoryRuntime {
     written: broadcast::Sender<(String, LogLine)>,
     /// Why builds fail, if they do.
     build_failure: Mutex<Option<String>>,
+    /// What every command run in a container writes, and the commands run so far.
+    exec_output: Mutex<Vec<ExecOutput>>,
+    execs: Mutex<Vec<(String, Vec<String>)>>,
     exit_on_start: AtomicBool,
     next_id: AtomicU64,
     events: broadcast::Sender<Event>,
@@ -64,6 +70,8 @@ impl MemoryRuntime {
             logs: Mutex::default(),
             written: broadcast::channel(256).0,
             build_failure: Mutex::default(),
+            exec_output: Mutex::new(vec![ExecOutput::Exited(0)]),
+            execs: Mutex::default(),
             exit_on_start: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             events: broadcast::channel(256).0,
@@ -101,6 +109,17 @@ impl MemoryRuntime {
     /// Whether `image` (a reference or what it resolves to) is still there.
     pub fn has_image(&self, image: &str) -> bool {
         lock(&self.images).iter().any(|(reference, resolved)| reference == image || resolved == image)
+    }
+
+    /// What commands run in containers write from now on; `output` should end with
+    /// [`ExecOutput::Exited`]. By default they write nothing and exit with 0.
+    pub fn set_exec_output(&self, output: Vec<ExecOutput>) {
+        *lock(&self.exec_output) = output;
+    }
+
+    /// The commands run in containers so far, with the container each ran in.
+    pub fn execs(&self) -> Vec<(String, Vec<String>)> {
+        lock(&self.execs).clone()
     }
 
     /// Makes builds fail with `message`, or succeed again with `None`.
@@ -222,6 +241,17 @@ impl ContainerRuntime for MemoryRuntime {
             Err(lagged) => Some(Err(RuntimeError::Failed(lagged.to_string()))),
         });
         Box::pin(written.chain(new))
+    }
+
+    fn exec(&self, container_id: &str, command: Vec<String>) -> ExecStream {
+        if let Err(error) = self.check() {
+            return Box::pin(tokio_stream::once(Err(error)));
+        }
+        if self.get(container_id).is_none() {
+            return Box::pin(tokio_stream::once(Err(RuntimeError::NotFound)));
+        }
+        lock(&self.execs).push((container_id.to_string(), command));
+        Box::pin(tokio_stream::iter(lock(&self.exec_output).clone().into_iter().map(Ok)))
     }
 
     fn events(&self) -> ContainerEvents {

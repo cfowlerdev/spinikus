@@ -9,8 +9,8 @@ use bollard::{
     query_parameters::{CreateImageOptionsBuilder, RemoveContainerOptionsBuilder},
 };
 use spinikus_agent::runtime::{
-    BuildSpec, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, DockerRuntime, LogOptions, Mount, Network, RuntimeError,
-    SERVICE_LABEL,
+    BuildSpec, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, DockerRuntime, ExecOutput, LogOptions, Mount, Network,
+    RuntimeError, SERVICE_LABEL,
 };
 use spinikus_core::{
     id::{DeploymentId, ServiceId, VolumeId},
@@ -270,6 +270,46 @@ async fn reads_and_follows_a_containers_log() {
     let texts: Vec<_> = lines.iter().map(|line| line.text.as_str()).collect();
     assert_eq!(texts, ["one", "two", "three", "four"]);
     assert!(lines.iter().all(|line| line.at.is_some()));
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn runs_a_command_in_a_container_with_its_environment() {
+    let runtime = DockerRuntime::new();
+    let docker = runtime.client().unwrap();
+    let pull = CreateImageOptionsBuilder::new().from_image(IMAGE).build();
+    let mut pulling = docker.create_image(Some(pull), None, None);
+    while let Some(progress) = pulling.next().await {
+        progress.unwrap();
+    }
+    let body = ContainerCreateBody {
+        image: Some(IMAGE.to_string()),
+        cmd: Some(vec!["sleep".to_string(), "300".to_string()]),
+        env: Some(vec!["GREETING=hello".to_string()]),
+        ..Default::default()
+    };
+    let id = docker.create_container(None, body).await.unwrap().id;
+    let _cleanup = Cleanup(runtime.clone(), id.clone());
+    docker.start_container(&id, None).await.unwrap();
+    let within = Duration::from_secs(10);
+
+    // More than one frame of output, to check that nothing is lost between them.
+    let script = r#"head -c 300000 /dev/zero; echo "$GREETING" >&2; exit 3"#;
+    let command = vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
+    let output: Vec<_> = timeout(within, runtime.exec(&id, command).collect::<Vec<_>>()).await.unwrap();
+    let missing = timeout(within, runtime.exec("no-such-container", vec!["true".to_string()]).collect::<Vec<_>>()).await.unwrap();
+
+    let output: Vec<_> = output.into_iter().map(Result::unwrap).collect();
+    let stdout: usize = output.iter().map(|item| if let ExecOutput::Stdout(bytes) = item { bytes.len() } else { 0 }).sum();
+    let stderr: Vec<u8> = output
+        .iter()
+        .filter_map(|item| if let ExecOutput::Stderr(bytes) = item { Some(bytes.to_vec()) } else { None })
+        .flatten()
+        .collect();
+    assert_eq!(stdout, 300_000);
+    assert_eq!(stderr, b"hello\n");
+    assert_eq!(output.last(), Some(&ExecOutput::Exited(3)));
+    assert!(matches!(missing.as_slice(), [Err(RuntimeError::NotFound)]), "{missing:?}");
 }
 
 /// Removes a network even when an assertion fails. Declare it before the containers'

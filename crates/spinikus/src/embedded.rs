@@ -56,7 +56,8 @@ pub async fn run(
     // The agent listener's port may have changed since the agent enrolled.
     files.save(&Credentials { control_plane: url, ..credentials }).context("Failed to save the embedded agent's files")?;
 
-    let options = RunOptions { facts, backoff: Backoff::default(), runtime, proxy, local_repositories: false };
+    let options =
+        RunOptions { facts, backoff: Backoff::default(), runtime, proxy, local_repositories: false, backups: Default::default() };
     spinikus_agent::run(&files, options, shutdown).await.context("The embedded agent stopped")
 }
 

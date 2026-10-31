@@ -198,7 +198,11 @@ async fn handle(control: &Control, server: ServerId, message: AgentMessage) -> R
             Ok(())
         }
         agent_message::Message::CommandResult(result) => {
-            control.deployment_result(server, result).await;
+            if crate::backups::is_backup_command(&result.command_id) {
+                control.backup_result(server, result).await;
+            } else {
+                control.deployment_result(server, result).await;
+            }
             Ok(())
         }
         agent_message::Message::SnapshotApplied(applied) => {

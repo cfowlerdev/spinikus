@@ -22,6 +22,7 @@ use tokio::{
 };
 
 use crate::{
+    backup::{BackupStores, backup_database},
     build::BuildOptions,
     deploy::{prepare_deployment, start_deployment},
     runtime::{ContainerRuntime, RuntimeError},
@@ -40,6 +41,7 @@ const PROGRESS_BUFFER: usize = 256;
 pub(crate) struct Commands {
     runtime: Arc<dyn ContainerRuntime>,
     build: Arc<BuildOptions>,
+    backups: BackupStores,
     tasks: JoinSet<pb::CommandResult>,
     running: HashMap<task::Id, String>,
     finished: HashMap<String, pb::CommandResult>,
@@ -112,11 +114,12 @@ impl Commands {
         self.runtime.clone()
     }
 
-    pub(crate) fn new(runtime: Arc<dyn ContainerRuntime>, build: BuildOptions) -> Self {
+    pub(crate) fn new(runtime: Arc<dyn ContainerRuntime>, build: BuildOptions, backups: BackupStores) -> Self {
         let (progress_sender, progress) = mpsc::channel(PROGRESS_BUFFER);
         Self {
             runtime,
             build: Arc::new(build),
+            backups,
             tasks: JoinSet::new(),
             running: HashMap::new(),
             finished: HashMap::new(),
@@ -166,6 +169,11 @@ impl Commands {
             Some(Kind::RemoveDeployment(remove)) => {
                 tracing::info!(command = id, deployment = remove.deployment_id, "removing a deployment");
                 Box::pin(async move { remove_deployment(&*runtime, remove).await.map(|()| pb::CommandSucceeded::default()) })
+            }
+            Some(Kind::BackupDatabase(backup)) => {
+                tracing::info!(command = id, backup = backup.backup_id, "backing up a database");
+                let backups = self.backups.clone();
+                Box::pin(async move { backup_database(&*runtime, &backups, backup, &progress).await })
             }
             Some(Kind::RestartInstance(restart)) => {
                 tracing::info!(command = id, container = restart.container_id, "restarting a container");
@@ -242,6 +250,7 @@ fn name(kind: &Kind) -> &'static str {
         Kind::OpenSession(_) => "OpenSession",
         Kind::CancelCommand(_) => "CancelCommand",
         Kind::RemoveDeployment(_) => "RemoveDeployment",
+        Kind::BackupDatabase(_) => "BackupDatabase",
     }
 }
 
@@ -405,7 +414,7 @@ mod tests {
         runtime.put(container("old-1", draining));
         runtime.put(container("old-2", draining));
         runtime.put(container("new", live));
-        let mut commands = Commands::new(runtime.clone(), builds());
+        let mut commands = Commands::new(runtime.clone(), builds(), BackupStores::default());
 
         assert_eq!(commands.start(command("cmd-1", stop(draining))), None);
         assert_eq!(commands.in_flight(), ["cmd-1"]);
@@ -438,7 +447,7 @@ mod tests {
             command: Vec::new(),
         };
         runtime.create(&spec).await.unwrap();
-        let mut commands = Commands::new(runtime.clone(), builds());
+        let mut commands = Commands::new(runtime.clone(), builds(), BackupStores::default());
         let images = ["web@sha256:01", "web@sha256:02", "gone@sha256:03"].map(str::to_string).to_vec();
         let remove = pb::RemoveDeployment { deployment_id: old.to_string(), images };
 
@@ -456,7 +465,7 @@ mod tests {
         let runtime = Arc::new(MemoryRuntime::new());
         let deployment = DeploymentId::new();
         runtime.put(container("c", deployment));
-        let mut commands = Commands::new(runtime.clone(), builds());
+        let mut commands = Commands::new(runtime.clone(), builds(), BackupStores::default());
 
         commands.start(command("cmd-1", stop(deployment)));
         // Still running: the repeat is dropped, and the one result comes later.
@@ -473,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopping_a_deployment_without_containers_succeeds() {
-        let mut commands = Commands::new(Arc::new(MemoryRuntime::new()), builds());
+        let mut commands = Commands::new(Arc::new(MemoryRuntime::new()), builds(), BackupStores::default());
 
         commands.start(command("cmd-1", stop(DeploymentId::new())));
 
@@ -486,7 +495,7 @@ mod tests {
         let mut exited = container("c", DeploymentId::new());
         exited.status = InstanceStatus::Exited;
         runtime.put(exited);
-        let mut commands = Commands::new(runtime.clone(), builds());
+        let mut commands = Commands::new(runtime.clone(), builds(), BackupStores::default());
 
         let restart = |id: &str| Kind::RestartInstance(pb::RestartInstance { container_id: id.to_string() });
         commands.start(command("cmd-1", restart("c")));
@@ -503,7 +512,7 @@ mod tests {
     async fn reports_runtime_failures() {
         let runtime = Arc::new(MemoryRuntime::new());
         runtime.set_available(false);
-        let mut commands = Commands::new(runtime, builds());
+        let mut commands = Commands::new(runtime, builds(), BackupStores::default());
 
         commands.start(command("cmd-1", stop(DeploymentId::new())));
         let result = finish(&mut commands).await;
@@ -514,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_commands_it_cannot_run_yet() {
-        let mut commands = Commands::new(Arc::new(MemoryRuntime::new()), builds());
+        let mut commands = Commands::new(Arc::new(MemoryRuntime::new()), builds(), BackupStores::default());
         let start = Kind::RunRelease(pb::RunRelease::default());
         let invalid = Kind::StopDeployment(pb::StopDeployment { deployment_id: "web".to_string(), grace_period: None });
 
@@ -532,7 +541,7 @@ mod tests {
     async fn progress_comes_before_the_result() {
         let runtime = Arc::new(MemoryRuntime::new());
         runtime.add_image("web:1", "web@sha256:01");
-        let mut commands = Commands::new(runtime, builds());
+        let mut commands = Commands::new(runtime, builds(), BackupStores::default());
         let prepare = pb::PrepareDeployment {
             deployment_id: DeploymentId::new().to_string(),
             source: Some(pb::prepare_deployment::Source::Image(pb::ImageSource { image: "web:1".to_string() })),

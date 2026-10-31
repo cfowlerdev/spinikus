@@ -9,6 +9,7 @@
 //! the apps on this server, and serves log tails as sessions. Release commands come next.
 
 mod backoff;
+mod backup;
 mod build;
 mod certificate;
 mod commands;
@@ -25,6 +26,7 @@ pub mod runtime;
 mod sessions;
 
 pub use backoff::Backoff;
+pub use backup::{BackupStores, s3};
 pub use build::BuildOptions;
 pub use connection::{ProxyListeners, RunOptions, run};
 pub use enroll::join;

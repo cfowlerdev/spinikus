@@ -1,6 +1,7 @@
 pub mod actor;
 pub mod app_file;
 pub mod audit;
+pub mod backup;
 pub mod build;
 pub mod certificate;
 pub mod config;

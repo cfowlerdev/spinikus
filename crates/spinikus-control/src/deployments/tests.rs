@@ -113,7 +113,7 @@ fn succeeded(command: &pb::Command, prepared: Option<&str>) -> pb::CommandResult
     let prepared = prepared.map(|image| pb::PreparedImage { image: image.to_string(), ..Default::default() });
     pb::CommandResult {
         command_id: command.command_id.clone(),
-        outcome: Some(Outcome::Succeeded(pb::CommandSucceeded { prepared })),
+        outcome: Some(Outcome::Succeeded(pb::CommandSucceeded { prepared, backup: None })),
     }
 }
 
@@ -502,7 +502,7 @@ fn prepared_with_file(command: &pb::Command, app_file: &str) -> pb::CommandResul
         pb::PreparedImage { image: "sha256:0123".to_string(), commit_sha: "abc123".to_string(), app_file: app_file.to_string() };
     pb::CommandResult {
         command_id: command.command_id.clone(),
-        outcome: Some(Outcome::Succeeded(pb::CommandSucceeded { prepared: Some(prepared) })),
+        outcome: Some(Outcome::Succeeded(pb::CommandSucceeded { prepared: Some(prepared), backup: None })),
     }
 }
 

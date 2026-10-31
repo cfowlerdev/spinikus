@@ -1,3 +1,4 @@
+mod backups;
 mod databases;
 mod deployments;
 mod domains;
@@ -55,6 +56,19 @@ pub fn v1() -> Router<Control> {
         .route("/variables/{id}/reveal", post(variables::reveal))
         .route("/services/{id}/volumes", get(volumes::list).post(volumes::create))
         .route("/volumes/{id}", get(volumes::show).patch(volumes::update).delete(volumes::delete))
+        .route("/storage-destinations", get(backups::list_destinations).post(backups::create_destination))
+        .route(
+            "/storage-destinations/{id}",
+            get(backups::show_destination).patch(backups::update_destination).delete(backups::delete_destination),
+        )
+        .route("/storage-destinations/{id}/test", post(backups::test_destination))
+        .route("/services/{id}/backup-schedules", get(backups::list_schedules).post(backups::create_schedule))
+        .route(
+            "/backup-schedules/{id}",
+            get(backups::show_schedule).patch(backups::update_schedule).delete(backups::delete_schedule),
+        )
+        .route("/services/{id}/backups", get(backups::list).post(backups::create))
+        .route("/backups/{id}", get(backups::show).delete(backups::delete))
         .route("/settings/{key}", get(settings::show).put(settings::put))
         .route("/servers", get(servers::list).post(servers::create))
         .route("/servers/{id}", get(servers::show))

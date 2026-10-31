@@ -1,0 +1,310 @@
+//! Destinations, schedules and backups, against a fake agent and an in-memory bucket.
+
+use std::time::Duration;
+
+use object_store::memory::InMemory;
+use spinikus_core::{
+    actor::Actor,
+    backup::BackupStatus,
+    database::Engine,
+    deployment::{Deployment, DeploymentStatus},
+    membership::MembershipScope,
+    server::{InstanceHealth, InstanceStatus, ObservedInstance},
+};
+use spinikus_proto::agent::v1::{self as pb, command::Kind, command_result::Outcome, control_message};
+use spinikus_store::{DeploymentRepository, InstanceRepository};
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+
+use super::*;
+use crate::{
+    DeploymentTimings, NewDatabase,
+    deployments::tests::{Setup, setup_with},
+    test_support::{grant, user},
+};
+
+struct Fixture {
+    setup: Setup,
+    bucket: Arc<InMemory>,
+    agent: mpsc::Receiver<pb::ControlMessage>,
+    connection: crate::agents::ConnectionId,
+}
+
+async fn fixture(timings: BackupTimings) -> Fixture {
+    let bucket = Arc::new(InMemory::new());
+    let store = bucket.clone();
+    let setup =
+        setup_with(DeploymentTimings::default(), |control| control.with_backup_store(store).with_backup_timings(timings)).await;
+    let (sender, agent) = mpsc::channel(64);
+    let (connection, _) = setup.control.agents().register(setup.server.id, sender);
+    Fixture { setup, bucket, agent, connection }
+}
+
+/// Every command sent so far, but route tables and the like.
+fn commands(agent: &mut mpsc::Receiver<pb::ControlMessage>) -> Vec<pb::Command> {
+    let mut commands = Vec::new();
+    while let Ok(message) = agent.try_recv() {
+        if let Some(control_message::Message::Command(command)) = message.message {
+            commands.push(command);
+        }
+    }
+    commands
+}
+
+fn backup_commands(agent: &mut mpsc::Receiver<pb::ControlMessage>) -> Vec<(String, pb::BackupDatabase)> {
+    commands(agent)
+        .into_iter()
+        .filter_map(|command| match command.kind {
+            Some(Kind::BackupDatabase(backup)) => Some((command.command_id, backup)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn result(command_id: &str, outcome: Outcome) -> pb::CommandResult {
+    pb::CommandResult { command_id: command_id.to_string(), outcome: Some(outcome) }
+}
+
+fn uploaded(size_bytes: u64) -> Outcome {
+    Outcome::Succeeded(pb::CommandSucceeded { prepared: None, backup: Some(pb::BackupUploaded { size_bytes }) })
+}
+
+/// A Postgres database on the setup's server, live through the fake agent, with its container
+/// reported as `pg-container`.
+async fn live_database(fixture: &mut Fixture) -> (Service, Deployment) {
+    let control = &fixture.setup.control;
+    let new = NewDatabase {
+        name: "Postgres".to_string(),
+        slug: None,
+        engine: Engine::Postgres,
+        version: None,
+        server_id: Some(fixture.setup.server.id),
+    };
+    let created = control.create_database(&fixture.setup.admin, fixture.setup.service.environment_id, new).await.unwrap();
+    for step in ["prepare", "start"] {
+        control.advance_deployments().await;
+        let command = commands(&mut fixture.agent).into_iter().find(|command| command.command_id.ends_with(step)).unwrap();
+        let prepared =
+            (step == "prepare").then(|| pb::PreparedImage { image: "postgres@sha256:18".to_string(), ..Default::default() });
+        let outcome = Outcome::Succeeded(pb::CommandSucceeded { prepared, backup: None });
+        control.deployment_result(fixture.setup.server.id, result(&command.command_id, outcome)).await;
+    }
+    let deployment = control.store().get_deployment(created.deployment.id).await.unwrap();
+    assert_eq!(deployment.status, DeploymentStatus::Live);
+    let container = ObservedInstance {
+        service_id: created.service.id,
+        deployment_id: deployment.id,
+        container_id: "pg-container".to_string(),
+        status: InstanceStatus::Running,
+        health: InstanceHealth::None,
+        restart_count: 0,
+        started_at: None,
+    };
+    control.store().upsert_instance(fixture.setup.server.id, container).await.unwrap();
+    (created.service, deployment)
+}
+
+fn destination(name: &str) -> NewStorageDestination {
+    NewStorageDestination {
+        name: name.to_string(),
+        endpoint: Some("https://s3.example.com/".to_string()),
+        region: None,
+        bucket: "backups".to_string(),
+        path_prefix: Some("/prod/db".to_string()),
+        path_style: true,
+        access_key_id: "AKIA".to_string(),
+        secret_access_key: Secret::new("s3cret"),
+    }
+}
+
+fn hourly(destination_id: StorageDestinationId, keep_last: u32) -> NewBackupSchedule {
+    NewBackupSchedule { destination_id, cron: "0 * * * *".to_string(), keep_last: Some(keep_last), enabled: None }
+}
+
+#[tokio::test]
+async fn instance_admins_manage_destinations_that_everyone_sees() {
+    let fixture = fixture(BackupTimings::default()).await;
+    let (control, admin) = (&fixture.setup.control, &fixture.setup.admin);
+    let someone = user(control, "ada@example.com", false).await;
+
+    let created = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
+    let by_someone = control.create_storage_destination(&someone, destination("Mine")).await;
+    let mut bad = destination("Bad");
+    bad.bucket = "Not_A_Bucket".to_string();
+    let bad_bucket = control.create_storage_destination(admin, bad).await;
+    let mut bad = destination("Bad");
+    bad.endpoint = Some("ftp://files.example.com".to_string());
+    let bad_endpoint = control.create_storage_destination(admin, bad).await;
+    let mut bad = destination("Bad");
+    bad.path_prefix = Some("a/../b".to_string());
+    let bad_prefix = control.create_storage_destination(admin, bad).await;
+    let listed = control.list_storage_destinations(&someone).await.unwrap();
+    let changes =
+        StorageDestinationChanges { endpoint: Some(None), secret_access_key: Some(Secret::new("n3w")), ..Default::default() };
+    let updated = control.update_storage_destination(admin, created.id, created.revision, changes).await.unwrap();
+    let tested = control.test_storage_destination(admin, created.id).await;
+
+    assert_eq!(created.fields.path_prefix, "prod/db/");
+    assert_eq!(created.fields.endpoint.as_deref(), Some("https://s3.example.com"));
+    assert_eq!(created.fields.region, "us-east-1");
+    assert!(matches!(by_someone, Err(ControlError::Forbidden)), "{by_someone:?}");
+    assert!(matches!(bad_bucket, Err(ControlError::Invalid { field: "bucket", .. })), "{bad_bucket:?}");
+    assert!(matches!(bad_endpoint, Err(ControlError::Invalid { field: "endpoint", .. })), "{bad_endpoint:?}");
+    assert!(matches!(bad_prefix, Err(ControlError::Invalid { field: "path_prefix", .. })), "{bad_prefix:?}");
+    assert_eq!(listed, std::slice::from_ref(&created));
+    assert_eq!((updated.fields.endpoint, updated.revision), (None, 2));
+    assert_eq!(control.store().storage_destination_secret(created.id).await.unwrap().expose(), "n3w");
+    assert!(tested.is_ok(), "{tested:?}");
+    assert!(fixture.bucket.list(None).next().await.is_none(), "the test object is deleted");
+}
+
+#[tokio::test]
+async fn admins_schedule_backups_of_databases_only() {
+    let mut fixture = fixture(BackupTimings::default()).await;
+    let (database, _) = live_database(&mut fixture).await;
+    let (control, admin) = (&fixture.setup.control, &fixture.setup.admin);
+    let developer = user(control, "ada@example.com", false).await;
+    grant(control, &developer, MembershipScope::Environment(database.environment_id), Role::Developer).await;
+    let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
+
+    let schedule = control.create_backup_schedule(admin, database.id, hourly(destination.id, 3)).await.unwrap();
+    let by_developer = control.create_backup_schedule(&developer, database.id, hourly(destination.id, 3)).await;
+    let of_an_app = control.create_backup_schedule(admin, fixture.setup.service.id, hourly(destination.id, 3)).await;
+    let mut bad = hourly(destination.id, 3);
+    bad.cron = "0 0 * * * *".to_string();
+    let six_fields = control.create_backup_schedule(admin, database.id, bad).await;
+    let too_many = control.create_backup_schedule(admin, database.id, hourly(destination.id, 5000)).await;
+    let in_use = control.delete_storage_destination(admin, destination.id).await;
+    let changes = BackupScheduleChanges { enabled: Some(false), ..Default::default() };
+    let disabled = control.update_backup_schedule(admin, schedule.id, schedule.revision, changes).await.unwrap();
+
+    let next = schedule.next_run_at.unwrap();
+    assert!(next > Timestamp::now() && next.as_second() % 3600 == 0, "{next}");
+    assert!(matches!(by_developer, Err(ControlError::Forbidden)), "{by_developer:?}");
+    assert!(matches!(of_an_app, Err(ControlError::Rejected { .. })), "{of_an_app:?}");
+    assert!(matches!(six_fields, Err(ControlError::Invalid { field: "cron", .. })), "{six_fields:?}");
+    assert!(matches!(too_many, Err(ControlError::Invalid { field: "keep_last", .. })), "{too_many:?}");
+    assert!(matches!(in_use, Err(ControlError::HasChildren { .. })), "{in_use:?}");
+    assert_eq!((disabled.fields.enabled, disabled.next_run_at), (false, None));
+}
+
+#[tokio::test]
+async fn scheduled_backups_run_on_the_databases_agent_and_old_ones_go() {
+    let mut fixture = fixture(BackupTimings::default()).await;
+    let (database, _) = live_database(&mut fixture).await;
+    let (control, admin, server) = (&fixture.setup.control, &fixture.setup.admin, fixture.setup.server.id);
+    let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
+    let schedule = control.create_backup_schedule(admin, database.id, hourly(destination.id, 1)).await.unwrap();
+
+    let mut made = Vec::new();
+    for size in [100, 200] {
+        let past = Timestamp::now() - jiff::SignedDuration::from_secs(1);
+        control.store().set_backup_schedule_next_run(schedule.id, Some(past)).await.unwrap();
+        control.advance_backups().await;
+        let (command_id, command) = backup_commands(&mut fixture.agent).pop().unwrap();
+        let backup: BackupId = command.backup_id.parse().unwrap();
+        assert_eq!(control.store().get_backup(backup).await.unwrap().status, BackupStatus::Running);
+        // What the agent would have uploaded.
+        fixture.bucket.put(&Path::from(command.object_key.as_str()), PutPayload::from_static(b"dump")).await.unwrap();
+        control.backup_result(server, result(&command_id, uploaded(size))).await;
+        made.push((backup, command));
+    }
+    control.advance_backups().await;
+
+    let (first, command) = &made[0];
+    assert_eq!(command.container_id, "pg-container");
+    assert_eq!(command.command, Engine::Postgres.dump_command());
+    assert_eq!(command.object_key, format!("prod/db/{}/{first}.pgdump", database.id));
+    let sent = command.destination.as_ref().unwrap();
+    assert_eq!((sent.bucket.as_str(), sent.secret_access_key.as_str(), sent.path_style), ("backups", "s3cret", true));
+    let newest = control.get_backup(admin, made[1].0).await.unwrap();
+    assert_eq!((newest.status, newest.size_bytes, newest.schedule_id), (BackupStatus::Succeeded, Some(200), Some(schedule.id)));
+    assert!(matches!(control.get_backup(admin, *first).await, Err(ControlError::NotFound { .. })));
+    assert!(fixture.bucket.head(&Path::from(command.object_key.as_str())).await.is_err(), "the old dump is deleted");
+    assert!(fixture.bucket.head(&Path::from(made[1].1.object_key.as_str())).await.is_ok());
+    let schedule = control.get_backup_schedule(admin, schedule.id).await.unwrap();
+    assert!(schedule.next_run_at.unwrap() > Timestamp::now());
+}
+
+#[tokio::test]
+async fn manual_backups_fail_without_a_live_database_and_report_why() {
+    let mut fixture = fixture(BackupTimings::default()).await;
+    let (database, deployment) = live_database(&mut fixture).await;
+    let (control, admin, server) = (&fixture.setup.control, &fixture.setup.admin, fixture.setup.server.id);
+    let viewer = user(control, "vic@example.com", false).await;
+    grant(control, &viewer, MembershipScope::Environment(database.environment_id), Role::Viewer).await;
+    let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
+    let other = control.create_server(admin, crate::NewServer { name: "db-2".to_string() }).await.unwrap();
+
+    let by_viewer = control.create_backup(&viewer, database.id, destination.id).await;
+    let of_an_app = control.create_backup(admin, fixture.setup.service.id, destination.id).await;
+    let backup = control.create_backup(admin, database.id, destination.id).await.unwrap();
+    control.advance_backups().await;
+    let (command_id, _) = backup_commands(&mut fixture.agent).pop().unwrap();
+    let running = control.delete_backup(admin, backup.id).await;
+    control.backup_result(other.id, result(&command_id, uploaded(1))).await;
+    let still_running = control.get_backup(&viewer, backup.id).await.unwrap().status;
+    let failure = pb::CommandFailed { reason: pb::FailureReason::BackupFailed.into(), message: "pg_dump: error".to_string() };
+    control.backup_result(server, result(&command_id, Outcome::Failed(failure))).await;
+    let failed = control.get_backup(&viewer, backup.id).await.unwrap();
+    let by_viewer_delete = control.delete_backup(&viewer, backup.id).await;
+    control.delete_backup(admin, backup.id).await.unwrap();
+
+    let draining = DeploymentStatus::Draining;
+    control.store().transition_deployment(deployment.id, draining, None, None, Actor::System).await.unwrap();
+    let nothing_live = control.create_backup(admin, database.id, destination.id).await.unwrap();
+    control.advance_backups().await;
+    let nothing_live = control.get_backup(admin, nothing_live.id).await.unwrap();
+
+    assert!(matches!(by_viewer, Err(ControlError::Forbidden)), "{by_viewer:?}");
+    assert!(matches!(of_an_app, Err(ControlError::Rejected { .. })), "{of_an_app:?}");
+    assert!(matches!(running, Err(ControlError::Rejected { .. })), "{running:?}");
+    assert_eq!(still_running, BackupStatus::Running);
+    assert_eq!((failed.status, failed.error.as_deref()), (BackupStatus::Failed, Some("pg_dump: error")));
+    assert!(matches!(by_viewer_delete, Err(ControlError::Forbidden)), "{by_viewer_delete:?}");
+    assert!(matches!(control.get_backup(admin, backup.id).await, Err(ControlError::NotFound { .. })));
+    assert_eq!(nothing_live.status, BackupStatus::Failed);
+    assert_eq!(nothing_live.error.as_deref(), Some("the database has nothing live"));
+    assert_eq!(control.list_backups(&viewer, database.id, None, 10).await.unwrap().items, [nothing_live]);
+}
+
+#[tokio::test]
+async fn backups_wait_for_the_agent_then_fail_and_are_resent_while_unanswered() {
+    let timings =
+        BackupTimings { resend_after: Duration::ZERO, agent_lost_after: Duration::from_millis(200), ..Default::default() };
+    let mut fixture = fixture(timings).await;
+    let (database, _) = live_database(&mut fixture).await;
+    let (control, admin, server) = (&fixture.setup.control, &fixture.setup.admin, fixture.setup.server.id);
+    let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
+
+    let resent = control.create_backup(admin, database.id, destination.id).await.unwrap();
+    control.advance_backups().await;
+    control.advance_backups().await;
+    let sent = backup_commands(&mut fixture.agent);
+    control.backup_result(server, result(&sent[0].0, uploaded(5))).await;
+
+    control.agents().unregister(server, fixture.connection);
+    let waiting = control.create_backup(admin, database.id, destination.id).await.unwrap();
+    control.advance_backups().await;
+    let before = control.get_backup(admin, waiting.id).await.unwrap().status;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    control.advance_backups().await;
+    let after = control.get_backup(admin, waiting.id).await.unwrap();
+
+    assert_eq!(sent.len(), 2, "sent again while unanswered");
+    assert!(sent.iter().all(|(id, _)| *id == format!("{}/backup", resent.id)));
+    assert_eq!(control.get_backup(admin, resent.id).await.unwrap().size_bytes, Some(5));
+    assert_eq!(before, BackupStatus::Queued);
+    assert_eq!(after.status, BackupStatus::Failed);
+    assert!(after.error.unwrap().contains("is not connected"));
+}
+
+#[test]
+fn schedules_take_five_field_cron_expressions_in_utc() {
+    let daily = cron("30 3 * * *").unwrap();
+    let after: Timestamp = "2026-10-31T04:00:00Z".parse().unwrap();
+
+    assert_eq!(next_run(&daily, after).unwrap().to_string(), "2026-11-01T03:30:00Z");
+    assert!(cron("61 * * * *").is_err());
+    assert!(cron("* * * *").is_err());
+}

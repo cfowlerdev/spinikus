@@ -53,6 +53,7 @@ fn start_agent_with(
         runtime,
         proxy: proxy.map(|http| ProxyListeners { http, https: None }),
         local_repositories: true,
+        backups: Default::default(),
     };
     let handle = tokio::spawn(async move {
         spinikus_agent::run(&files, options, async move {
@@ -815,4 +816,164 @@ async fn databases_are_reachable_by_name_and_keep_their_data() {
     assert!(String::from_utf8_lossy(&refused.stdout).contains("NOAUTH"), "{refused:?}");
     assert_eq!(kept.trim(), "kept");
     drop(cleanup);
+}
+
+/// An S3 server (RustFS) in Docker, with a `backups` bucket, removed on drop with its network
+/// and the images the test pulled.
+struct S3Server {
+    name: String,
+    port: u16,
+    pulled: Vec<&'static str>,
+}
+
+const S3_IMAGE: &str = "rustfs/rustfs:latest";
+const AWS_CLI_IMAGE: &str = "amazon/aws-cli:2.27.0";
+const S3_ACCESS_KEY: &str = "spinikus";
+const S3_SECRET_KEY: &str = "spinikus-secret";
+
+impl S3Server {
+    async fn start() -> Self {
+        let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().unwrap();
+        let present = |image: &str| docker(&["image", "inspect", image]).status.success();
+        let pulled = [S3_IMAGE, AWS_CLI_IMAGE].into_iter().filter(|image| !present(image)).collect();
+        let name = format!("spinikus-test-s3-{}-{}", std::process::id(), Timestamp::now().as_millisecond());
+        let mut server = Self { name: name.clone(), port: 0, pulled };
+        assert!(docker(&["network", "create", &name]).status.success());
+        let access = format!("RUSTFS_ACCESS_KEY={S3_ACCESS_KEY}");
+        let secret = format!("RUSTFS_SECRET_KEY={S3_SECRET_KEY}");
+        let args = ["run", "--detach", "--name", &name, "--network", &name, "--publish", "127.0.0.1::9000"];
+        let started = docker(&[&args[..], &["--env", &access, "--env", &secret, S3_IMAGE]].concat());
+        assert!(started.status.success(), "{started:?}");
+        let port = docker(&["port", &name, "9000"]);
+        server.port = String::from_utf8_lossy(&port.stdout).trim().rsplit(':').next().unwrap().parse().unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while !server.aws(&["s3", "mb", "s3://backups"]).status.success() {
+            assert!(tokio::time::Instant::now() < deadline, "the S3 server did not start");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        server
+    }
+
+    /// Runs the AWS CLI against the server.
+    fn aws(&self, args: &[&str]) -> std::process::Output {
+        let endpoint = format!("http://{}:9000", self.name);
+        let env = [
+            format!("AWS_ACCESS_KEY_ID={S3_ACCESS_KEY}"),
+            format!("AWS_SECRET_ACCESS_KEY={S3_SECRET_KEY}"),
+            "AWS_DEFAULT_REGION=us-east-1".to_string(),
+        ];
+        std::process::Command::new("docker")
+            .args(["run", "--rm", "--network", &self.name])
+            .args(env.iter().flat_map(|env| ["--env", env.as_str()]))
+            .args([AWS_CLI_IMAGE, "--endpoint-url", &endpoint])
+            .args(args)
+            .output()
+            .unwrap()
+    }
+}
+
+impl Drop for S3Server {
+    fn drop(&mut self) {
+        let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().unwrap();
+        docker(&["rm", "--force", "--volumes", &self.name]);
+        docker(&["network", "rm", &self.name]);
+        for image in &self.pulled {
+            docker(&["image", "rm", image]);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon; pulls postgres:18, rustfs/rustfs and amazon/aws-cli"]
+async fn backs_up_a_database_straight_to_s3() {
+    use spinikus_control::{NewDatabase, NewStorageDestination};
+    use spinikus_core::{backup::BackupStatus, database::Engine, id::BackupId};
+    use spinikus_store::VolumeRepository;
+
+    let s3 = S3Server::start().await;
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let (_stop, _agent) = start_agent_with(&files, Arc::new(DockerRuntime::new()), None);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let (control, admin) = (&control_plane.control, &control_plane.admin);
+    let web = control_plane.service(server, "unused:1", json!({})).await;
+    let environment = control.get_service(admin, web).await.unwrap().environment_id;
+    let network = format!("spinikus-{environment}");
+    let present =
+        |image: &str| std::process::Command::new("docker").args(["image", "inspect", image]).output().unwrap().status.success();
+    let pulled = ["postgres:18"].into_iter().filter(|image| !present(image)).collect();
+    let new = NewDatabase {
+        name: "Postgres".to_string(),
+        slug: None,
+        engine: Engine::Postgres,
+        version: None,
+        server_id: Some(server),
+    };
+    let postgres = control.create_database(admin, environment, new).await.unwrap();
+    let volumes = control.store().list_volumes(postgres.service.id).await.unwrap();
+    let _cleanup = DatabaseCleanup {
+        services: vec![postgres.service.id.to_string()],
+        volumes: volumes.into_iter().map(|volume| volume.id.to_string()).collect(),
+        network: network.clone(),
+        pulled,
+    };
+    let within = Duration::from_secs(300);
+    control_plane.wait_for_deployment(postgres.deployment.id, DeploymentStatus::Live, within).await;
+    let destination = NewStorageDestination {
+        name: "RustFS".to_string(),
+        endpoint: Some(format!("http://127.0.0.1:{}", s3.port)),
+        region: None,
+        bucket: "backups".to_string(),
+        path_prefix: Some("spinikus".to_string()),
+        path_style: true,
+        access_key_id: S3_ACCESS_KEY.to_string(),
+        secret_access_key: Secret::new(S3_SECRET_KEY),
+    };
+    let destination = control.create_storage_destination(admin, destination).await.unwrap();
+    let wait_for = |id: BackupId| async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let backup = control.get_backup(admin, id).await.unwrap();
+            if backup.status.is_finished() {
+                return backup;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the backup did not finish: {backup:?}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+
+    let tested = control.test_storage_destination(admin, destination.id).await;
+    let backup = control.create_backup(admin, postgres.service.id, destination.id).await.unwrap();
+    let backup = wait_for(backup.id).await;
+    let key = format!("s3://backups/{}", backup.object_key);
+    let head = s3.aws(&["s3", "cp", &key, "-"]);
+    control.delete_backup(admin, backup.id).await.unwrap();
+    let after_delete = s3.aws(&["s3", "ls", &key]);
+    let mut wrong = destination.clone();
+    wrong.fields.name = "Wrong key".to_string();
+    let wrong = NewStorageDestination {
+        name: wrong.fields.name,
+        endpoint: wrong.fields.endpoint,
+        region: None,
+        bucket: "backups".to_string(),
+        path_prefix: None,
+        path_style: true,
+        access_key_id: S3_ACCESS_KEY.to_string(),
+        secret_access_key: Secret::new("not-the-secret"),
+    };
+    let wrong = control.create_storage_destination(admin, wrong).await.unwrap();
+    let refused = control.create_backup(admin, postgres.service.id, wrong.id).await.unwrap();
+    let refused = wait_for(refused.id).await;
+
+    assert!(tested.is_ok(), "{tested:?}");
+    assert_eq!(backup.status, BackupStatus::Succeeded, "{backup:?}");
+    assert!(backup.object_key.starts_with(&format!("spinikus/{}/", postgres.service.id)));
+    // pg_dump's custom format starts with this magic.
+    assert!(head.stdout.starts_with(b"PGDMP"), "{:?}", String::from_utf8_lossy(&head.stderr));
+    assert_eq!(backup.size_bytes, Some(head.stdout.len() as u64));
+    assert!(!after_delete.status.success(), "the dump is deleted with the backup");
+    assert_eq!(refused.status, BackupStatus::Failed);
+    assert!(refused.error.as_deref().unwrap().contains("upload"), "{refused:?}");
 }

@@ -20,6 +20,8 @@ mod tls_tests;
 
 use std::time::Duration;
 
+#[cfg(test)]
+pub(crate) use hub::ConnectionId;
 pub use hub::{AgentHub, NotConnected};
 pub use listener::{ListenerError, serve};
 pub use service::AgentGrpc;

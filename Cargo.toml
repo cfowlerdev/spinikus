@@ -18,9 +18,13 @@ http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "http2", "server-auto", "server-graceful", "tokio"] }
 instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
+croner = { version = "4.0.2", default-features = false, features = ["jiff"] }
 jiff = { version = "0.2.38", features = ["serde"] }
 prost = "0.14.4"
 prost-types = "0.14.4"
+object_store = { version = "0.14.2", default-features = false, features = ["aws-base", "reqwest", "ring"] }
+# Only to choose object_store's TLS: rustls with the ring provider we install, not aws-lc-rs.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 protox = "0.10.0"
 hmac = "0.13.0"
 rand = "0.10.3"

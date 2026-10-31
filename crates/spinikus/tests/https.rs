@@ -133,6 +133,7 @@ async fn a_domain_gets_a_certificate_and_is_served_over_https() {
         runtime,
         proxy: Some(ProxyListeners { http, https: Some(https) }),
         local_repositories: false,
+        backups: Default::default(),
     };
     let (_stop, stopped) = oneshot::channel::<()>();
     let agent_files = files.clone();

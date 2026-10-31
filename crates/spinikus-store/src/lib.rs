@@ -1,5 +1,6 @@
 pub mod api_tokens;
 pub mod audit_log;
+pub mod backups;
 pub mod certificates;
 pub mod db;
 pub mod deployments;
@@ -27,6 +28,7 @@ pub mod webhooks;
 
 pub use api_tokens::ApiTokenRepository;
 pub use audit_log::AuditLogRepository;
+pub use backups::{BackupRepository, BackupScheduleRepository, StorageDestinationRepository};
 pub use certificates::CertificateRepository;
 pub use db::{SqliteStore, connect, migrate};
 pub use deployments::DeploymentRepository;

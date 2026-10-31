@@ -102,6 +102,18 @@ pub struct LogLine {
 /// A container's log lines; it ends when there are no more, or with an error.
 pub type LogLines = Pin<Box<dyn Stream<Item = Result<LogLine, RuntimeError>> + Send>>;
 
+/// What a command run in a container writes, as it writes it, and then how it exited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecOutput {
+    Stdout(bytes::Bytes),
+    Stderr(bytes::Bytes),
+    /// The last item: the command's exit code.
+    Exited(i64),
+}
+
+/// A command's output; it ends after [`ExecOutput::Exited`], or with an error.
+pub type ExecStream = Pin<Box<dyn Stream<Item = Result<ExecOutput, RuntimeError>> + Send>>;
+
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync + 'static {
     /// Every container Spinikus manages on this server, running or not.
@@ -126,6 +138,10 @@ pub trait ContainerRuntime: Send + Sync + 'static {
 
     /// The container's log, stdout and stderr together, as `options` says.
     fn logs(&self, container_id: &str, options: LogOptions) -> LogLines;
+
+    /// Runs a command in a running container, with the container's environment, without a
+    /// terminal or stdin. Dropping the stream stops reading its output, not the command.
+    fn exec(&self, container_id: &str, command: Vec<String>) -> ExecStream;
 
     /// Pulls an image and returns the reference to run, pinned by digest. `progress` gets
     /// a line for each step of the pull.

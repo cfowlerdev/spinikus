@@ -14,9 +14,11 @@ use bollard::{
     API_DEFAULT_VERSION, Docker, body_try_stream,
     container::LogOutput,
     errors::Error,
+    exec::StartExecResults,
     models::{
         ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EndpointSettings, EventMessageTypeEnum,
-        HealthStatusEnum, HostConfig, NetworkCreateRequest, NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+        ExecConfig, HealthStatusEnum, HostConfig, NetworkCreateRequest, NetworkingConfig, PortBinding, RestartPolicy,
+        RestartPolicyNameEnum,
     },
     query_parameters::{
         BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptionsBuilder, CreateImageOptionsBuilder, EventsOptionsBuilder,
@@ -29,8 +31,8 @@ use spinikus_core::server::{InstanceHealth, InstanceStatus, ObservedInstance};
 use tokio_stream::StreamExt;
 
 use super::{
-    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, LogLine, LogLines, LogOptions, Network,
-    PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
+    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, ExecOutput, ExecStream, LogLine, LogLines,
+    LogOptions, Network, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
 };
 
 /// The label on networks Spinikus creates.
@@ -189,6 +191,52 @@ impl ContainerRuntime for DockerRuntime {
                     }
                 }
             }
+        });
+        Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
+    }
+
+    fn exec(&self, container_id: &str, command: Vec<String>) -> ExecStream {
+        let docker = match self.client() {
+            Ok(docker) => docker,
+            Err(error) => return Box::pin(tokio_stream::once(Err(error))),
+        };
+        let container_id = container_id.to_string();
+        let (sender, receiver) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            let outcome = async {
+                let config = ExecConfig {
+                    cmd: Some(command),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    tty: Some(false),
+                    ..Default::default()
+                };
+                let exec = docker.create_exec(&container_id, config).await.map_err(runtime_error)?.id;
+                let StartExecResults::Attached { mut output, .. } =
+                    docker.start_exec(&exec, None).await.map_err(runtime_error)?
+                else {
+                    return Err(RuntimeError::Failed("the command started detached".to_string()));
+                };
+                while let Some(output) = output.next().await {
+                    let output = match output.map_err(runtime_error)? {
+                        LogOutput::StdOut { message } | LogOutput::Console { message } => ExecOutput::Stdout(message),
+                        LogOutput::StdErr { message } => ExecOutput::Stderr(message),
+                        LogOutput::StdIn { .. } => continue,
+                    };
+                    if sender.send(Ok(output)).await.is_err() {
+                        return Ok(None);
+                    }
+                }
+                let exit = docker.inspect_exec(&exec).await.map_err(runtime_error)?.exit_code;
+                Ok(Some(ExecOutput::Exited(exit.unwrap_or(-1))))
+            }
+            .await;
+            let last = match outcome {
+                Ok(Some(exited)) => Ok(exited),
+                Ok(None) => return,
+                Err(error) => Err(error),
+            };
+            let _ = sender.send(last).await;
         });
         Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
     }

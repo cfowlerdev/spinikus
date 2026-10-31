@@ -37,7 +37,9 @@ impl Api {
         let dir = tempfile::tempdir().unwrap();
         let pool = connect(&dir.path().join("spinikus.db")).await.unwrap();
         migrate(&pool).await.unwrap();
-        let control = Control::new(SqliteStore::open(pool, &MasterKey::generate()).await.unwrap());
+        let store = SqliteStore::open(pool, &MasterKey::generate()).await.unwrap();
+        // Storage destinations are reached in memory, never over the network.
+        let control = Control::new(store).with_backup_store(std::sync::Arc::new(object_store::memory::InMemory::new()));
         let router = spinikus_api::router(control.clone());
         Self { _dir: dir, control, router }
     }
@@ -545,4 +547,61 @@ async fn creates_a_database_with_its_parts() {
     assert_eq!(volumes.body[0]["mount_path"], "/data");
     assert_eq!(unknown_engine.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!((bad_version.status, &bad_version.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("version")));
+}
+
+#[tokio::test]
+async fn manages_destinations_schedules_and_backups_of_a_database() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+    let project = api.send(Method::POST, "/api/v1/projects", token, &[], Some(json!({ "name": "Shop" }))).await;
+    let environments = format!("/api/v1/projects/{}/environments", project.body["id"].as_str().unwrap());
+    let production =
+        api.send(Method::POST, &environments, token, &[], Some(json!({ "name": "Production", "kind": "production" }))).await;
+    let server = api.send(Method::POST, "/api/v1/servers", token, &[], Some(json!({ "name": "db-1" }))).await;
+    let databases = format!("/api/v1/environments/{}/databases", production.body["id"].as_str().unwrap());
+    let postgres = json!({ "name": "Postgres", "engine": "postgres", "server_id": server.body["id"] });
+    let database = api.send(Method::POST, &databases, token, &[], Some(postgres)).await;
+    let service = database.header(header::LOCATION).to_string();
+
+    let new = json!({
+        "name": "R2", "endpoint": "https://account.r2.cloudflarestorage.com", "region": "auto", "bucket": "backups",
+        "path_prefix": "spinikus", "access_key_id": "key", "secret_access_key": "s3cret",
+    });
+    let destination = api.send(Method::POST, "/api/v1/storage-destinations", token, &[], Some(new)).await;
+    let location = destination.header(header::LOCATION).to_string();
+    let typo = api
+        .send(Method::POST, "/api/v1/storage-destinations", token, &[], Some(json!({ "name": "X", "bucket": "b", "secrets": 1 })))
+        .await;
+    let tested = api.send(Method::POST, &format!("{location}/test"), token, &[], None).await;
+    let rotate = Some(json!({ "secret_access_key": "n3w", "endpoint": null }));
+    let rotated = api.send(Method::PATCH, &location, token, &[(header::IF_MATCH, "\"1\"")], rotate).await;
+    let id = destination.body["id"].clone();
+    let schedules = format!("{service}/backup-schedules");
+    let schedule =
+        api.send(Method::POST, &schedules, token, &[], Some(json!({ "destination_id": id, "cron": "30 3 * * *" }))).await;
+    let bad_cron = api.send(Method::POST, &schedules, token, &[], Some(json!({ "destination_id": id, "cron": "daily" }))).await;
+    let in_use = api.send(Method::DELETE, &location, token, &[], None).await;
+    let backups = format!("{service}/backups");
+    let backup = api.send(Method::POST, &backups, token, &[], Some(json!({ "destination_id": id }))).await;
+    let listed = api.send(Method::GET, &backups, token, &[], None).await;
+    let running = api.send(Method::DELETE, backup.header(header::LOCATION), token, &[], None).await;
+
+    assert_eq!(destination.status, StatusCode::CREATED);
+    assert_eq!(destination.body["path_prefix"], "spinikus/");
+    assert!(destination.body.get("secret_access_key").is_none(), "{}", destination.body);
+    assert_eq!(typo.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(tested.status, StatusCode::NO_CONTENT);
+    assert_eq!((rotated.status, &rotated.body["endpoint"]), (StatusCode::OK, &Value::Null));
+    assert_eq!(rotated.header(header::ETAG), "\"2\"");
+    assert_eq!(schedule.status, StatusCode::CREATED);
+    assert_eq!((&schedule.body["keep_last"], &schedule.body["enabled"]), (&json!(7), &json!(true)));
+    assert!(schedule.body["next_run_at"].as_str().unwrap().ends_with("03:30:00Z"), "{}", schedule.body);
+    assert_eq!((bad_cron.status, &bad_cron.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("cron")));
+    assert_eq!(in_use.status, StatusCode::CONFLICT);
+    assert_eq!(backup.status, StatusCode::CREATED);
+    assert_eq!((&backup.body["status"], &backup.body["engine"]), (&json!("queued"), &json!("postgres")));
+    assert!(backup.body["object_key"].as_str().unwrap().ends_with(".pgdump"));
+    assert_eq!(listed.body["items"][0]["id"], backup.body["id"]);
+    assert_eq!((running.status, &running.body["code"]), (StatusCode::CONFLICT, &json!("rejected")));
 }

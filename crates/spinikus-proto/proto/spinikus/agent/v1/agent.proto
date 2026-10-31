@@ -171,6 +171,12 @@ message CommandResult {
 message CommandSucceeded {
   // Set for `PrepareDeployment`: what was built or pulled.
   PreparedImage prepared = 1;
+  // Set for `BackupDatabase`: what was uploaded.
+  BackupUploaded backup = 2;
+}
+
+message BackupUploaded {
+  uint64 size_bytes = 1;
 }
 
 message PreparedImage {
@@ -199,6 +205,8 @@ enum FailureReason {
   FAILURE_REASON_CANCELED = 6;
   // A failure in the agent itself, such as the container runtime being unreachable.
   FAILURE_REASON_INTERNAL = 7;
+  // A database dump or its upload failed.
+  FAILURE_REASON_BACKUP_FAILED = 8;
 }
 
 // Acknowledges that the agent applied (and saved) a routes or certificates snapshot.
@@ -247,6 +255,7 @@ message Command {
     OpenSession open_session = 7;
     CancelCommand cancel_command = 8;
     RemoveDeployment remove_deployment = 9;
+    BackupDatabase backup_database = 10;
   }
 }
 
@@ -357,6 +366,27 @@ message StopDeployment {
 message RemoveDeployment {
   string deployment_id = 1;
   repeated string images = 2;
+}
+
+// Dump a database by running `command` in its container and upload what it writes to stdout
+// to `destination` as `object_key`. A non-zero exit aborts the upload.
+message BackupDatabase {
+  string backup_id = 1;
+  string container_id = 2;
+  repeated string command = 3;
+  StorageDestination destination = 4;
+  string object_key = 5;
+}
+
+// An S3-compatible bucket and the credentials to write to it.
+message StorageDestination {
+  // Empty for AWS.
+  string endpoint = 1;
+  string region = 2;
+  string bucket = 3;
+  bool path_style = 4;
+  string access_key_id = 5;
+  string secret_access_key = 6;
 }
 
 message RestartInstance {

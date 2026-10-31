@@ -128,6 +128,7 @@ impl Control {
         drop(sent);
         self.certificates_connected(server, certificates_revision).await;
         self.routes_applied(server, routes_revision).await;
+        self.backups_agent_connected(server).await;
     }
 
     pub(crate) async fn advance_deployments(&self) {

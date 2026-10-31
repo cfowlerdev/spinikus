@@ -5,6 +5,7 @@ mod access;
 pub mod agents;
 mod audit;
 pub mod auth;
+pub mod backups;
 pub mod ca;
 pub mod certificates;
 pub mod databases;
@@ -32,6 +33,7 @@ use std::sync::Arc;
 
 use agents::AgentHub;
 pub use auth::{ClientInfo, Credential, Principal};
+pub use backups::{BackupScheduleChanges, BackupTimings, NewBackupSchedule, NewStorageDestination, StorageDestinationChanges};
 pub use certificates::{
     CertificateTimings,
     acme::{AcmeClient, InstantAcme},
@@ -61,6 +63,7 @@ pub struct Control {
     certificates: Arc<certificates::Certificates>,
     logs: Arc<deployments::logs::DeploymentLogs>,
     sessions: Arc<service_logs::Sessions>,
+    backups: Arc<backups::Backups>,
 }
 
 impl Control {
@@ -69,7 +72,8 @@ impl Control {
         let certificates = Arc::new(certificates::Certificates::new(Arc::new(InstantAcme::new()), CertificateTimings::default()));
         let logs = Arc::new(deployments::logs::DeploymentLogs::new(None));
         let sessions = Arc::default();
-        Self { store, agents: AgentHub::default(), authority: Arc::default(), runner, certificates, logs, sessions }
+        let backups = Arc::new(backups::Backups::new(BackupTimings::default(), Default::default()));
+        Self { store, agents: AgentHub::default(), authority: Arc::default(), runner, certificates, logs, sessions, backups }
     }
 
     /// Replaces the ACME client and the certificate manager's timings, such as to use a
@@ -83,6 +87,21 @@ impl Control {
     /// before the runner starts.
     pub fn with_deployment_timings(mut self, timings: DeploymentTimings) -> Self {
         self.runner = Arc::new(deployments::Runner::new(timings));
+        self
+    }
+
+    /// Replaces the backup runner's timings, such as to shorten them in tests. Call it before
+    /// the runner starts.
+    pub fn with_backup_timings(mut self, timings: BackupTimings) -> Self {
+        self.backups = Arc::new(backups::Backups::new(timings, self.backups.stores.clone()));
+        self
+    }
+
+    /// Reaches every storage destination at `store` instead of its bucket, for tests. Call it
+    /// before the backup runner starts.
+    pub fn with_backup_store(mut self, store: Arc<dyn object_store::ObjectStore>) -> Self {
+        let timings = self.backups.timings();
+        self.backups = Arc::new(backups::Backups::new(timings, backups::storage::BackupStores::Fixed(store)));
         self
     }
 

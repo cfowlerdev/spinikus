@@ -36,7 +36,7 @@ pub(crate) async fn prepare_deployment(
         Some(Source::Image(_)) => return Err(failure(FailureReason::Internal, "the image source names no image")),
         Some(Source::Git(git)) => {
             let prepared = build_from_git(runtime, build, &prepare, git, progress).await?;
-            return Ok(pb::CommandSucceeded { prepared: Some(prepared) });
+            return Ok(pb::CommandSucceeded { prepared: Some(prepared), backup: None });
         }
         None => return Err(failure(FailureReason::Internal, "the deployment has no source")),
     };
@@ -46,7 +46,7 @@ pub(crate) async fn prepare_deployment(
         .await
         .map_err(|error| failure(FailureReason::BuildFailed, error.to_string()))?;
     progress.line(format!("Pinned {image} as {pinned}"));
-    Ok(pb::CommandSucceeded { prepared: Some(pb::PreparedImage { image: pinned, ..Default::default() }) })
+    Ok(pb::CommandSucceeded { prepared: Some(pb::PreparedImage { image: pinned, ..Default::default() }), backup: None })
 }
 
 pub(crate) async fn start_deployment(

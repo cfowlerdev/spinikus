@@ -29,6 +29,7 @@ use tonic::{
 
 use crate::{
     AgentError, AgentFiles, Backoff, Credentials,
+    backup::BackupStores,
     build::BuildOptions,
     certificate::{renewal_due, until, validity},
     commands::{CommandEvent, Commands},
@@ -55,6 +56,8 @@ pub struct RunOptions {
     pub proxy: Option<ProxyListeners>,
     /// Lets builds clone local repositories, for tests.
     pub local_repositories: bool,
+    /// Where backups go: each one's destination, except in tests.
+    pub backups: BackupStores,
 }
 
 /// The proxy's listeners, bound by the caller.
@@ -68,7 +71,7 @@ pub struct ProxyListeners {
 /// retrying cannot fix: the agent is not enrolled, its server was revoked, its certificate
 /// expired, or the control plane does not support it.
 pub async fn run(files: &AgentFiles, options: RunOptions, shutdown: impl Future<Output = ()>) -> Result<(), AgentError> {
-    let RunOptions { facts, backoff, runtime, proxy, local_repositories } = options;
+    let RunOptions { facts, backoff, runtime, proxy, local_repositories, backups } = options;
     let build = BuildOptions { local_repositories, ..BuildOptions::in_dir(files.dir()) };
     let (stop_proxy, proxy_stopped) = watch::channel(false);
     let stopped = move || {
@@ -89,7 +92,9 @@ pub async fn run(files: &AgentFiles, options: RunOptions, shutdown: impl Future<
         served = Some(proxy);
     }
     let mut proxy = ProxyState::load(files, served);
-    let result = stay_connected(files, facts, backoff, runtime, build, &mut proxy, shutdown).await;
+    // Outlives connections: a command that finishes while disconnected reports on the next.
+    let commands = Commands::new(runtime.clone(), build, backups);
+    let result = stay_connected(files, facts, backoff, runtime, commands, &mut proxy, shutdown).await;
     let _ = stop_proxy.send(true);
     for serving in serving {
         let _ = serving.await;
@@ -102,13 +107,11 @@ async fn stay_connected(
     facts: pb::ServerFacts,
     mut backoff: Backoff,
     runtime: Arc<dyn ContainerRuntime>,
-    build: BuildOptions,
+    mut commands: Commands,
     proxy: &mut ProxyState,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), AgentError> {
     let mut shutdown = std::pin::pin!(shutdown);
-    // Outlives connections: a command that finishes while disconnected reports on the next.
-    let mut commands = Commands::new(runtime.clone(), build);
     loop {
         let credentials = files.load()?;
         let invalid =

@@ -51,6 +51,13 @@ impl Engine {
 
 impl_text!(Engine, "database engine");
 
+impl Engine {
+    /// The engine a database service's config names (`database.engine`), if any.
+    pub fn of(config: &ServiceConfig) -> Option<Self> {
+        config.get("database")?.get("engine")?.as_str()?.parse().ok()
+    }
+}
+
 /// A database to create: an engine at one of its versions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseSpec {
@@ -186,6 +193,12 @@ mod tests {
         );
         assert_eq!(variables[3].value, "postgres://app:pw@db:5432/app");
         assert!(crate::runtime::RuntimeSettings::from_config(&postgres.config()).unwrap().start.is_none());
+    }
+
+    #[test]
+    fn reads_the_engine_back_from_the_config() {
+        assert_eq!(Engine::of(&DatabaseSpec::new(Engine::Redis, None).unwrap().config()), Some(Engine::Redis));
+        assert_eq!(Engine::of(&ServiceConfig::new()), None);
     }
 
     #[test]

@@ -56,16 +56,26 @@ impl ControlPlane {
         let (stop, stopped) = oneshot::channel::<()>();
         let (stop_runner, runner_stopped) = oneshot::channel::<()>();
         let (stop_certificates, certificates_stopped) = oneshot::channel::<()>();
+        let (stop_backups, backups_stopped) = oneshot::channel::<()>();
         tokio::spawn(spinikus_control::agents::serve(control.clone(), listener, async move {
             let _ = stopped.await;
             let _ = stop_runner.send(());
             let _ = stop_certificates.send(());
+            let _ = stop_backups.send(());
         }));
         let certificates = control.clone();
         tokio::spawn(async move {
             certificates
                 .run_certificates(async move {
                     let _ = certificates_stopped.await;
+                })
+                .await
+        });
+        let backups = control.clone();
+        tokio::spawn(async move {
+            backups
+                .run_backups(async move {
+                    let _ = backups_stopped.await;
                 })
                 .await
         });
