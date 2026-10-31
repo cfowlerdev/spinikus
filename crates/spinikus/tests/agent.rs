@@ -9,7 +9,7 @@ use common::ControlPlane;
 use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 use spinikus_agent::{
-    AgentError, AgentFiles, Backoff, RunOptions,
+    AgentError, AgentFiles, Backoff, ProxyListeners, RunOptions,
     runtime::{ContainerRuntime, DockerRuntime, MemoryRuntime},
 };
 use spinikus_control::ca::AgentCsr;
@@ -44,7 +44,7 @@ fn start_agent_with(
         facts: spinikus_agent::server_facts(),
         backoff: Backoff::new(Duration::from_millis(50), Duration::from_millis(200)),
         runtime,
-        proxy,
+        proxy: proxy.map(|http| ProxyListeners { http, https: None }),
     };
     let handle = tokio::spawn(async move {
         spinikus_agent::run(&files, options, async move {

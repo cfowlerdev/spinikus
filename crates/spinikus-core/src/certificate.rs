@@ -29,6 +29,36 @@ impl Certificate {
     pub fn covers(&self, hostname: &Hostname) -> bool {
         self.hostnames.iter().any(|name| name.covers(hostname))
     }
+
+    /// When to renew: once two thirds of its lifetime have passed.
+    pub fn renewal_due(&self) -> Timestamp {
+        let lifetime = self.not_after.duration_since(self.not_before);
+        self.not_before + lifetime * 2 / 3
+    }
+}
+
+/// A certificate with its private key, as the proxy serves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateBundle {
+    pub id: CertificateId,
+    pub hostnames: Vec<Hostname>,
+    pub chain_pem: String,
+    pub private_key_pem: Secret,
+}
+
+/// Where getting a certificate for a hostname stands: the current certificate, if any,
+/// and the failures since the last success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostnameCertificate {
+    pub hostname: Hostname,
+    pub certificate_id: Option<CertificateId>,
+    /// Failed attempts in a row.
+    pub failures: u32,
+    /// Why the last attempt failed.
+    pub last_error: Option<String>,
+    /// When to try again after a failure.
+    pub retry_at: Option<Timestamp>,
+    pub updated_at: Timestamp,
 }
 
 /// A certificate to store. The caller reads the names and validity from the certificate itself.

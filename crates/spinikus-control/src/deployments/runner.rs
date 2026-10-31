@@ -66,7 +66,7 @@ impl Default for DeploymentTimings {
 }
 
 pub(crate) struct Runner {
-    pub(super) timings: DeploymentTimings,
+    pub(crate) timings: DeploymentTimings,
     wake: Notify,
     /// When each unanswered command was last sent, and to which server. Held across a whole
     /// pass or result, so they never interleave.
@@ -111,13 +111,14 @@ impl Control {
         self.runner().wake.notify_one();
     }
 
-    /// The agent may have lost what it was sent: send it again now. `routes_revision` is the
-    /// route table it already has.
-    pub(crate) async fn agent_connected(&self, server: ServerId, routes_revision: u64) {
+    /// The agent may have lost what it was sent: send it again now. The revisions are the
+    /// route table and certificates it already has.
+    pub(crate) async fn agent_connected(&self, server: ServerId, routes_revision: u64, certificates_revision: u64) {
         let mut sent = self.runner().sent.lock().await;
         sent.retain(|_, (to, _)| *to != server);
         self.runner().routes_sent.lock().await.remove(&server);
         drop(sent);
+        self.certificates_connected(server, certificates_revision).await;
         self.routes_applied(server, routes_revision).await;
     }
 

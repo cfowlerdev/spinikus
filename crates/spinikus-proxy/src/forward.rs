@@ -15,6 +15,22 @@ static X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-prot
 static KEEP_ALIVE: HeaderName = HeaderName::from_static("keep-alive");
 static PROXY_CONNECTION: HeaderName = HeaderName::from_static("proxy-connection");
 
+/// How a request reached the proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheme {
+    Http,
+    Https,
+}
+
+impl Scheme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
 /// Whether the client asks to switch protocols, as WebSockets do.
 pub(crate) fn is_upgrade(headers: &HeaderMap) -> bool {
     headers.contains_key(header::UPGRADE)
@@ -66,6 +82,7 @@ pub(crate) fn to_upstream<B>(
     host: &HeaderValue,
     upstream: SocketAddr,
     peer: SocketAddr,
+    scheme: Scheme,
     upgrade: bool,
 ) {
     let path = request.uri().path_and_query().map_or("/", |path| path.as_str());
@@ -85,7 +102,7 @@ pub(crate) fn to_upstream<B>(
         headers.insert(X_FORWARDED_FOR.clone(), value);
     }
     headers.insert(X_FORWARDED_HOST.clone(), host.clone());
-    headers.insert(X_FORWARDED_PROTO.clone(), HeaderValue::from_static("http"));
+    headers.insert(X_FORWARDED_PROTO.clone(), HeaderValue::from_static(scheme.as_str()));
 }
 
 #[cfg(test)]
@@ -106,7 +123,8 @@ mod tests {
             .unwrap();
         let host = HeaderValue::from_static("app.example.com");
 
-        to_upstream(&mut request, &host, "127.0.0.1:49000".parse().unwrap(), "192.0.2.7:5000".parse().unwrap(), false);
+        let (upstream, peer) = ("127.0.0.1:49000".parse().unwrap(), "192.0.2.7:5000".parse().unwrap());
+        to_upstream(&mut request, &host, upstream, peer, Scheme::Https, false);
 
         assert_eq!(request.uri(), "http://127.0.0.1:49000/a/b?c=d");
         assert_eq!(request.version(), Version::HTTP_11);
@@ -114,7 +132,7 @@ mod tests {
         assert_eq!(headers[header::HOST], "app.example.com");
         assert_eq!(headers["x-forwarded-for"], "10.0.0.1, 192.0.2.7");
         assert_eq!(headers["x-forwarded-host"], "app.example.com");
-        assert_eq!(headers["x-forwarded-proto"], "http");
+        assert_eq!(headers["x-forwarded-proto"], "https");
         assert_eq!(headers["x-other"], "kept");
         for gone in ["connection", "x-secret", "te"] {
             assert!(!headers.contains_key(gone), "{gone}");

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use spinikus_agent::{
-    AgentFiles, Backoff, RunOptions,
+    AgentFiles, Backoff, ProxyListeners, RunOptions,
     runtime::{ContainerRuntime, DockerRuntime},
 };
 use spinikus_core::{config::SpinikusConfig, secret::Secret};
@@ -47,7 +47,7 @@ pub async fn run(config: &SpinikusConfig) -> anyhow::Result<()> {
         facts: spinikus_agent::server_facts(),
         backoff: Backoff::default(),
         runtime: runtime(),
-        proxy: proxy_listener(config).await?,
+        proxy: proxy_listeners(config).await?,
     };
     let shutdown = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
@@ -59,18 +59,21 @@ pub async fn run(config: &SpinikusConfig) -> anyhow::Result<()> {
     spinikus_agent::run(&files(config), options, shutdown).await.context("The agent stopped")
 }
 
-/// The proxy's listener, if the proxy is on. Bound before the agent starts, so a port that
+/// The proxy's listeners, if the proxy is on. Bound before the agent starts, so a port that
 /// is taken stops it right away.
-pub async fn proxy_listener(config: &SpinikusConfig) -> anyhow::Result<Option<TcpListener>> {
+pub async fn proxy_listeners(config: &SpinikusConfig) -> anyhow::Result<Option<ProxyListeners>> {
     if !config.proxy.enabled {
         return Ok(None);
     }
-    let address = config.proxy.listen;
-    let listener = TcpListener::bind(address).await.with_context(|| {
-        format!("Failed to listen for the proxy on {address}; set [proxy] listen, or [proxy] enabled = false")
-    })?;
-    tracing::info!(%address, "The proxy serves apps");
-    Ok(Some(listener))
+    let bind = |address, setting: &'static str| async move {
+        TcpListener::bind(address).await.with_context(|| {
+            format!("Failed to listen for the proxy on {address}; set [proxy] {setting}, or [proxy] enabled = false")
+        })
+    };
+    let (http, https) = (config.proxy.listen, config.proxy.https_listen);
+    let listeners = ProxyListeners { http: bind(http, "listen").await?, https: Some(bind(https, "https_listen").await?) };
+    tracing::info!(%http, %https, "The proxy serves apps");
+    Ok(Some(listeners))
 }
 
 /// The container runtime on this machine: Docker, at `DOCKER_HOST` or the local socket.

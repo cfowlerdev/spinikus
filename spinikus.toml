@@ -27,4 +27,7 @@ listen = "0.0.0.0:8443"
 # in development a high loopback port needs no privileges. Generated hostnames such as
 # http://web-production-shop.localhost:8000 resolve to this machine without DNS.
 listen = "127.0.0.1:8000"
+# Where it serves HTTPS, with certificates from the ACME CA once the acme_email setting
+# is set. Defaults to 0.0.0.0:443.
+https_listen = "127.0.0.1:8444"
 # enabled = false   # run the agent without a proxy

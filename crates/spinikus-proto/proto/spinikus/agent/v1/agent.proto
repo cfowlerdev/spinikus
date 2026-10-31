@@ -207,6 +207,7 @@ enum SnapshotKind {
   SNAPSHOT_KIND_UNSPECIFIED = 0;
   SNAPSHOT_KIND_ROUTES = 1;
   SNAPSHOT_KIND_CERTIFICATES = 2;
+  SNAPSHOT_KIND_ACME_CHALLENGES = 3;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -218,6 +219,7 @@ message ControlMessage {
     Command command = 2;
     SetRoutes set_routes = 3;
     SetCertificates set_certificates = 4;
+    AcmeChallenges acme_challenges = 5;
   }
 }
 
@@ -380,6 +382,18 @@ message ProxyTarget {
   // The live deployment, whose containers the agent resolves locally.
   string deployment_id = 2;
   uint32 port = 3;
+}
+
+// The HTTP-01 challenges the proxy answers at `/.well-known/acme-challenge/<token>`, for
+// any host. Replaces the previous set; the agent keeps them in memory only.
+message AcmeChallenges {
+  uint64 revision = 1;
+  repeated AcmeChallenge challenges = 2;
+}
+
+message AcmeChallenge {
+  string token = 1;
+  string key_authorization = 2;
 }
 
 // All certificates this server's proxy serves. Replaces the previous set.

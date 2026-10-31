@@ -27,7 +27,7 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
             .with_graceful_shutdown(until(stopped.clone()));
     let agent_address = agent_listener.local_addr().context("Failed to read the agent listener's address")?;
     let proxy = match config.agents.embedded {
-        true => crate::agent::proxy_listener(config).await?,
+        true => crate::agent::proxy_listeners(config).await?,
         false => None,
     };
     let embedded = config.agents.embedded.then(|| {
@@ -43,6 +43,10 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
     let deployments = {
         let (control, shutdown) = (control.clone(), until(stopped.clone()));
         tokio::spawn(async move { control.run_deployments(shutdown).await })
+    };
+    let certificates = {
+        let (control, shutdown) = (control.clone(), until(stopped.clone()));
+        tokio::spawn(async move { control.run_certificates(shutdown).await })
     };
     let agents = spinikus_control::agents::serve(control, agent_listener, until(stopped));
     tracing::info!(%http_address, "Server started, press Ctrl+C to stop");
@@ -68,6 +72,7 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
         Stopped::Agents(result) => result.and(joined(http.await)),
     };
     let _ = deployments.await;
+    let _ = certificates.await;
     if let Some(embedded) = embedded {
         let _ = embedded.await;
     }

@@ -5,13 +5,14 @@
 use serde::Serialize;
 use serde_json::json;
 use spinikus_core::{
+    certificate::HostnameCertificate,
     domain::{Domain, DomainFields, Hostname},
     environment::Environment,
     id::{DomainId, ServiceId},
     membership::Role,
     service::{Service, ServiceKind},
 };
-use spinikus_store::DomainRepository;
+use spinikus_store::{CertificateRepository, DomainRepository};
 
 use crate::{Control, ControlError, Principal, access::not_found, audit};
 
@@ -30,11 +31,13 @@ pub struct DomainChanges {
     pub redirect_to: Option<Option<DomainId>>,
 }
 
-/// Where a service is reachable: its generated hostname, if it has one, and its domains.
+/// Where a service is reachable: its generated hostname, if it has one, and its domains,
+/// with where getting a certificate stands for those of its hostnames that have tried.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServiceDomains {
     pub generated_hostname: Option<Hostname>,
     pub domains: Vec<Domain>,
+    pub certificates: Vec<HostnameCertificate>,
 }
 
 impl Control {
@@ -56,10 +59,14 @@ impl Control {
 
     pub async fn list_domains(&self, principal: &Principal, service_id: ServiceId) -> Result<ServiceDomains, ControlError> {
         self.service_with_access(principal, service_id, Role::Viewer).await?;
-        Ok(ServiceDomains {
-            generated_hostname: self.generated_hostname(service_id).await?,
-            domains: self.store().list_domains(service_id).await?,
-        })
+        let generated_hostname = self.generated_hostname(service_id).await?;
+        let domains = self.store().list_domains(service_id).await?;
+        let mut certificates = self.store().list_hostname_certificates().await?;
+        certificates.retain(|record| {
+            generated_hostname.as_ref() == Some(&record.hostname)
+                || domains.iter().any(|domain| domain.hostname == record.hostname)
+        });
+        Ok(ServiceDomains { generated_hostname, domains, certificates })
     }
 
     pub async fn get_domain(&self, principal: &Principal, id: DomainId) -> Result<Domain, ControlError> {

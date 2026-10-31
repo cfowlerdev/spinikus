@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 argon2.workspace = true
+async-trait.workspace = true
+instant-acme.workspace = true
 jiff.workspace = true
 prost-types.workspace = true
 rand.workspace = true

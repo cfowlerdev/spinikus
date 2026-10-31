@@ -18,12 +18,12 @@ mod error;
 mod facts;
 mod files;
 mod health;
+mod proxy;
 mod report;
-mod routes;
 pub mod runtime;
 
 pub use backoff::Backoff;
-pub use connection::{RunOptions, run};
+pub use connection::{ProxyListeners, RunOptions, run};
 pub use enroll::join;
 pub use error::AgentError;
 pub use facts::server_facts;

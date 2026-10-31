@@ -5,7 +5,8 @@
 //! of the runner rebuilds every server's table, stores it (a change gets a new revision),
 //! and sends a table its agent has not applied, again after a while if unanswered. A
 //! draining deployment is stopped only once its server's agent has applied a table that no
-//! longer routes to it, so no request reaches a stopping container.
+//! longer routes to it, so no request reaches a stopping container. The certificates of the
+//! routed hostnames follow the same way ([`Control::sync_certificates`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -101,12 +102,13 @@ impl Control {
         Ok(tables)
     }
 
-    /// Stores every server's routes and sends each table its agent has not applied yet.
+    /// Stores every server's routes and sends each table its agent has not applied yet, then
+    /// does the same for their certificates.
     pub(super) async fn sync_routes(&self) -> Result<(), ControlError> {
         let tables = self.build_routes().await?;
         let mut sent = self.runner().routes_sent.lock().await;
-        for (server, routes) in tables {
-            let stored = self.store().save_route_table(server, routes).await?;
+        for (&server, routes) in &tables {
+            let stored = self.store().save_route_table(server, routes.clone()).await?;
             if stored.applied() {
                 sent.remove(&server);
                 continue;
@@ -120,9 +122,12 @@ impl Control {
             if self.agents().send(server, set_routes(&stored)).await.is_ok() {
                 tracing::debug!(server = %server, revision = stored.table.revision, "sent routes");
                 sent.insert(server, (stored.table.revision, Instant::now()));
+                // New hostnames may need certificates.
+                self.wake_certificates();
             }
         }
-        Ok(())
+        drop(sent);
+        self.sync_certificates(&tables).await
     }
 
     /// The agent applied the routes with `revision`, now or before it connected.

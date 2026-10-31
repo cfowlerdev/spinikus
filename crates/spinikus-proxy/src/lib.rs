@@ -1,10 +1,13 @@
 //! The reverse proxy that runs on every agent: it serves the apps on its server by
 //! hostname, from the route table the control plane sends, and redirects hostnames that
-//! redirect. Plain HTTP only so far; TLS comes with certificates.
+//! redirect. It serves HTTPS with the certificates it is given, chosen by SNI, answers
+//! ACME HTTP-01 challenges over HTTP, and redirects HTTP to HTTPS for hosts with a
+//! certificate.
 //!
 //! The proxy knows routes, not containers: [`Upstreams`] tells it where a deployment's
 //! container listens, which the agent answers from the container runtime.
 
+mod certificates;
 mod forward;
 mod routes;
 mod server;
@@ -12,8 +15,10 @@ mod server;
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
+pub use certificates::Certificates;
+pub use forward::Scheme;
 pub use routes::Routes;
-pub use server::{Proxy, serve};
+pub use server::{Proxy, serve, serve_tls};
 use spinikus_core::route::ProxyTarget;
 
 /// Where the proxy finds the apps it routes to.

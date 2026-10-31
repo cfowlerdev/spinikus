@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use jiff::Timestamp;
 use spinikus_core::{
-    certificate::{AcmeAccount, Certificate, NewAcmeAccount, NewCertificate},
+    certificate::{AcmeAccount, Certificate, HostnameCertificate, NewAcmeAccount, NewCertificate},
     domain::Hostname,
     id::{AcmeAccountId, CertificateId},
     secret::Secret,
@@ -38,6 +38,21 @@ pub trait CertificateRepository: Send + Sync {
 
     /// Deletes the certificate. Refused while a domain uses it.
     async fn delete_certificate(&self, id: CertificateId) -> Result<(), StoreError>;
+
+    /// Where getting a certificate stands for every hostname that ever needed one.
+    async fn list_hostname_certificates(&self) -> Result<Vec<HostnameCertificate>, StoreError>;
+
+    /// Stores a certificate issued for `hostname` and makes it the hostname's current one,
+    /// clearing any failures.
+    async fn record_certificate_issued(&self, hostname: &Hostname, new: NewCertificate) -> Result<Certificate, StoreError>;
+
+    /// Records a failed attempt for `hostname`, which keeps its current certificate.
+    async fn record_certificate_failure(
+        &self,
+        hostname: &Hostname,
+        error: &str,
+        retry_at: Timestamp,
+    ) -> Result<HostnameCertificate, StoreError>;
 }
 
 macro_rules! columns {
@@ -125,6 +140,76 @@ pub(crate) async fn fetch_certificate(conn: &mut SqliteConnection, id: Certifica
     row.ok_or_else(|| StoreError::NotFound { entity: ENTITY, id: id.to_string() })?.try_into()
 }
 
+/// Inserts a certificate, its key sealed with the certificate's ID as context.
+async fn insert_certificate(
+    keyring: &Keyring,
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    new: NewCertificate,
+) -> Result<Certificate, StoreError> {
+    let id = CertificateId::new();
+    let sealed = keyring.seal(new.private_key_pem.expose().as_bytes(), id.to_string().as_bytes());
+    let hostnames = serde_json::to_string(&new.hostnames).expect("hostnames serialize to JSON");
+    if let Some(account_id) = new.acme_account_id {
+        let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM acme_accounts WHERE id = ?")
+            .bind(account_id.to_string())
+            .fetch_optional(&mut **tx)
+            .await?;
+        if exists.is_none() {
+            return Err(StoreError::NotFound { entity: ACCOUNT, id: account_id.to_string() });
+        }
+    }
+
+    let row: CertificateRow = sqlx::query_as(concat!(
+        "INSERT INTO certificates (id, hostnames, chain_pem, private_key, data_key_id, not_before, not_after, acme_account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING ",
+        columns!()
+    ))
+    .bind(id.to_string())
+    .bind(hostnames)
+    .bind(&new.chain_pem)
+    .bind(sealed.ciphertext)
+    .bind(sealed.key_id.to_string())
+    .bind(format_timestamp(new.not_before))
+    .bind(format_timestamp(new.not_after))
+    .bind(new.acme_account_id.map(|id| id.to_string()))
+    .fetch_one(&mut **tx)
+    .await?;
+    row.try_into()
+}
+
+macro_rules! hostname_columns {
+    () => {
+        "hostname, certificate_id, failures, last_error, retry_at, updated_at"
+    };
+}
+
+#[derive(sqlx::FromRow)]
+struct HostnameRow {
+    hostname: String,
+    certificate_id: Option<String>,
+    failures: i64,
+    last_error: Option<String>,
+    retry_at: Option<String>,
+    updated_at: String,
+}
+
+impl TryFrom<HostnameRow> for HostnameCertificate {
+    type Error = StoreError;
+
+    fn try_from(row: HostnameRow) -> Result<Self, Self::Error> {
+        const ENTITY: &str = "hostname certificate";
+        Ok(HostnameCertificate {
+            hostname: parse_column(ENTITY, "hostname", &row.hostname)?,
+            certificate_id: row.certificate_id.map(|id| parse_column(ENTITY, "certificate_id", &id)).transpose()?,
+            failures: row.failures.try_into().unwrap_or(u32::MAX),
+            last_error: row.last_error,
+            retry_at: row.retry_at.map(|at| parse_column(ENTITY, "retry_at", &at)).transpose()?,
+            updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
+        })
+    }
+}
+
 #[async_trait]
 impl CertificateRepository for SqliteStore {
     async fn create_acme_account(&self, new: NewAcmeAccount) -> Result<AcmeAccount, StoreError> {
@@ -169,44 +254,61 @@ impl CertificateRepository for SqliteStore {
     }
 
     async fn create_certificate(&self, new: NewCertificate) -> Result<Certificate, StoreError> {
-        let id = CertificateId::new();
-        let sealed = self.keyring().seal(new.private_key_pem.expose().as_bytes(), id.to_string().as_bytes());
-        let hostnames = serde_json::to_string(&new.hostnames).expect("hostnames serialize to JSON");
         let mut tx = self.begin_write().await?;
-
-        if let Some(account_id) = new.acme_account_id {
-            let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM acme_accounts WHERE id = ?")
-                .bind(account_id.to_string())
-                .fetch_optional(&mut *tx)
-                .await?;
-            if exists.is_none() {
-                return Err(StoreError::NotFound { entity: ACCOUNT, id: account_id.to_string() });
-            }
-        }
-
-        let row: CertificateRow = sqlx::query_as(concat!(
-            "INSERT INTO certificates (id, hostnames, chain_pem, private_key, data_key_id, not_before, not_after, acme_account_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             RETURNING ",
-            columns!()
-        ))
-        .bind(id.to_string())
-        .bind(hostnames)
-        .bind(&new.chain_pem)
-        .bind(sealed.ciphertext)
-        .bind(sealed.key_id.to_string())
-        .bind(format_timestamp(new.not_before))
-        .bind(format_timestamp(new.not_after))
-        .bind(new.acme_account_id.map(|id| id.to_string()))
-        .fetch_one(&mut *tx)
-        .await?;
-
+        let certificate = insert_certificate(self.keyring(), &mut tx, new).await?;
         tx.commit().await?;
-        row.try_into()
+        Ok(certificate)
     }
 
     async fn get_certificate(&self, id: CertificateId) -> Result<Certificate, StoreError> {
         fetch_certificate(&mut *self.pool().acquire().await?, id).await
+    }
+
+    async fn list_hostname_certificates(&self) -> Result<Vec<HostnameCertificate>, StoreError> {
+        let rows: Vec<HostnameRow> =
+            sqlx::query_as(concat!("SELECT ", hostname_columns!(), " FROM hostname_certificates ORDER BY hostname"))
+                .fetch_all(self.pool())
+                .await?;
+        rows.into_iter().map(HostnameCertificate::try_from).collect()
+    }
+
+    async fn record_certificate_issued(&self, hostname: &Hostname, new: NewCertificate) -> Result<Certificate, StoreError> {
+        let mut tx = self.begin_write().await?;
+        let certificate = insert_certificate(self.keyring(), &mut tx, new).await?;
+        sqlx::query(
+            "INSERT INTO hostname_certificates (hostname, certificate_id) VALUES (?, ?)
+             ON CONFLICT (hostname) DO UPDATE
+             SET certificate_id = excluded.certificate_id, failures = 0, last_error = NULL, retry_at = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        )
+        .bind(hostname.as_str())
+        .bind(certificate.id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(certificate)
+    }
+
+    async fn record_certificate_failure(
+        &self,
+        hostname: &Hostname,
+        error: &str,
+        retry_at: Timestamp,
+    ) -> Result<HostnameCertificate, StoreError> {
+        let row: HostnameRow = sqlx::query_as(concat!(
+            "INSERT INTO hostname_certificates (hostname, failures, last_error, retry_at) VALUES (?, 1, ?, ?)
+             ON CONFLICT (hostname) DO UPDATE
+             SET failures = failures + 1, last_error = excluded.last_error, retry_at = excluded.retry_at,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             RETURNING ",
+            hostname_columns!()
+        ))
+        .bind(hostname.as_str())
+        .bind(error)
+        .bind(format_timestamp(retry_at))
+        .fetch_one(self.pool())
+        .await?;
+        row.try_into()
     }
 
     async fn list_certificates(&self) -> Result<Vec<Certificate>, StoreError> {
@@ -269,6 +371,34 @@ mod tests {
             email: email.to_string(),
             credentials: Secret::new(r#"{"id":"https://acme/acct/1","key_pkcs8":"..."}"#),
         }
+    }
+
+    #[tokio::test]
+    async fn records_issued_certificates_and_failures_per_hostname() {
+        let (_dir, store) = store().await;
+        let hostname: Hostname = "app.example.com".parse().unwrap();
+        let retry_at: Timestamp = "2026-11-01T01:00:00Z".parse().unwrap();
+
+        let failed = store.record_certificate_failure(&hostname, "DNS problem", retry_at).await.unwrap();
+        let again = store.record_certificate_failure(&hostname, "still DNS", retry_at).await.unwrap();
+        let issued = store
+            .record_certificate_issued(&hostname, new_certificate(&["app.example.com"], "2027-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        let listed = store.list_hostname_certificates().await.unwrap();
+        let renewed = store
+            .record_certificate_issued(&hostname, new_certificate(&["app.example.com"], "2027-02-01T00:00:00Z"))
+            .await
+            .unwrap();
+        let failed_renewal = store.record_certificate_failure(&hostname, "rate limited", retry_at).await.unwrap();
+
+        assert_eq!((failed.failures, failed.certificate_id, failed.last_error.as_deref()), (1, None, Some("DNS problem")));
+        assert_eq!((again.failures, again.retry_at), (2, Some(retry_at)));
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].certificate_id, listed[0].failures, listed[0].last_error.as_deref()), (Some(issued.id), 0, None));
+        assert_eq!(store.certificate_private_key(issued.id).await.unwrap().expose(), "-----BEGIN PRIVATE KEY-----\nsecret");
+        // A failed renewal keeps the current certificate.
+        assert_eq!((failed_renewal.certificate_id, failed_renewal.failures), (Some(renewed.id), 1));
     }
 
     #[tokio::test]

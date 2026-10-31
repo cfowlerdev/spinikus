@@ -4,7 +4,8 @@
 //! once two thirds of its lifetime has passed, and the agent reconnects with the new one.
 //! While connected, the reporter keeps the control plane's view of this server's
 //! containers current, and commands run as they arrive. The proxy, when there is one,
-//! serves for the agent's whole run, from the saved routes until new ones arrive.
+//! serves for the agent's whole run, from the saved routes and certificates until new
+//! ones arrive.
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
@@ -30,8 +31,8 @@ use crate::{
     certificate::{renewal_due, until, validity},
     commands::{CommandEvent, Commands},
     enroll::channel,
+    proxy::{ProxyState, RuntimeUpstreams},
     report::report,
-    routes::{RouteState, RuntimeUpstreams},
     runtime::ContainerRuntime,
 };
 
@@ -49,7 +50,14 @@ pub struct RunOptions {
     pub backoff: Backoff,
     pub runtime: Arc<dyn ContainerRuntime>,
     /// Where the proxy serves apps, or `None` to run without one.
-    pub proxy: Option<TcpListener>,
+    pub proxy: Option<ProxyListeners>,
+}
+
+/// The proxy's listeners, bound by the caller.
+pub struct ProxyListeners {
+    pub http: TcpListener,
+    /// Where HTTPS is served, or `None` for plain HTTP only.
+    pub https: Option<TcpListener>,
 }
 
 /// Keeps the agent connected until `shutdown` resolves. Returns an error only for what
@@ -57,17 +65,28 @@ pub struct RunOptions {
 /// expired, or the control plane does not support it.
 pub async fn run(files: &AgentFiles, options: RunOptions, shutdown: impl Future<Output = ()>) -> Result<(), AgentError> {
     let RunOptions { facts, backoff, runtime, proxy } = options;
-    let proxy = proxy.map(|listener| (spinikus_proxy::Proxy::new(Arc::new(RuntimeUpstreams::new(runtime.clone()))), listener));
-    let mut routes = RouteState::load(files, proxy.as_ref().map(|(proxy, _)| proxy.clone()));
-    let (stop_proxy, mut proxy_stopped) = watch::channel(false);
-    let serving = proxy.map(|(proxy, listener)| {
-        tokio::spawn(spinikus_proxy::serve(proxy, listener, async move {
+    let (stop_proxy, proxy_stopped) = watch::channel(false);
+    let stopped = move || {
+        let mut proxy_stopped = proxy_stopped.clone();
+        async move {
             let _ = proxy_stopped.wait_for(|stopped| *stopped).await;
-        }))
-    });
-    let result = stay_connected(files, facts, backoff, runtime, &mut routes, shutdown).await;
+        }
+    };
+    let mut serving = Vec::new();
+    let mut served = None;
+    if let Some(ProxyListeners { http, https }) = proxy {
+        let https_port = https.as_ref().and_then(|listener| listener.local_addr().ok()).map(|address| address.port());
+        let proxy = spinikus_proxy::Proxy::new(Arc::new(RuntimeUpstreams::new(runtime.clone())), https_port);
+        serving.push(tokio::spawn(spinikus_proxy::serve(proxy.clone(), http, stopped())));
+        if let Some(https) = https {
+            serving.push(tokio::spawn(spinikus_proxy::serve_tls(proxy.clone(), https, stopped())));
+        }
+        served = Some(proxy);
+    }
+    let mut proxy = ProxyState::load(files, served);
+    let result = stay_connected(files, facts, backoff, runtime, &mut proxy, shutdown).await;
     let _ = stop_proxy.send(true);
-    if let Some(serving) = serving {
+    for serving in serving {
         let _ = serving.await;
     }
     result
@@ -78,7 +97,7 @@ async fn stay_connected(
     facts: pb::ServerFacts,
     mut backoff: Backoff,
     runtime: Arc<dyn ContainerRuntime>,
-    routes: &mut RouteState,
+    proxy: &mut ProxyState,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), AgentError> {
     let mut shutdown = std::pin::pin!(shutdown);
@@ -93,7 +112,7 @@ async fn stay_connected(
             return Err(AgentError::CertificateExpired(not_after));
         }
 
-        let ended = session(files, &credentials, &facts, &*runtime, &mut commands, routes, shutdown.as_mut()).await?;
+        let ended = session(files, &credentials, &facts, &*runtime, &mut commands, proxy, shutdown.as_mut()).await?;
         let reason = match ended {
             Ended::Shutdown => return Ok(()),
             Ended::Renewed => {
@@ -148,7 +167,7 @@ async fn session(
     facts: &pb::ServerFacts,
     runtime: &dyn ContainerRuntime,
     commands: &mut Commands,
-    routes: &mut RouteState,
+    proxy: &mut ProxyState,
     mut shutdown: Pin<&mut impl Future<Output = ()>>,
 ) -> Result<Ended, AgentError> {
     let tls = ClientTlsConfig::new()
@@ -171,8 +190,8 @@ async fn session(
         agent_version: crate::AGENT_VERSION.to_string(),
         facts: Some(facts.clone()),
         in_flight_command_ids: commands.in_flight(),
-        routes_revision: routes.revision(),
-        ..Default::default()
+        routes_revision: proxy.routes_revision(),
+        certificates_revision: proxy.certificates_revision(),
     };
     outbound.send(message(agent_message::Message::Hello(hello))).await.expect("the receiver is held below");
     let response = tokio::select! {
@@ -236,7 +255,7 @@ async fn session(
                 }
             }
             received = inbound.message() => match received {
-                Ok(Some(received)) => handle(received, &outbound, commands, routes).await,
+                Ok(Some(received)) => handle(received, &outbound, commands, proxy).await,
                 Ok(None) => return Ok(lost(true, "the control plane closed the connection")),
                 Err(status) => return refused(status, true),
             },
@@ -266,7 +285,7 @@ async fn handle(
     received: ControlMessage,
     outbound: &mpsc::Sender<AgentMessage>,
     commands: &mut Commands,
-    routes: &mut RouteState,
+    proxy: &mut ProxyState,
 ) {
     match received.message {
         Some(control_message::Message::Command(command)) => {
@@ -274,18 +293,31 @@ async fn handle(
                 let _ = outbound.send(message(agent_message::Message::CommandResult(result))).await;
             }
         }
+        // Unacknowledged snapshots are sent again later.
         Some(control_message::Message::SetRoutes(set)) => {
             let revision = set.revision;
-            // Unacknowledged, the control plane sends the routes again later.
-            if let Err(error) = routes.apply(set) {
-                return tracing::error!(%error, "failed to apply routes");
+            match proxy.apply_routes(set) {
+                Ok(()) => applied(outbound, pb::SnapshotKind::Routes, revision).await,
+                Err(error) => tracing::error!(%error, "failed to apply routes"),
             }
-            let applied = pb::SnapshotApplied { kind: pb::SnapshotKind::Routes.into(), revision };
-            let _ = outbound.send(message(agent_message::Message::SnapshotApplied(applied))).await;
         }
-        Some(control_message::Message::SetCertificates(_)) => {
-            tracing::debug!("ignored certificates, which this agent cannot serve yet");
+        Some(control_message::Message::SetCertificates(set)) => {
+            let revision = set.revision;
+            match proxy.apply_certificates(set) {
+                Ok(()) => applied(outbound, pb::SnapshotKind::Certificates, revision).await,
+                Err(error) => tracing::error!(%error, "failed to apply certificates"),
+            }
+        }
+        Some(control_message::Message::AcmeChallenges(set)) => {
+            let revision = set.revision;
+            proxy.apply_challenges(set);
+            applied(outbound, pb::SnapshotKind::AcmeChallenges, revision).await;
         }
         Some(control_message::Message::Welcome(_)) | None => {}
     }
+}
+
+async fn applied(outbound: &mpsc::Sender<AgentMessage>, kind: pb::SnapshotKind, revision: u64) {
+    let applied = pb::SnapshotApplied { kind: kind.into(), revision };
+    let _ = outbound.send(message(agent_message::Message::SnapshotApplied(applied))).await;
 }

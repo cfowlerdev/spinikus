@@ -17,6 +17,7 @@ gethostname = "1.1.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "http2", "server-auto", "server-graceful", "tokio"] }
+instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 jiff = { version = "0.2.38", features = ["serde"] }
 prost = "0.14.4"
 prost-types = "0.14.4"

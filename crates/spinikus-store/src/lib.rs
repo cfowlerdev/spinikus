@@ -37,7 +37,7 @@ pub use instances::InstanceRepository;
 pub use jobs::JobRepository;
 pub use memberships::MembershipRepository;
 pub use projects::ProjectRepository;
-pub use routes::{RouteRepository, StoredRoutes};
+pub use routes::{RouteRepository, ServerCertificateRepository, StoredCertificates, StoredRoutes};
 pub use secrets::{Keyring, MasterKey, Sealed, SecretsError};
 pub use servers::ServerRepository;
 pub use services::ServiceRepository;

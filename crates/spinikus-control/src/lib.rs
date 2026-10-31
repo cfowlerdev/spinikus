@@ -6,6 +6,7 @@ pub mod agents;
 mod audit;
 pub mod auth;
 pub mod ca;
+pub mod certificates;
 pub mod deployments;
 pub mod domains;
 pub mod environments;
@@ -26,6 +27,10 @@ use std::sync::Arc;
 
 use agents::AgentHub;
 pub use auth::{ClientInfo, Credential, Principal};
+pub use certificates::{
+    CertificateTimings,
+    acme::{AcmeClient, InstantAcme},
+};
 pub use deployments::DeploymentTimings;
 pub use domains::{DomainChanges, NewDomain, ServiceDomains};
 pub use environments::{EnvironmentChanges, NewEnvironment};
@@ -45,12 +50,21 @@ pub struct Control {
     /// Loaded (or created) on first use.
     authority: Arc<OnceCell<ca::CertificateAuthority>>,
     runner: Arc<deployments::Runner>,
+    certificates: Arc<certificates::Certificates>,
 }
 
 impl Control {
     pub fn new(store: SqliteStore) -> Self {
         let runner = Arc::new(deployments::Runner::new(DeploymentTimings::default()));
-        Self { store, agents: AgentHub::default(), authority: Arc::default(), runner }
+        let certificates = Arc::new(certificates::Certificates::new(Arc::new(InstantAcme::new()), CertificateTimings::default()));
+        Self { store, agents: AgentHub::default(), authority: Arc::default(), runner, certificates }
+    }
+
+    /// Replaces the ACME client and the certificate manager's timings, such as to use a
+    /// test CA. Call it before the certificate manager starts.
+    pub fn with_acme_client(mut self, acme: Arc<dyn AcmeClient>, timings: CertificateTimings) -> Self {
+        self.certificates = Arc::new(certificates::Certificates::new(acme, timings));
+        self
     }
 
     /// Replaces the deployment runner's timings, such as to shorten them in tests. Call it

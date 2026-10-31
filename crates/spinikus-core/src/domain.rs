@@ -11,6 +11,9 @@ use crate::id::{CertificateId, DomainId, ServiceId};
 /// Longest allowed hostname, the DNS limit.
 pub const MAX_HOSTNAME_LEN: usize = 253;
 
+/// Top-level names reserved for local or private use, which no public CA issues for.
+const PRIVATE_SUFFIXES: [&str; 9] = ["localhost", "local", "test", "example", "invalid", "internal", "home.arpa", "lan", "onion"];
+
 /// A hostname the proxy serves, routed to a service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Domain {
@@ -56,6 +59,14 @@ impl Hostname {
 
     pub fn is_wildcard(&self) -> bool {
         self.0.starts_with("*.")
+    }
+
+    /// Whether the name can be in public DNS, so a public CA can issue for it: not under a
+    /// suffix reserved for local or private use, such as `localhost` or `.test`.
+    pub fn is_public(&self) -> bool {
+        !PRIVATE_SUFFIXES
+            .iter()
+            .any(|suffix| self.0.strip_suffix(suffix).is_some_and(|rest| rest.is_empty() || rest.ends_with('.')))
     }
 
     /// Whether a certificate for `self` is valid for `hostname`: the same name, or `self`
@@ -177,6 +188,16 @@ mod tests {
             &too_long,
         ] {
             assert!(input.parse::<Hostname>().is_err(), "{input:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn private_names_are_not_public() {
+        for public in ["example.com", "app.example.com", "*.example.com", "localhost.example.com", "testing.dev"] {
+            assert!(host(public).is_public(), "{public}");
+        }
+        for private in ["web.localhost", "printer.local", "app.test", "a.example", "x.internal", "nas.home.arpa", "box.lan"] {
+            assert!(!host(private).is_public(), "{private}");
         }
     }
 

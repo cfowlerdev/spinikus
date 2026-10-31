@@ -12,11 +12,14 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Request, Response, StatusCode, body::Incoming, header, service::service_fn};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use rustls::pki_types::{CertificateDer, ServerName};
 use spinikus_core::{
-    id::{DeploymentId, ServiceId},
+    certificate::CertificateBundle,
+    id::{CertificateId, DeploymentId, ServiceId},
     route::{ProxyTarget, Route, RouteAction},
+    secret::Secret,
 };
-use spinikus_proxy::{Proxy, Upstreams, serve};
+use spinikus_proxy::{Proxy, Upstreams, serve, serve_tls};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -92,19 +95,62 @@ struct Running {
     proxy: Arc<Proxy>,
     upstreams: Arc<FixedUpstreams>,
     address: SocketAddr,
-    _stop: oneshot::Sender<()>,
+    https: SocketAddr,
+    _stop: (oneshot::Sender<()>, oneshot::Sender<()>),
 }
 
+/// The proxy on free ports, serving HTTP and HTTPS.
 async fn start() -> Running {
     let upstreams = Arc::new(FixedUpstreams::default());
-    let proxy = Proxy::new(upstreams.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let tls_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let https = tls_listener.local_addr().unwrap();
+    let proxy = Proxy::new(upstreams.clone(), Some(https.port()));
     let (stop, stopped) = oneshot::channel::<()>();
     tokio::spawn(serve(proxy.clone(), listener, async move {
         let _ = stopped.await;
     }));
-    Running { proxy, upstreams, address, _stop: stop }
+    let (stop_tls, tls_stopped) = oneshot::channel::<()>();
+    tokio::spawn(serve_tls(proxy.clone(), tls_listener, async move {
+        let _ = tls_stopped.await;
+    }));
+    Running { proxy, upstreams, address, https, _stop: (stop, stop_tls) }
+}
+
+/// A self-signed certificate for `hostnames`, and the bundle to serve it.
+fn self_signed(hostnames: &[&str]) -> (CertificateDer<'static>, CertificateBundle) {
+    let names: Vec<String> = hostnames.iter().map(|name| name.to_string()).collect();
+    let certified = rcgen::generate_simple_self_signed(names).unwrap();
+    let bundle = CertificateBundle {
+        id: CertificateId::new(),
+        hostnames: hostnames.iter().map(|name| name.parse().unwrap()).collect(),
+        chain_pem: certified.cert.pem(),
+        private_key_pem: Secret::new(certified.signing_key.serialize_pem()),
+    };
+    (certified.cert.der().clone(), bundle)
+}
+
+/// A raw HTTP/1.1 GET over TLS with SNI `host`, trusting only `root`.
+async fn get_tls(address: SocketAddr, host: &str, root: &CertificateDer<'static>) -> std::io::Result<(u16, String)> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(root.clone()).unwrap();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let stream = TcpStream::connect(address).await?;
+    let mut stream = connector.connect(ServerName::try_from(host.to_string()).unwrap(), stream).await?;
+    let request = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = String::new();
+    // Servers may close without close_notify; what was read still counts.
+    let _ = stream.read_to_string(&mut response).await;
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    Ok((head[9..12].parse().unwrap(), body.to_string()))
 }
 
 fn proxy_route(hostname: &str) -> (Route, ProxyTarget) {
@@ -209,4 +255,54 @@ async fn splices_upgraded_connections() {
     assert!(head.starts_with("http/1.1 101"), "{head}");
     assert!(head.contains("upgrade: echo"), "{head}");
     assert_eq!(&echoed, b"hello");
+}
+
+#[tokio::test]
+async fn serves_https_by_sni_and_redirects_http_there() {
+    let running = start().await;
+    let backend = backend().await;
+    let (route, target) = proxy_route("app.example.com");
+    let (plain, plain_target) = proxy_route("plain.example.com");
+    for target in [&target, &plain_target] {
+        running.upstreams.addresses.lock().unwrap().insert(target.deployment_id, backend);
+    }
+    running.proxy.set_routes(&[route, plain]);
+    let (root, bundle) = self_signed(&["app.example.com"]);
+    let (_, mut broken) = self_signed(&["broken.example.com"]);
+    broken.private_key_pem = Secret::new("not a key");
+
+    let problems = running.proxy.set_certificates(&[bundle, broken]);
+    let (status, body) = get_tls(running.https, "app.example.com", &root).await.unwrap();
+    let (moved, head, _) = get(running.address, "app.example.com:8000", "/a?b=1", "").await;
+    let (plain_status, _, plain_body) = get(running.address, "plain.example.com", "/", "").await;
+    let unknown = get_tls(running.https, "plain.example.com", &root).await;
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("unreadable private key"), "{problems:?}");
+    assert_eq!(status, 200);
+    assert!(body.contains("xfp=https"), "{body}");
+    assert_eq!(moved, 308);
+    assert!(head.contains(&format!("location: https://app.example.com:{}/a?b=1", running.https.port())), "{head}");
+    // Without a certificate, HTTP keeps serving.
+    assert_eq!(plain_status, 200);
+    assert!(plain_body.contains("xfp=http "), "{plain_body}");
+    assert!(unknown.is_err(), "no certificate for the name fails the handshake");
+}
+
+#[tokio::test]
+async fn answers_acme_challenges_over_http_for_any_host() {
+    let running = start().await;
+    let (_, bundle) = self_signed(&["app.example.com"]);
+    running.proxy.set_certificates(&[bundle]);
+    running.proxy.set_challenges(HashMap::from([("token-1".to_string(), "token-1.thumbprint".to_string())]));
+
+    let (status, _, body) = get(running.address, "app.example.com", "/.well-known/acme-challenge/token-1", "").await;
+    let (unknown, _, _) = get(running.address, "new.example.com", "/.well-known/acme-challenge/token-2", "").await;
+    running.proxy.set_challenges(HashMap::new());
+    let (withdrawn, _, _) = get(running.address, "app.example.com", "/.well-known/acme-challenge/token-1", "").await;
+
+    // Not redirected, though the host has a certificate.
+    assert_eq!((status, body.as_str()), (200, "token-1.thumbprint"));
+    assert_eq!(unknown, 404);
+    assert_eq!(withdrawn, 404);
 }

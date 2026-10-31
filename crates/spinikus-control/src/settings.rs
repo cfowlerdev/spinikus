@@ -13,12 +13,31 @@ pub const BASE_DOMAIN: &str = "base_domain";
 /// `localhost` names resolve to this machine without any DNS, which suits a first start.
 pub const DEFAULT_BASE_DOMAIN: &str = "localhost";
 
+/// The contact email for the ACME account that gets HTTPS certificates. Setting it agrees
+/// to the CA's terms of service; `null`, the default, turns getting certificates off.
+pub const ACME_EMAIL: &str = "acme_email";
+
+/// The ACME directory of the CA that issues certificates.
+pub const ACME_DIRECTORY_URL: &str = "acme_directory_url";
+
+/// Let's Encrypt's production directory.
+pub const DEFAULT_ACME_DIRECTORY_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
+
 /// The known settings and their defaults.
 fn default(key: &str) -> Option<Value> {
     match key {
         BASE_DOMAIN => Some(json!(DEFAULT_BASE_DOMAIN)),
+        ACME_EMAIL => Some(Value::Null),
+        ACME_DIRECTORY_URL => Some(json!(DEFAULT_ACME_DIRECTORY_URL)),
         _ => None,
     }
+}
+
+/// Where and as whom to get certificates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AcmeSettings {
+    pub(crate) email: String,
+    pub(crate) directory_url: String,
 }
 
 /// Checks a new value for a known key, returning it normalized.
@@ -33,6 +52,23 @@ fn check(key: &str, value: Value) -> Result<Value, ControlError> {
                 Ok(json!(domain))
             }
             _ => Err(invalid("give a domain such as `apps.example.com`, or null".to_string())),
+        },
+        ACME_EMAIL => match value {
+            Value::Null => Ok(Value::Null),
+            Value::String(email) => {
+                let email = email.trim();
+                let valid = email.split_once('@').is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
+                    && !email.chars().any(|c| c.is_whitespace() || c.is_control() || c == ',');
+                match valid {
+                    true => Ok(json!(email)),
+                    false => Err(invalid("give an email address, or null".to_string())),
+                }
+            }
+            _ => Err(invalid("give an email address, or null".to_string())),
+        },
+        ACME_DIRECTORY_URL => match value {
+            Value::String(url) if url.starts_with("https://") && url.len() > "https://".len() => Ok(json!(url.trim())),
+            _ => Err(invalid("give the https URL of an ACME directory".to_string())),
         },
         _ => Err(not_found("setting", key)),
     }
@@ -58,8 +94,10 @@ impl Control {
         let value = check(key, value)?;
         let setting = self.store().put_setting(key, &value, revision).await?;
         self.audit_by(principal, "setting.update", key, None, json!({})).await?;
-        // The base domain changes generated hostnames, so the routes.
+        // The base domain changes generated hostnames, so the routes, and the ACME settings
+        // which certificates to get.
         self.wake_deployments();
+        self.wake_certificates();
         Ok(setting)
     }
 
@@ -71,6 +109,19 @@ impl Control {
             revision: 0,
             updated_at: None,
         }))
+    }
+
+    /// The ACME email and directory, or `None` if getting certificates is off.
+    pub(crate) async fn acme_settings(&self) -> Result<Option<AcmeSettings>, ControlError> {
+        let read = |value: Value| {
+            serde_json::from_value::<Option<String>>(value)
+                .map_err(|error| ControlError::internal("reading the ACME settings", error))
+        };
+        let Some(email) = read(self.setting(ACME_EMAIL).await?.value)? else {
+            return Ok(None);
+        };
+        let directory_url = read(self.setting(ACME_DIRECTORY_URL).await?.value)?.unwrap_or_default();
+        Ok(Some(AcmeSettings { email, directory_url }))
     }
 
     /// The base domain, or `None` if generated hostnames are off.
@@ -114,5 +165,24 @@ mod tests {
         assert_eq!(base.unwrap().as_str(), "apps.example.com");
         assert_eq!(off.value, Value::Null);
         assert_eq!(control.base_domain().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn admins_turn_on_certificates_with_an_email() {
+        let (_dir, control) = control().await;
+        let admin = user(&control, "admin@example.com", true).await;
+
+        let off = control.acme_settings().await.unwrap();
+        let invalid = control.set_setting(&admin, ACME_EMAIL, 0, json!("not an email")).await;
+        let plain_http = control.set_setting(&admin, ACME_DIRECTORY_URL, 0, json!("http://ca.test/dir")).await;
+        control.set_setting(&admin, ACME_EMAIL, 0, json!(" ops@example.com ")).await.unwrap();
+        let on = control.acme_settings().await.unwrap();
+
+        assert_eq!(off, None);
+        assert!(matches!(invalid, Err(ControlError::Invalid { field: "value", .. })), "{invalid:?}");
+        assert!(matches!(plain_http, Err(ControlError::Invalid { field: "value", .. })), "{plain_http:?}");
+        let expected =
+            AcmeSettings { email: "ops@example.com".to_string(), directory_url: DEFAULT_ACME_DIRECTORY_URL.to_string() };
+        assert_eq!(on, Some(expected));
     }
 }

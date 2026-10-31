@@ -3,7 +3,9 @@
 //! - `agent.json`: the control plane's URL, this server's ID and the CA certificate;
 //! - `identity.json`: the client certificate and its private key, readable by the owner only;
 //! - `routes.json`: the last route table from the control plane, so the proxy serves it
-//!   from the start, even while the control plane is unreachable.
+//!   from the start, even while the control plane is unreachable;
+//! - `certificates.json`: the last certificates, with their private keys, readable by the
+//!   owner only, for the same reason.
 //!
 //! Each file is replaced atomically, so a crash never leaves a certificate next to the
 //! wrong key.
@@ -15,13 +17,19 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use spinikus_core::{id::ServerId, route::RouteTable, secret::Secret};
+use spinikus_core::{
+    certificate::CertificateBundle,
+    id::{CertificateId, ServerId},
+    route::RouteTable,
+    secret::Secret,
+};
 
 use crate::AgentError;
 
 const ENROLLMENT_FILE: &str = "agent.json";
 const IDENTITY_FILE: &str = "identity.json";
 const ROUTES_FILE: &str = "routes.json";
+const CERTIFICATES_FILE: &str = "certificates.json";
 
 /// What the agent needs to connect.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +117,53 @@ impl AgentFiles {
     pub fn save_routes(&self, table: &RouteTable) -> Result<(), AgentError> {
         write_json(&self.dir.join(ROUTES_FILE), table, false)
     }
+
+    /// The saved certificates and their revision, or none at revision 0.
+    pub fn load_certificates(&self) -> Result<(u64, Vec<CertificateBundle>), AgentError> {
+        let path = self.dir.join(CERTIFICATES_FILE);
+        if !path.exists() {
+            return Ok((0, Vec::new()));
+        }
+        let saved: SavedCertificates = read_json(&path)?;
+        let bundles = saved
+            .certificates
+            .into_iter()
+            .map(|certificate| CertificateBundle {
+                id: certificate.id,
+                hostnames: certificate.hostnames,
+                chain_pem: certificate.chain_pem,
+                private_key_pem: Secret::new(certificate.private_key_pem),
+            })
+            .collect();
+        Ok((saved.revision, bundles))
+    }
+
+    pub fn save_certificates(&self, revision: u64, bundles: &[CertificateBundle]) -> Result<(), AgentError> {
+        let certificates = bundles
+            .iter()
+            .map(|bundle| SavedCertificate {
+                id: bundle.id,
+                hostnames: bundle.hostnames.clone(),
+                chain_pem: bundle.chain_pem.clone(),
+                private_key_pem: bundle.private_key_pem.expose().to_string(),
+            })
+            .collect();
+        write_json(&self.dir.join(CERTIFICATES_FILE), &SavedCertificates { revision, certificates }, true)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedCertificates {
+    revision: u64,
+    certificates: Vec<SavedCertificate>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedCertificate {
+    id: CertificateId,
+    hostnames: Vec<spinikus_core::domain::Hostname>,
+    chain_pem: String,
+    private_key_pem: String,
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, AgentError> {
@@ -198,6 +253,29 @@ mod tests {
         files.save_routes(&table).unwrap();
 
         assert_eq!(files.load_routes().unwrap(), table);
+    }
+
+    #[test]
+    fn saves_certificates_privately() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = AgentFiles::new(dir.path().join("agent"));
+        let bundle = CertificateBundle {
+            id: CertificateId::new(),
+            hostnames: vec!["app.example.com".parse().unwrap()],
+            chain_pem: "chain".to_string(),
+            private_key_pem: Secret::new("key"),
+        };
+
+        assert_eq!(files.load_certificates().unwrap(), (0, Vec::new()));
+        files.save_certificates(9, std::slice::from_ref(&bundle)).unwrap();
+
+        assert_eq!(files.load_certificates().unwrap(), (9, vec![bundle]));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(files.dir().join(CERTIFICATES_FILE)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 
     #[cfg(unix)]

@@ -25,19 +25,24 @@ use crate::{
     test_support::{control, grant, user},
 };
 
-struct Setup {
+pub(crate) struct Setup {
     _dir: tempfile::TempDir,
-    control: Control,
-    admin: Principal,
+    pub(crate) control: Control,
+    pub(crate) admin: Principal,
     environment: Environment,
-    service: Service,
-    server: Server,
+    pub(crate) service: Service,
+    pub(crate) server: Server,
 }
 
 /// A server with a fake agent, and an app service placed on it with an image source.
-async fn setup(timings: DeploymentTimings) -> Setup {
+pub(crate) async fn setup(timings: DeploymentTimings) -> Setup {
+    setup_with(timings, |control| control).await
+}
+
+/// Like [`setup`], with the control plane changed by `change` first.
+pub(crate) async fn setup_with(timings: DeploymentTimings, change: impl FnOnce(Control) -> Control) -> Setup {
     let (dir, control) = control().await;
-    let control = control.with_deployment_timings(timings);
+    let control = change(control.with_deployment_timings(timings));
     let admin = user(&control, "admin@example.com", true).await;
     let project = control.create_project(&admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
     let new = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
@@ -58,7 +63,7 @@ async fn setup(timings: DeploymentTimings) -> Setup {
 }
 
 /// Registers a fake agent for `server`, returning what it receives.
-fn connect(control: &Control, server: ServerId) -> mpsc::Receiver<pb::ControlMessage> {
+pub(crate) fn connect(control: &Control, server: ServerId) -> mpsc::Receiver<pb::ControlMessage> {
     let (sender, receiver) = mpsc::channel(64);
     let _ = control.agents().register(server, sender);
     receiver
@@ -120,7 +125,7 @@ async fn status(control: &Control, id: DeploymentId) -> DeploymentStatus {
 }
 
 /// Walks a new deployment to `live` through the fake agent.
-async fn deploy(setup: &Setup, agent: &mut mpsc::Receiver<pb::ControlMessage>) -> Deployment {
+pub(crate) async fn deploy(setup: &Setup, agent: &mut mpsc::Receiver<pb::ControlMessage>) -> Deployment {
     let control = &setup.control;
     let deployment = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
     control.advance_deployments().await;
@@ -298,7 +303,7 @@ async fn commands_are_sent_again_when_the_agent_reconnects() {
     control.advance_deployments().await;
     assert_eq!(only(sent(&mut agent)).command_id, format!("{}/prepare", deployment.id));
 
-    control.agent_connected(setup.server.id, 0).await;
+    control.agent_connected(setup.server.id, 0, 0).await;
     control.advance_deployments().await;
 
     assert_eq!(only(sent(&mut agent)).command_id, format!("{}/prepare", deployment.id));
@@ -449,14 +454,14 @@ async fn an_agent_with_the_current_routes_needs_none() {
     let revision = routes.last().unwrap().revision;
 
     // Reconnects with the routes it has: nothing to send, and they count as applied.
-    control.agent_connected(setup.server.id, revision).await;
+    control.agent_connected(setup.server.id, revision, 0).await;
     control.advance_deployments().await;
     let (_, again) = received(&mut agent);
     let second = deploy(&setup, &mut agent).await;
     control.advance_deployments().await;
     let (_, moved) = received(&mut agent);
     // Reconnects with older routes: they are sent again.
-    control.agent_connected(setup.server.id, revision).await;
+    control.agent_connected(setup.server.id, revision, 0).await;
     control.advance_deployments().await;
     let (commands, resent) = received(&mut agent);
 

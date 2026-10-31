@@ -100,7 +100,7 @@ impl AgentService for AgentGrpc {
         let (connection, stopped) = self.control.agents().register(server, sender);
         drop(transition);
         tracing::info!(server = %server, agent_version = hello.agent_version, "agent connected");
-        self.control.agent_connected(server, hello.routes_revision).await;
+        self.control.agent_connected(server, hello.routes_revision, hello.certificates_revision).await;
 
         let control = self.control.clone();
         let idle_timeout = self.timings.idle_timeout;
@@ -199,8 +199,9 @@ async fn handle(control: &Control, server: ServerId, message: AgentMessage) -> R
         agent_message::Message::SnapshotApplied(applied) => {
             match applied.kind() {
                 pb::SnapshotKind::Routes => control.routes_applied(server, applied.revision).await,
-                // Certificates come with HTTPS.
-                _ => tracing::debug!(server = %server, "ignored a snapshot kind that is not handled yet"),
+                pb::SnapshotKind::Certificates => control.certificates_applied(server, applied.revision).await,
+                pb::SnapshotKind::AcmeChallenges => control.challenges_applied(server, applied.revision),
+                pb::SnapshotKind::Unspecified => tracing::debug!(server = %server, "ignored a snapshot of no kind"),
             }
             Ok(())
         }

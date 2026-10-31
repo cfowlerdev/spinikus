@@ -1,12 +1,15 @@
-//! Routes on the agent: the table the control plane sends is saved, handed to the proxy,
-//! and acknowledged. The proxy finds a deployment's container through the runtime.
+//! The proxy's state on the agent: the route table and certificates the control plane
+//! sends are saved, handed to the proxy, and acknowledged; ACME challenges are only held
+//! in memory. The proxy finds a deployment's container through the runtime.
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use async_trait::async_trait;
 use spinikus_core::{
+    certificate::CertificateBundle,
     id::DeploymentId,
     route::{ProxyTarget, Route, RouteAction, RouteTable},
+    secret::Secret,
     server::InstanceStatus,
 };
 use spinikus_proto::agent::v1 as pb;
@@ -14,41 +17,102 @@ use spinikus_proxy::{Proxy, Upstreams};
 
 use crate::{AgentError, AgentFiles, runtime::ContainerRuntime};
 
-/// The current routes, kept across connections.
-pub(crate) struct RouteState {
+/// The current routes and certificates, kept across connections.
+pub(crate) struct ProxyState {
     files: AgentFiles,
-    table: RouteTable,
+    routes: RouteTable,
+    certificates_revision: u64,
     proxy: Option<Arc<Proxy>>,
 }
 
-impl RouteState {
-    /// Starts from the saved table, so the proxy serves before the control plane answers.
+impl ProxyState {
+    /// Starts from the saved routes and certificates, so the proxy serves before the
+    /// control plane answers.
     pub(crate) fn load(files: &AgentFiles, proxy: Option<Arc<Proxy>>) -> Self {
-        let table = files.load_routes().unwrap_or_else(|error| {
+        let routes = files.load_routes().unwrap_or_else(|error| {
             tracing::warn!(%error, "ignored the saved routes");
             RouteTable::default()
         });
+        let (certificates_revision, certificates) = files.load_certificates().unwrap_or_else(|error| {
+            tracing::warn!(%error, "ignored the saved certificates");
+            (0, Vec::new())
+        });
         if let Some(proxy) = &proxy {
-            proxy.set_routes(&table.routes);
+            proxy.set_routes(&routes.routes);
+            serve_certificates(proxy, &certificates);
         }
-        Self { files: files.clone(), table, proxy }
+        Self { files: files.clone(), routes, certificates_revision, proxy }
     }
 
-    pub(crate) fn revision(&self) -> u64 {
-        self.table.revision
+    pub(crate) fn routes_revision(&self) -> u64 {
+        self.routes.revision
+    }
+
+    pub(crate) fn certificates_revision(&self) -> u64 {
+        self.certificates_revision
     }
 
     /// Saves and serves a new table. Routes the agent cannot read are left out.
-    pub(crate) fn apply(&mut self, set: pb::SetRoutes) -> Result<(), AgentError> {
+    pub(crate) fn apply_routes(&mut self, set: pb::SetRoutes) -> Result<(), AgentError> {
         let table = RouteTable { revision: set.revision, routes: set.routes.into_iter().filter_map(route).collect() };
         self.files.save_routes(&table)?;
         if let Some(proxy) = &self.proxy {
             proxy.set_routes(&table.routes);
         }
         tracing::info!(revision = table.revision, routes = table.routes.len(), "applied routes");
-        self.table = table;
+        self.routes = table;
         Ok(())
     }
+
+    /// Saves and serves new certificates. Certificates the agent cannot read are left out.
+    pub(crate) fn apply_certificates(&mut self, set: pb::SetCertificates) -> Result<(), AgentError> {
+        let bundles: Vec<_> = set.certificates.into_iter().filter_map(bundle).collect();
+        self.files.save_certificates(set.revision, &bundles)?;
+        if let Some(proxy) = &self.proxy {
+            serve_certificates(proxy, &bundles);
+        }
+        tracing::info!(revision = set.revision, certificates = bundles.len(), "applied certificates");
+        self.certificates_revision = set.revision;
+        Ok(())
+    }
+
+    /// Answers these HTTP-01 challenges from now on, instead of the previous ones.
+    pub(crate) fn apply_challenges(&self, set: pb::AcmeChallenges) {
+        if let Some(proxy) = &self.proxy {
+            let challenges = set.challenges.into_iter().map(|challenge| (challenge.token, challenge.key_authorization));
+            proxy.set_challenges(challenges.collect());
+        }
+    }
+}
+
+fn serve_certificates(proxy: &Proxy, bundles: &[CertificateBundle]) {
+    for problem in proxy.set_certificates(bundles) {
+        tracing::warn!(problem, "ignored a certificate");
+    }
+}
+
+fn bundle(certificate: pb::Certificate) -> Option<CertificateBundle> {
+    let Ok(id) = certificate.certificate_id.parse() else {
+        tracing::warn!(certificate = certificate.certificate_id, "ignored a certificate with an invalid ID");
+        return None;
+    };
+    let hostnames = certificate
+        .hostnames
+        .iter()
+        .filter_map(|hostname| match hostname.parse() {
+            Ok(hostname) => Some(hostname),
+            Err(_) => {
+                tracing::warn!(certificate = %id, hostname, "ignored an invalid hostname of a certificate");
+                None
+            }
+        })
+        .collect();
+    Some(CertificateBundle {
+        id,
+        hostnames,
+        chain_pem: certificate.chain_pem,
+        private_key_pem: Secret::new(certificate.private_key_pem),
+    })
 }
 
 fn route(route: pb::Route) -> Option<Route> {
@@ -130,7 +194,7 @@ impl Upstreams for RuntimeUpstreams {
 
 #[cfg(test)]
 mod tests {
-    use spinikus_core::id::ServiceId;
+    use spinikus_core::id::{CertificateId, ServiceId};
 
     use super::*;
     use crate::runtime::{ContainerSpec, MemoryRuntime};
@@ -143,7 +207,7 @@ mod tests {
     fn saves_valid_routes_and_skips_the_rest() {
         let dir = tempfile::tempdir().unwrap();
         let files = AgentFiles::new(dir.path().join("agent"));
-        let mut state = RouteState::load(&files, None);
+        let mut state = ProxyState::load(&files, None);
         let target = pb::ProxyTarget {
             service_id: ServiceId::new().to_string(),
             deployment_id: DeploymentId::new().to_string(),
@@ -163,15 +227,41 @@ mod tests {
             pb::Route { hostname: "none.example.com".to_string(), action: None },
         ];
 
-        assert_eq!(state.revision(), 0);
-        state.apply(set(5, routes)).unwrap();
+        assert_eq!(state.routes_revision(), 0);
+        state.apply_routes(set(5, routes)).unwrap();
 
-        assert_eq!(state.revision(), 5);
+        assert_eq!(state.routes_revision(), 5);
         let saved = files.load_routes().unwrap();
         assert_eq!(saved.revision, 5);
         let names: Vec<_> = saved.routes.iter().map(|route| route.hostname.as_str()).collect();
         assert_eq!(names, ["app.example.com", "www.example.com"]);
-        assert_eq!(RouteState::load(&files, None).revision(), 5);
+        assert_eq!(ProxyState::load(&files, None).routes_revision(), 5);
+    }
+
+    #[test]
+    fn saves_certificates_and_skips_unreadable_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = AgentFiles::new(dir.path().join("agent"));
+        let mut state = ProxyState::load(&files, None);
+        let id = CertificateId::new();
+        let certificates = vec![
+            pb::Certificate {
+                certificate_id: id.to_string(),
+                hostnames: vec!["app.example.com".to_string(), "not a host".to_string()],
+                chain_pem: "chain".to_string(),
+                private_key_pem: "key".to_string(),
+            },
+            pb::Certificate { certificate_id: "nope".to_string(), ..Default::default() },
+        ];
+
+        state.apply_certificates(pb::SetCertificates { revision: 7, certificates }).unwrap();
+
+        assert_eq!(state.certificates_revision(), 7);
+        let (revision, saved) = files.load_certificates().unwrap();
+        assert_eq!(revision, 7);
+        assert_eq!(saved.len(), 1);
+        assert_eq!((saved[0].id, saved[0].hostnames.len()), (id, 1));
+        assert_eq!(ProxyState::load(&files, None).certificates_revision(), 7);
     }
 
     #[tokio::test]

@@ -5,9 +5,8 @@
 use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use anyhow::Context;
-use spinikus_agent::{AgentError, AgentFiles, Backoff, Credentials, RunOptions, runtime::ContainerRuntime};
+use spinikus_agent::{AgentError, AgentFiles, Backoff, Credentials, ProxyListeners, RunOptions, runtime::ContainerRuntime};
 use spinikus_control::{Control, ca};
-use tokio::net::TcpListener;
 
 /// Enrolls the embedded agent if it has not been (or its files belong to another server or
 /// control plane), then runs it until `shutdown`. Does nothing if the embedded server was
@@ -17,7 +16,7 @@ pub async fn run(
     files: AgentFiles,
     agent_address: SocketAddr,
     runtime: Arc<dyn ContainerRuntime>,
-    proxy: Option<TcpListener>,
+    proxy: Option<ProxyListeners>,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
     let facts = spinikus_agent::server_facts();

@@ -33,12 +33,19 @@ pub struct ControlPlane {
 
 impl ControlPlane {
     pub async fn start() -> Self {
+        Self::start_with(|control| control).await
+    }
+
+    /// Starts a control plane changed by `change` first, running the deployment runner and
+    /// the certificate manager.
+    pub async fn start_with(change: impl FnOnce(Control) -> Control) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let pool = connect(&dir.path().join("spinikus.db")).await.unwrap();
         migrate(&pool).await.unwrap();
         let timings = DeploymentTimings { tick: Duration::from_millis(50), ..Default::default() };
         let control =
             Control::new(SqliteStore::open(pool, &MasterKey::generate()).await.unwrap()).with_deployment_timings(timings);
+        let control = change(control);
         let fields = UserFields { email: "admin@example.com".parse().unwrap(), name: "Admin".to_string(), admin: true };
         let user = control.store().create_user(fields, None).await.unwrap();
         let admin = Principal { user, credential: spinikus_control::Credential::Session(SessionId::new()) };
@@ -48,10 +55,20 @@ impl ControlPlane {
         let url = format!("https://{address}");
         let (stop, stopped) = oneshot::channel::<()>();
         let (stop_runner, runner_stopped) = oneshot::channel::<()>();
+        let (stop_certificates, certificates_stopped) = oneshot::channel::<()>();
         tokio::spawn(spinikus_control::agents::serve(control.clone(), listener, async move {
             let _ = stopped.await;
             let _ = stop_runner.send(());
+            let _ = stop_certificates.send(());
         }));
+        let certificates = control.clone();
+        tokio::spawn(async move {
+            certificates
+                .run_certificates(async move {
+                    let _ = certificates_stopped.await;
+                })
+                .await
+        });
         let runner = control.clone();
         tokio::spawn(async move {
             runner

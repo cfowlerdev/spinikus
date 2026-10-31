@@ -87,11 +87,14 @@ pub struct ProxyConfig {
     /// Where the proxy serves plain HTTP. Defaults to `0.0.0.0:80`.
     #[serde(default = "default_proxy_listen")]
     pub listen: SocketAddr,
+    /// Where the proxy serves HTTPS. Defaults to `0.0.0.0:443`.
+    #[serde(default = "default_proxy_https_listen")]
+    pub https_listen: SocketAddr,
 }
 
 impl Default for ProxyConfig {
     fn default() -> Self {
-        Self { enabled: default_proxy_enabled(), listen: default_proxy_listen() }
+        Self { enabled: default_proxy_enabled(), listen: default_proxy_listen(), https_listen: default_proxy_https_listen() }
     }
 }
 
@@ -101,6 +104,10 @@ fn default_proxy_enabled() -> bool {
 
 fn default_proxy_listen() -> SocketAddr {
     (Ipv4Addr::UNSPECIFIED, 80).into()
+}
+
+fn default_proxy_https_listen() -> SocketAddr {
+    (Ipv4Addr::UNSPECIFIED, 443).into()
 }
 
 /// Instance configuration, the schema of `spinikus.toml`.
