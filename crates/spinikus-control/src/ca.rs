@@ -146,7 +146,7 @@ fn offset_date_time(at: Timestamp) -> OffsetDateTime {
 }
 
 /// The DER bytes of the first certificate in a PEM string.
-pub(crate) fn certificate_der(pem: &str) -> Option<Vec<u8>> {
+pub fn certificate_der(pem: &str) -> Option<Vec<u8>> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).ok()?;
     (pem.label == "CERTIFICATE").then_some(pem.contents)
 }

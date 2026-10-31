@@ -27,8 +27,9 @@ pub struct AgentHub {
 struct Connection {
     id: ConnectionId,
     sender: mpsc::Sender<ControlMessage>,
-    /// Dropped to tell the connection's reader to stop, when it is replaced or disconnected.
-    _stop: oneshot::Sender<()>,
+    /// Taken and dropped to tell the connection's reader to stop, which then unregisters
+    /// the connection (closing its stream) and records the disconnect.
+    stop: Option<oneshot::Sender<()>>,
 }
 
 /// Tells apart successive connections from the same server.
@@ -55,7 +56,7 @@ impl AgentHub {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = ConnectionId(NEXT_ID.fetch_add(1, Ordering::Relaxed));
         let (stop, stopped) = oneshot::channel();
-        let replaced = self.lock().insert(server, Connection { id, sender, _stop: stop });
+        let replaced = self.lock().insert(server, Connection { id, sender, stop: Some(stop) });
         if replaced.is_some() {
             tracing::info!(server = %server, "agent reconnected, closing its previous connection");
         }
@@ -77,7 +78,14 @@ impl AgentHub {
 
     /// Closes the server's connection, such as when the server is revoked. Returns whether it was connected.
     pub fn disconnect(&self, server: ServerId) -> bool {
-        self.lock().remove(&server).is_some()
+        self.lock().get_mut(&server).is_some_and(|connection| connection.stop.take().is_some())
+    }
+
+    /// Closes every connection, such as when the control plane shuts down.
+    pub fn disconnect_all(&self) {
+        for connection in self.lock().values_mut() {
+            connection.stop.take();
+        }
     }
 
     pub fn is_connected(&self, server: ServerId) -> bool {

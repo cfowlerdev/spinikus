@@ -25,6 +25,16 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
     let http =
         axum::serve(http_listener, spinikus_api::router(control.clone()).into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(until(stopped.clone()));
+    let agent_address = agent_listener.local_addr().context("Failed to read the agent listener's address")?;
+    let embedded = config.agents.embedded.then(|| {
+        let run = crate::embedded::run(control.clone(), crate::agent::files(config), agent_address, until(stopped.clone()));
+        tokio::spawn(async move {
+            // The control plane keeps running without it; the error says why it stopped.
+            if let Err(error) = run.await {
+                tracing::error!("{error:#}");
+            }
+        })
+    });
     let agents = spinikus_control::agents::serve(control, agent_listener, until(stopped));
     tracing::info!(%http_address, "Server started, press Ctrl+C to stop");
 
@@ -48,6 +58,9 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
         Stopped::Http(result) => result.and(joined(agents.await)),
         Stopped::Agents(result) => result.and(joined(http.await)),
     };
+    if let Some(embedded) = embedded {
+        let _ = embedded.await;
+    }
     tracing::info!("Shut down");
     result
 }

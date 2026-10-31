@@ -22,6 +22,7 @@ spinikus-core.workspace = true
 spinikus-store.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 jiff.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true

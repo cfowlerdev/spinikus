@@ -12,6 +12,10 @@ const ENTITY: &str = "server";
 pub trait ServerRepository: Send + Sync {
     async fn create_server(&self, fields: ServerFields) -> Result<Server, StoreError>;
 
+    /// The embedded server (the one the control plane runs on), created with `fields` if
+    /// there is none yet. Returned even if revoked, so a revoked one is not replaced.
+    async fn get_or_create_embedded_server(&self, fields: ServerFields) -> Result<Server, StoreError>;
+
     /// Returns revoked servers too, so their history stays visible.
     async fn get_server(&self, id: ServerId) -> Result<Server, StoreError>;
 
@@ -34,12 +38,16 @@ pub trait ServerRepository: Send + Sync {
 
     /// Records that the agent's connection ended.
     async fn record_disconnect(&self, id: ServerId) -> Result<(), StoreError>;
+
+    /// Marks every server disconnected, for when the control plane starts and no agent can
+    /// be connected to it yet, even if it stopped without recording their disconnects.
+    async fn record_all_disconnected(&self) -> Result<u64, StoreError>;
 }
 
 /// The server columns joined with its observed state, in the order `ServerRow` reads them.
 macro_rules! select_servers {
     () => {
-        "SELECT servers.id, servers.name, servers.revision, servers.created_at, servers.updated_at, servers.revoked_at,
+        "SELECT servers.id, servers.name, servers.embedded, servers.revision, servers.created_at, servers.updated_at, servers.revoked_at,
                 server_state.connected, server_state.agent_info, server_state.last_seen_at
          FROM servers LEFT JOIN server_state ON server_state.server_id = servers.id"
     };
@@ -49,6 +57,7 @@ macro_rules! select_servers {
 struct ServerRow {
     id: String,
     name: String,
+    embedded: bool,
     revision: i64,
     created_at: String,
     updated_at: String,
@@ -71,6 +80,7 @@ impl TryFrom<ServerRow> for Server {
         Ok(Server {
             id: parse_column(ENTITY, "id", &row.id)?,
             name: row.name,
+            embedded: row.embedded,
             status: ServerStatus::derive(row.revoked_at.is_some(), row.connected),
             agent,
             last_seen_at: row.last_seen_at.map(|at| parse_column(ENTITY, "last_seen_at", &at)).transpose()?,
@@ -104,6 +114,21 @@ impl ServerRepository for SqliteStore {
             .await?;
 
         self.get_server(id).await
+    }
+
+    async fn get_or_create_embedded_server(&self, fields: ServerFields) -> Result<Server, StoreError> {
+        sqlx::query(
+            "INSERT INTO servers (id, name, embedded) SELECT ?, ?, 1
+             WHERE NOT EXISTS (SELECT 1 FROM servers WHERE embedded = 1)",
+        )
+        .bind(ServerId::new().to_string())
+        .bind(&fields.name)
+        .execute(self.pool())
+        .await?;
+
+        let row: ServerRow =
+            sqlx::query_as(concat!(select_servers!(), " WHERE servers.embedded = 1")).fetch_one(self.pool()).await?;
+        row.try_into()
     }
 
     async fn get_server(&self, id: ServerId) -> Result<Server, StoreError> {
@@ -209,6 +234,11 @@ impl ServerRepository for SqliteStore {
 
         check_affected(result, id)
     }
+
+    async fn record_all_disconnected(&self) -> Result<u64, StoreError> {
+        let result = sqlx::query("UPDATE server_state SET connected = 0 WHERE connected = 1").execute(self.pool()).await?;
+        Ok(result.rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +264,34 @@ mod tests {
                 memory_bytes: 8 << 30,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn marks_every_server_disconnected() {
+        let (_dir, store) = store().await;
+        let first = store.create_server(fields("web-1")).await.unwrap();
+        let second = store.create_server(fields("web-2")).await.unwrap();
+        store.record_agent_hello(first.id, agent("0.1.0")).await.unwrap();
+        store.record_agent_hello(second.id, agent("0.1.0")).await.unwrap();
+
+        assert_eq!(store.record_all_disconnected().await.unwrap(), 2);
+        assert_eq!(store.get_server(first.id).await.unwrap().status, ServerStatus::Disconnected);
+        assert_eq!(store.record_all_disconnected().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn there_is_one_embedded_server_even_once_revoked() {
+        let (_dir, store) = store().await;
+        let other = store.create_server(fields("web-2")).await.unwrap();
+
+        let embedded = store.get_or_create_embedded_server(fields("host-a")).await.unwrap();
+        let again = store.get_or_create_embedded_server(fields("host-b")).await.unwrap();
+        store.revoke_server(embedded.id).await.unwrap();
+        let revoked = store.get_or_create_embedded_server(fields("host-c")).await.unwrap();
+
+        assert!(embedded.embedded && !other.embedded);
+        assert_eq!((again.id, again.name.as_str()), (embedded.id, "host-a"));
+        assert_eq!((revoked.id, revoked.status), (embedded.id, ServerStatus::Revoked));
     }
 
     #[tokio::test]

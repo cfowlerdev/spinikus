@@ -57,12 +57,20 @@ pub struct AgentsConfig {
     /// from the internal CA, and enrollment needs a join token.
     #[serde(default = "default_agents_listen")]
     pub listen: SocketAddr,
+    /// Run an agent for this machine inside the control plane's process, connected over
+    /// loopback like any other agent. On by default, for single-server installs.
+    #[serde(default = "default_embedded")]
+    pub embedded: bool,
 }
 
 impl Default for AgentsConfig {
     fn default() -> Self {
-        Self { listen: default_agents_listen() }
+        Self { listen: default_agents_listen(), embedded: default_embedded() }
     }
+}
+
+fn default_embedded() -> bool {
+    true
 }
 
 fn default_agents_listen() -> SocketAddr {

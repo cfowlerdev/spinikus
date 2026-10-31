@@ -14,6 +14,8 @@ use crate::{
 pub struct Server {
     pub id: ServerId,
     pub name: String,
+    /// The server the control plane runs on, whose agent runs in the control plane's process.
+    pub embedded: bool,
     pub status: ServerStatus,
     /// What the agent said about itself in its last `Hello`.
     pub agent: Option<AgentInfo>,

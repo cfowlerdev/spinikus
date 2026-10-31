@@ -3,66 +3,15 @@
 
 use std::time::Duration;
 
+mod common;
+
+use common::ControlPlane;
 use jiff::{SignedDuration, Timestamp};
 use spinikus_agent::{AgentError, AgentFiles, Backoff, RunOptions};
-use spinikus_control::{Control, NewServer, Principal, ca::AgentCsr};
-use spinikus_core::{
-    id::{ServerId, SessionId},
-    secret::Secret,
-    server::ServerStatus,
-    user::UserFields,
-};
-use spinikus_store::{MasterKey, ServerRepository, SqliteStore, UserRepository, connect, migrate};
+use spinikus_control::ca::AgentCsr;
+use spinikus_core::{id::ServerId, secret::Secret, server::ServerStatus};
+use spinikus_store::ServerRepository;
 use tokio::{sync::oneshot, task::JoinHandle};
-
-struct ControlPlane {
-    _dir: tempfile::TempDir,
-    control: Control,
-    admin: Principal,
-    url: String,
-    fingerprint: String,
-    _stop: oneshot::Sender<()>,
-}
-
-impl ControlPlane {
-    async fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = connect(&dir.path().join("spinikus.db")).await.unwrap();
-        migrate(&pool).await.unwrap();
-        let control = Control::new(SqliteStore::open(pool, &MasterKey::generate()).await.unwrap());
-        let fields = UserFields { email: "admin@example.com".parse().unwrap(), name: "Admin".to_string(), admin: true };
-        let user = control.store().create_user(fields, None).await.unwrap();
-        let admin = Principal { user, credential: spinikus_control::Credential::Session(SessionId::new()) };
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("https://{}", listener.local_addr().unwrap());
-        let (stop, stopped) = oneshot::channel::<()>();
-        tokio::spawn(spinikus_control::agents::serve(control.clone(), listener, async move {
-            let _ = stopped.await;
-        }));
-        let fingerprint = control.certificate_authority().await.unwrap().fingerprint();
-        Self { _dir: dir, control, admin, url, fingerprint, _stop: stop }
-    }
-
-    async fn join_token(&self) -> (ServerId, Secret) {
-        let server = self.control.create_server(&self.admin, NewServer { name: "web-1".to_string() }).await.unwrap();
-        (server.id, self.control.create_join_token(&self.admin, server.id).await.unwrap().secret)
-    }
-
-    async fn status(&self, server: ServerId) -> ServerStatus {
-        self.control.store().get_server(server).await.unwrap().status
-    }
-
-    async fn wait_for_status(&self, server: ServerId, status: ServerStatus) {
-        for _ in 0..250 {
-            if self.status(server).await == status {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("the server never became {status}");
-    }
-}
 
 /// Starts the agent in the background. Dropping the sender stops it.
 fn start_agent(files: &AgentFiles) -> (oneshot::Sender<()>, JoinHandle<Result<(), AgentError>>) {

@@ -81,11 +81,44 @@ impl Control {
     /// A single-use join token for the server's agent, valid for an hour.
     pub async fn create_join_token(&self, principal: &Principal, server_id: ServerId) -> Result<JoinToken, ControlError> {
         require_instance_admin(principal)?;
+        self.issue_join_token(server_id, principal.actor(), principal.token_id()).await
+    }
+
+    /// The server this control plane runs on, created (named `name`) on first use. It may be
+    /// revoked, in which case its embedded agent must not run.
+    pub async fn embedded_server(&self, name: &str) -> Result<Server, ControlError> {
+        let name = input::name(name).unwrap_or_else(|_| "local".to_string());
+        Ok(self.store().get_or_create_embedded_server(ServerFields { name }).await?)
+    }
+
+    /// A join token for the embedded server's agent, issued by the system rather than a user,
+    /// so the embedded agent enrolls through the same `Enroll` call as any other.
+    pub async fn create_embedded_join_token(&self, server_id: ServerId) -> Result<JoinToken, ControlError> {
+        let server = self.store().get_server(server_id).await?;
+        if !server.embedded {
+            return Err(ControlError::Forbidden);
+        }
+        self.issue_join_token(server_id, Actor::System, None).await
+    }
+
+    async fn issue_join_token(
+        &self,
+        server_id: ServerId,
+        actor: Actor,
+        token_id: Option<spinikus_core::id::ApiTokenId>,
+    ) -> Result<JoinToken, ControlError> {
         let ca_fingerprint = self.certificate_authority().await?.fingerprint();
         let expires_at = Timestamp::now() + ENROLLMENT_TOKEN_LIFETIME;
         let (token, secret) = self.store().create_enrollment_token(server_id, expires_at).await?;
-        self.audit_by(principal, "enrollment_token.create", token.id, None, json!({ "server_id": server_id.to_string() }))
-            .await?;
+        self.audit(NewAuditEntry {
+            actor,
+            token_id,
+            action: "enrollment_token.create".parse().expect("valid audit action"),
+            target_id: Some(token.id.to_string()),
+            project_id: None,
+            details: json!({ "server_id": server_id.to_string() }).as_object().cloned().unwrap_or_default(),
+        })
+        .await?;
         Ok(JoinToken { token, secret, ca_fingerprint })
     }
 
@@ -157,6 +190,23 @@ mod tests {
         assert!(matches!(control.create_join_token(&read_only_admin, server.id).await, Err(ControlError::Forbidden)));
         assert!(matches!(control.revoke_server(&member, server.id).await, Err(ControlError::Forbidden)));
         assert_eq!(control.list_servers(&admin, None, 10).await.unwrap().items, [server]);
+    }
+
+    #[tokio::test]
+    async fn only_the_embedded_server_gets_system_join_tokens() {
+        let (_dir, control) = control().await;
+        let admin = user(&control, "admin@example.com", true).await;
+        let remote = control.create_server(&admin, new("web-1")).await.unwrap();
+
+        let embedded = control.embedded_server("  ").await.unwrap();
+        let join = control.create_embedded_join_token(embedded.id).await.unwrap();
+        let for_remote = control.create_embedded_join_token(remote.id).await;
+
+        assert_eq!((embedded.name.as_str(), embedded.embedded), ("local", true));
+        assert_eq!(join.token.server_id, embedded.id);
+        assert!(matches!(for_remote, Err(ControlError::Forbidden)), "{for_remote:?}");
+        let audit = control.store().list_audit_entries(None, None, None, 10).await.unwrap();
+        assert_eq!((audit[0].action.as_str(), audit[0].actor), ("enrollment_token.create", Actor::System));
     }
 
     #[tokio::test]
