@@ -383,13 +383,17 @@ message BackupDatabase {
 
 // Download `object_key` from `destination` and feed it to `command` run in the database's
 // container, on stdin. A non-zero exit fails the restore; the command is expected to change
-// nothing then.
+// nothing then. With `restart`, the container is then restarted (for engines that load their
+// data on start) and `ready_command`, if any, is run until it exits with 0, which fails the
+// restore if it doesn't in time.
 message RestoreDatabase {
   string restore_id = 1;
   string container_id = 2;
   repeated string command = 3;
   StorageDestination destination = 4;
   string object_key = 5;
+  bool restart = 6;
+  repeated string ready_command = 7;
 }
 
 // An S3-compatible bucket and the credentials to reach it.

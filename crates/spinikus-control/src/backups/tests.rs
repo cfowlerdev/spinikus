@@ -72,14 +72,14 @@ fn uploaded(size_bytes: u64) -> Outcome {
 /// A Postgres database on the setup's server, live through the fake agent, with its container
 /// reported as `pg-container`.
 async fn live_database(fixture: &mut Fixture) -> (Service, Deployment) {
+    live_engine(fixture, Engine::Postgres).await
+}
+
+/// A database of `engine`, live in a container named after it.
+async fn live_engine(fixture: &mut Fixture, engine: Engine) -> (Service, Deployment) {
     let control = &fixture.setup.control;
-    let new = NewDatabase {
-        name: "Postgres".to_string(),
-        slug: None,
-        engine: Engine::Postgres,
-        version: None,
-        server_id: Some(fixture.setup.server.id),
-    };
+    let new =
+        NewDatabase { name: engine.to_string(), slug: None, engine, version: None, server_id: Some(fixture.setup.server.id) };
     let created = control.create_database(&fixture.setup.admin, fixture.setup.service.environment_id, new).await.unwrap();
     for step in ["prepare", "start"] {
         control.advance_deployments().await;
@@ -94,7 +94,7 @@ async fn live_database(fixture: &mut Fixture) -> (Service, Deployment) {
     let container = ObservedInstance {
         service_id: created.service.id,
         deployment_id: deployment.id,
-        container_id: "pg-container".to_string(),
+        container_id: if engine == Engine::Postgres { "pg-container".to_string() } else { format!("{engine}-container") },
         status: InstanceStatus::Running,
         health: InstanceHealth::None,
         restart_count: 0,
@@ -373,7 +373,8 @@ async fn admins_restore_after_a_safety_backup() {
         panic!("no restore sent");
     };
     assert_eq!(command.container_id, "pg-container");
-    assert_eq!(command.command, Engine::Postgres.restore_command().unwrap());
+    let plan = Engine::Postgres.restore_plan();
+    assert_eq!((command.command, command.restart, command.ready_command), (plan.command, false, Vec::new()));
     assert_eq!(command.object_key, backup.object_key);
     assert_eq!(command.destination.unwrap().secret_access_key, "s3cret");
     assert_eq!((running.status, running.server_id), (BackupStatus::Running, Some(server)));
@@ -416,18 +417,29 @@ async fn restores_fail_with_their_safety_backup_and_need_something_to_restore() 
 }
 
 #[tokio::test]
-async fn redis_is_not_restored_yet() {
-    let fixture = fixture(BackupTimings::default()).await;
-    let (control, admin) = (&fixture.setup.control, &fixture.setup.admin);
-    let server_id = Some(fixture.setup.server.id);
-    let new = NewDatabase { name: "Cache".to_string(), slug: None, engine: Engine::Redis, version: None, server_id };
-    let redis = control.create_database(admin, fixture.setup.service.environment_id, new).await.unwrap().service;
-    let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
-    let backup = control.queue_backup(&redis, destination.id, None).await.unwrap();
-    control.store().finish_backup(backup.id, Ok(1)).await.unwrap();
+async fn redis_restores_by_restarting_and_waiting_until_it_answers() {
+    let mut fixture = fixture(BackupTimings::default()).await;
+    let (redis, _) = live_engine(&mut fixture, Engine::Redis).await;
+    let admin = fixture.setup.admin.clone();
+    let destination = fixture.setup.control.create_storage_destination(&admin, destination("Primary")).await.unwrap();
+    let backup = backed_up(&mut fixture, redis.id, destination.id).await;
+    let (control, server) = (&fixture.setup.control, fixture.setup.server.id);
 
-    let refused = control.restore_backup(admin, backup.id).await;
+    let restore = control.restore_backup(&admin, backup.id).await.unwrap();
+    control.advance_backups().await;
+    let safety = restore.safety_backup_id.unwrap();
+    control.backup_result(server, result(&format!("{safety}/backup"), uploaded(7))).await;
+    control.advance_backups().await;
+    let sent = commands(&mut fixture.agent);
 
-    let Err(ControlError::Rejected { problem, .. }) = refused else { panic!("{refused:?}") };
-    assert_eq!(problem, "restoring redis is not supported yet");
+    let restores = sent.into_iter().filter_map(|command| match command.kind {
+        Some(Kind::RestoreDatabase(restore)) => Some(restore),
+        _ => None,
+    });
+    let [command] = restores.collect::<Vec<_>>().try_into().expect("one restore sent");
+    let plan = Engine::Redis.restore_plan();
+    assert_eq!(command.container_id, "redis-container");
+    assert_eq!(command.object_key, backup.object_key);
+    assert!(command.object_key.ends_with(".rdb"));
+    assert_eq!((command.command, command.restart, command.ready_command), (plan.command, true, plan.ready_command));
 }

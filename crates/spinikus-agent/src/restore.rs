@@ -1,9 +1,14 @@
 //! Database restores: the dump is downloaded from the destination and fed, as it arrives, to
 //! the restore command in the database's container on stdin. The command decides what a
 //! failure leaves behind (Postgres restores in one transaction, so nothing); a failed
-//! download ends stdin early and is reported in place of the command's own error.
+//! download ends stdin early and is reported in place of the command's own error. Engines
+//! that load their data only on start (Redis) have the container restarted next, and the
+//! restore succeeds once the database answers its ready command.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use object_store::{ObjectStoreExt, path::Path};
 use spinikus_core::id::RestoreId;
@@ -12,9 +17,15 @@ use tokio_stream::StreamExt;
 
 use crate::{
     backup::{BackupStores, exited, keep_stderr},
-    commands::{Progress, failure, parse_id},
-    runtime::{ContainerRuntime, ExecOutput},
+    commands::{DEFAULT_GRACE, Progress, failure, parse_id},
+    runtime::{ContainerRuntime, ExecInput, ExecOutput, RuntimeError},
 };
+
+/// How long a restarted database has to answer its ready command: loading a large dump
+/// takes a while.
+const READY_TIMEOUT: Duration = Duration::from_secs(300);
+/// How often the ready command runs until it passes.
+const READY_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) async fn restore_database(
     runtime: &dyn ContainerRuntime,
@@ -42,6 +53,7 @@ pub(crate) async fn restore_database(
         Err(error) => return Err(restore_failed(format!("could not download the backup: {error}"))),
     };
     let size = download.meta.size;
+    let (restart, ready_command) = (restore.restart, restore.ready_command);
     progress.phase("restoring");
     tracing::info!(restore = %restore_id, container = restore.container_id, size, "restoring a database");
     // A failed download ends the input early and is remembered here.
@@ -54,22 +66,13 @@ pub(crate) async fn restore_database(
             None
         }
     });
-    let mut output = runtime.exec(&restore.container_id, restore.command, Some(Box::pin(input)));
-    let mut stderr = Vec::new();
-    let outcome = loop {
-        match output.next().await {
-            Some(Ok(ExecOutput::Stdout(_))) => {}
-            Some(Ok(ExecOutput::Stderr(bytes))) => keep_stderr(&mut stderr, &bytes),
-            Some(Ok(ExecOutput::Exited(0))) => break Ok(()),
-            Some(Ok(ExecOutput::Exited(code))) => break Err(exited("the restore", code, &stderr)),
-            Some(Err(error)) => break Err(format!("the restore failed: {error}")),
-            None => break Err("the restore ended without an exit code".to_string()),
-        }
-    };
+    let outcome = run(runtime, &restore.container_id, "the restore", restore.command, Some(Box::pin(input))).await;
     let download_error = download_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
-    let outcome = match download_error {
-        Some(error) => Err(format!("the download failed: {error}")),
-        None => outcome,
+    let outcome = match (download_error, outcome) {
+        (Some(error), _) => Err(format!("the download failed: {error}")),
+        (None, Err(error)) => Err(error),
+        (None, Ok(())) if restart => restart_until_ready(runtime, &restore.container_id, ready_command, progress).await,
+        (None, Ok(())) => Ok(()),
     };
     match outcome {
         Ok(()) => {
@@ -80,6 +83,60 @@ pub(crate) async fn restore_database(
         Err(message) => {
             tracing::warn!(restore = %restore_id, message, "a restore failed");
             Err(restore_failed(message))
+        }
+    }
+}
+
+/// Restarts the container, so the database loads the restored data, then runs the ready
+/// command until it passes.
+async fn restart_until_ready(
+    runtime: &dyn ContainerRuntime,
+    container_id: &str,
+    ready_command: Vec<String>,
+    progress: &Progress,
+) -> Result<(), String> {
+    progress.phase("restarting");
+    match runtime.restart(container_id, DEFAULT_GRACE).await {
+        Ok(()) => {}
+        Err(RuntimeError::NotFound) => return Err(format!("the container `{container_id}` is gone; it was not restarted")),
+        Err(error) => return Err(format!("the data is in place, but the container did not restart: {error}")),
+    }
+    if ready_command.is_empty() {
+        return Ok(());
+    }
+    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+    loop {
+        let Err(problem) = run(runtime, container_id, "the ready check", ready_command.clone(), None).await else {
+            return Ok(());
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "the data is in place, but the database did not answer within {}s of its restart: {problem}",
+                READY_TIMEOUT.as_secs()
+            ));
+        }
+        tokio::time::sleep(READY_INTERVAL).await;
+    }
+}
+
+/// Runs a command in the container to its end; `what` names it in errors.
+async fn run(
+    runtime: &dyn ContainerRuntime,
+    container_id: &str,
+    what: &str,
+    command: Vec<String>,
+    input: Option<ExecInput>,
+) -> Result<(), String> {
+    let mut output = runtime.exec(container_id, command, input);
+    let mut stderr = Vec::new();
+    loop {
+        match output.next().await {
+            Some(Ok(ExecOutput::Stdout(_))) => {}
+            Some(Ok(ExecOutput::Stderr(bytes))) => keep_stderr(&mut stderr, &bytes),
+            Some(Ok(ExecOutput::Exited(0))) => return Ok(()),
+            Some(Ok(ExecOutput::Exited(code))) => return Err(exited(what, code, &stderr)),
+            Some(Err(error)) => return Err(format!("{what} failed: {error}")),
+            None => return Err(format!("{what} ended without an exit code")),
         }
     }
 }
@@ -121,7 +178,17 @@ mod tests {
             command: vec!["pg_restore".to_string()],
             destination: Some(pb::StorageDestination { bucket: "b".to_string(), ..Default::default() }),
             object_key: key.to_string(),
+            ..Default::default()
         }
+    }
+
+    /// A restore that restarts the container and checks it with `ready`.
+    fn restarting(container_id: String, key: &str) -> pb::RestoreDatabase {
+        pb::RestoreDatabase { restart: true, ready_command: vec!["ready".to_string()], ..command(container_id, key) }
+    }
+
+    fn not_ready() -> Vec<ExecOutput> {
+        vec![ExecOutput::Stdout(Bytes::from_static(b"LOADING\n")), ExecOutput::Exited(1)]
     }
 
     fn progress() -> Progress {
@@ -164,5 +231,45 @@ mod tests {
         assert_eq!(failed.reason(), FailureReason::RestoreFailed);
         assert_eq!(failed.message, "the restore exited with 1: pg_restore: error: relation \"notes\" is locked");
         assert_eq!(runtime.execs().len(), 1, "nothing runs without a dump");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restarts_the_database_and_waits_until_it_answers() {
+        let runtime = MemoryRuntime::new();
+        let container = database(&runtime);
+        let store = Arc::new(InMemory::new());
+        store.put(&Path::from("k.rdb"), PutPayload::from_static(b"REDIS0012")).await.unwrap();
+        let stores = BackupStores::Fixed(store);
+        runtime.queue_exec_output(vec![ExecOutput::Exited(0)]);
+        runtime.queue_exec_output(not_ready());
+        runtime.queue_exec_output(not_ready());
+
+        restore_database(&runtime, &stores, restarting(container.clone(), "k.rdb"), &progress()).await.unwrap();
+
+        let commands: Vec<_> = runtime.execs().into_iter().map(|(_, command)| command[0].clone()).collect();
+        assert_eq!(commands, ["pg_restore", "ready", "ready", "ready"]);
+        assert!(runtime.inspect(&container).await.unwrap().unwrap().started_at.is_some(), "restarted");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fails_when_the_database_does_not_come_back() {
+        let runtime = MemoryRuntime::new();
+        let container = database(&runtime);
+        let store = Arc::new(InMemory::new());
+        store.put(&Path::from("k.rdb"), PutPayload::from_static(b"REDIS0012")).await.unwrap();
+        let stores = BackupStores::Fixed(store);
+        runtime.queue_exec_output(vec![ExecOutput::Exited(0)]);
+        runtime.set_exec_output(not_ready());
+        let failing = BackupStores::Fixed(Arc::new(InMemory::new()));
+
+        let failed = restore_database(&runtime, &stores, restarting(container.clone(), "k.rdb"), &progress()).await.unwrap_err();
+        let missing = restore_database(&runtime, &failing, restarting(container, "k.rdb"), &progress()).await.unwrap_err();
+
+        assert_eq!(failed.reason(), FailureReason::RestoreFailed);
+        assert!(failed.message.starts_with("the data is in place, but the database did not answer"), "{}", failed.message);
+        assert!(failed.message.ends_with("the ready check exited with 1"), "{}", failed.message);
+        assert!(missing.message.contains("not in the bucket"), "{}", missing.message);
+        let restarts = runtime.execs().iter().filter(|(_, command)| command[0] == "pg_restore").count();
+        assert_eq!(restarts, 1, "nothing runs, and nothing restarts, without a dump");
     }
 }

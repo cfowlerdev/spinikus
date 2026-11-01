@@ -165,32 +165,82 @@ pub struct NewRestore {
     pub safety_backup_id: Option<BackupId>,
 }
 
+/// How a dump is loaded back into an engine's database, by commands run in its container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestorePlan {
+    /// Reads the dump from stdin and puts it in place; a non-zero exit leaves the data as
+    /// it was.
+    pub command: Vec<String>,
+    /// Whether the container is restarted once `command` succeeded, for engines that load
+    /// their data only on start.
+    pub restart: bool,
+    /// After the restart, exits 0 once the database serves again; empty for none.
+    pub ready_command: Vec<String>,
+}
+
+/// The Redis script that replaces the data with an RDB dump read from stdin. The dump
+/// becomes the base of a new append-only file (Redis loads the AOF, not `dump.rdb`, when it
+/// is on); it is checked as such before anything changes. Persistence is then switched off
+/// in the running server, so nothing it writes before the restart replaces the new files,
+/// and the restart (by the agent) loads them, with the configuration from the command line
+/// again. Writes between the swap and the restart are lost, as a restore implies.
+const REDIS_RESTORE: &str = r#"set -eu
+r() { redis-cli -a "$REDIS_PASSWORD" --no-auth-warning "$@"; }
+staged=/data/appendonlydir.spinikus-restore
+trap 'rm -rf "$staged" /data/dump.rdb.spinikus-restore' EXIT
+rm -rf "$staged"
+mkdir "$staged"
+cat > "$staged/appendonly.aof.1.base.rdb"
+printf 'file appendonly.aof.1.base.rdb seq 1 type b\n' > "$staged/appendonly.aof.manifest"
+redis-check-aof "$staged/appendonly.aof.manifest" >&2
+cp "$staged/appendonly.aof.1.base.rdb" /data/dump.rdb.spinikus-restore
+r CONFIG SET save '' > /dev/null
+r CONFIG SET appendonly no > /dev/null
+while r INFO persistence | grep -Eq '^(rdb_bgsave_in_progress|aof_rewrite_in_progress):1'; do sleep 0.1; done
+rm -rf /data/appendonlydir
+mv "$staged" /data/appendonlydir
+mv -f /data/dump.rdb.spinikus-restore /data/dump.rdb"#;
+
+fn shell(script: &str) -> Vec<String> {
+    vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()]
+}
+
 impl Engine {
     /// The command, run in the database's container, that writes a dump to stdout. It runs
     /// with the container's environment, so it uses the database's own credentials.
     pub fn dump_command(self) -> Vec<String> {
-        let script = match self {
+        shell(match self {
             // The custom format is compressed and restores selectively with pg_restore.
             Self::Postgres => r#"exec pg_dump --format=custom --username="$POSTGRES_USER" "$POSTGRES_DB""#,
-            // A snapshot in Redis's own RDB format, streamed from the server.
-            Self::Redis => r#"exec redis-cli -a "$REDIS_PASSWORD" --no-auth-warning --rdb -"#,
-        };
-        vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()]
+            // A snapshot in Redis's own RDB format, through a file: written to stdout,
+            // redis-cli ends a diskless transfer with its end-of-file marker, which isn't RDB.
+            Self::Redis => {
+                r#"set -e; dump=$(mktemp); trap 'rm -f "$dump"' EXIT; redis-cli -a "$REDIS_PASSWORD" --no-auth-warning --rdb "$dump" >&2; cat "$dump""#
+            }
+        })
     }
 
-    /// The command, run in the database's container, that loads a dump from stdin, replacing
-    /// what the dump contains, in one transaction. `None` for engines that can't be restored
-    /// yet.
-    pub fn restore_command(self) -> Option<Vec<String>> {
-        let script = match self {
+    /// How a dump from [`Engine::dump_command`] replaces the database's data.
+    pub fn restore_plan(self) -> RestorePlan {
+        match self {
             // pg_restore needs a seekable file for a dump written to a pipe (it has no data
-            // offsets), so stdin goes to a temporary file in the container first.
-            Self::Postgres => {
-                r#"set -e; dump=$(mktemp); trap 'rm -f "$dump"' EXIT; cat > "$dump"; pg_restore --clean --if-exists --no-owner --single-transaction --exit-on-error --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" "$dump""#
-            }
-            Self::Redis => return None,
-        };
-        Some(vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()])
+            // offsets), so stdin goes to a temporary file in the container first. It runs in
+            // one transaction, so a failure changes nothing.
+            Self::Postgres => RestorePlan {
+                command: shell(
+                    r#"set -e; dump=$(mktemp); trap 'rm -f "$dump"' EXIT; cat > "$dump"; pg_restore --clean --if-exists --no-owner --single-transaction --exit-on-error --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" "$dump""#,
+                ),
+                restart: false,
+                ready_command: Vec::new(),
+            },
+            // Redis replaces its data only by loading files on start; it answers PING with
+            // an error while loading.
+            Self::Redis => RestorePlan {
+                command: shell(REDIS_RESTORE),
+                restart: true,
+                ready_command: shell(r#"[ "$(redis-cli -a "$REDIS_PASSWORD" --no-auth-warning PING)" = PONG ]"#),
+            },
+        }
     }
 
     /// The extension of a dump's object key.
@@ -226,16 +276,24 @@ mod tests {
 
         assert_eq!(postgres[..2], ["/bin/sh", "-c"]);
         assert!(postgres[2].contains(r#"--username="$POSTGRES_USER""#));
-        assert!(redis[2].contains("--rdb -"));
+        assert!(redis[2].contains(r#"--rdb "$dump""#) && redis[2].ends_with(r#"cat "$dump""#));
     }
 
     #[test]
-    fn restores_postgres_in_one_transaction_and_not_redis_yet() {
-        let postgres = Engine::Postgres.restore_command().unwrap();
+    fn restores_postgres_in_one_transaction_and_redis_by_restarting() {
+        let postgres = Engine::Postgres.restore_plan();
+        let redis = Engine::Redis.restore_plan();
 
-        assert!(postgres[2].contains("--single-transaction") && postgres[2].contains("--clean"));
-        assert!(postgres[2].contains(r#"--dbname="$POSTGRES_DB""#));
-        assert_eq!(Engine::Redis.restore_command(), None);
+        assert!(postgres.command[2].contains("--single-transaction") && postgres.command[2].contains("--clean"));
+        assert!(postgres.command[2].contains(r#"--dbname="$POSTGRES_DB""#));
+        assert!(!postgres.restart && postgres.ready_command.is_empty());
+        assert_eq!(redis.command[..2], ["/bin/sh", "-c"]);
+        let data = crate::database::DatabaseSpec::new(Engine::Redis, None).unwrap().data_path();
+        assert!(redis.command[2].contains(&format!("{}/appendonlydir", data.as_str())));
+        // The dump is checked before anything changes.
+        let script = &redis.command[2];
+        assert!(script.find("redis-check-aof").unwrap() < script.find("CONFIG SET").unwrap());
+        assert!(redis.restart && redis.ready_command[2].contains("PING"));
     }
 
     #[test]

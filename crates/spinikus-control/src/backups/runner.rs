@@ -300,24 +300,25 @@ impl Control {
             Err(StoreError::NotFound { .. }) => None,
             Err(error) => return Err(error.into()),
         };
-        let command = backup.as_ref().and_then(|backup| backup.engine.restore_command());
-        let located = match (&backup, &command) {
-            (None, _) => Located::Never("the backup was deleted".to_string()),
-            (Some(backup), None) => Located::Never(format!("restoring {} is not supported yet", backup.engine)),
-            (Some(_), Some(_)) => self.locate_database(restore.service_id).await?,
+        let located = match &backup {
+            None => Located::Never("the backup was deleted".to_string()),
+            Some(_) => self.locate_database(restore.service_id).await?,
         };
         match self.next_step(sent, &run, located).await? {
             Next::Send { server, container_id, first } => {
-                let (backup, command) = (backup.expect("located with a backup"), command.expect("and a command"));
+                let backup = backup.expect("located with a backup");
+                let plan = backup.engine.restore_plan();
                 // A deleted destination still reaches the backups it holds.
                 let destination = self.store().get_storage_destination_any(backup.destination_id).await?;
                 let secret = self.store().storage_destination_secret(destination.id).await?;
                 let command = pb::RestoreDatabase {
                     restore_id: restore.id.to_string(),
                     container_id,
-                    command,
+                    command: plan.command,
                     destination: Some(super::storage::proto(&destination.fields, &secret)),
                     object_key: backup.object_key,
+                    restart: plan.restart,
+                    ready_command: plan.ready_command,
                 };
                 let started = |server| async move { self.store().start_restore(restore.id, server).await };
                 self.send_run(sent, run.id, server, Kind::RestoreDatabase(command), first.then_some(started)).await?;

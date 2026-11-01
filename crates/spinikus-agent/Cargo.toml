@@ -39,3 +39,5 @@ spinikus-proxy.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Paused time, for timeouts.
+tokio = { workspace = true, features = ["test-util"] }

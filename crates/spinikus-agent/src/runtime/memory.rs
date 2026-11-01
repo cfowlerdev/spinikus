@@ -2,7 +2,7 @@
 //! events like Docker's, and a switch to make the runtime unreachable.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     net::SocketAddr,
     sync::{
         Mutex,
@@ -45,6 +45,8 @@ pub struct MemoryRuntime {
     build_failure: Mutex<Option<String>>,
     /// What every command run in a container writes, and the commands run so far.
     exec_output: Mutex<Vec<ExecOutput>>,
+    /// What the next commands write, one entry each, before `exec_output` again.
+    queued_exec_outputs: Mutex<VecDeque<Vec<ExecOutput>>>,
     execs: Mutex<Vec<(String, Vec<String>)>>,
     /// What each command given input read on stdin, in order.
     exec_inputs: std::sync::Arc<Mutex<Vec<Vec<u8>>>>,
@@ -73,6 +75,7 @@ impl MemoryRuntime {
             written: broadcast::channel(256).0,
             build_failure: Mutex::default(),
             exec_output: Mutex::new(vec![ExecOutput::Exited(0)]),
+            queued_exec_outputs: Mutex::default(),
             execs: Mutex::default(),
             exec_inputs: std::sync::Arc::default(),
             exit_on_start: AtomicBool::new(false),
@@ -118,6 +121,12 @@ impl MemoryRuntime {
     /// [`ExecOutput::Exited`]. By default they write nothing and exit with 0.
     pub fn set_exec_output(&self, output: Vec<ExecOutput>) {
         *lock(&self.exec_output) = output;
+    }
+
+    /// What the next command run in a container writes, in place of what
+    /// [`MemoryRuntime::set_exec_output`] set; each call queues one more.
+    pub fn queue_exec_output(&self, output: Vec<ExecOutput>) {
+        lock(&self.queued_exec_outputs).push_back(output);
     }
 
     /// The commands run in containers so far, with the container each ran in.
@@ -259,7 +268,8 @@ impl ContainerRuntime for MemoryRuntime {
             return Box::pin(tokio_stream::once(Err(RuntimeError::NotFound)));
         }
         lock(&self.execs).push((container_id.to_string(), command));
-        let output = lock(&self.exec_output).clone();
+        let queued = lock(&self.queued_exec_outputs).pop_front();
+        let output = queued.unwrap_or_else(|| lock(&self.exec_output).clone());
         let Some(mut input) = input else {
             return Box::pin(tokio_stream::iter(output.into_iter().map(Ok)));
         };

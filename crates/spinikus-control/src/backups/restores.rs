@@ -2,7 +2,7 @@
 //! environment restore; viewers see restores. A restore first queues a safety backup of the
 //! current data to the backup's destination, and the runner sends the restore only once that
 //! succeeded, so a mistaken restore can be undone by restoring the safety backup. One restore
-//! runs at a time per database, and only Postgres can be restored so far.
+//! runs at a time per database.
 
 use serde_json::json;
 use spinikus_core::{
@@ -31,10 +31,7 @@ impl Control {
             return Err(rejected("only a backup that succeeded can be restored".to_string()));
         }
         let service = self.store().get_service(backup.service_id).await?;
-        let engine = database_engine(&service)?;
-        if engine.restore_command().is_none() {
-            return Err(rejected(format!("restoring {engine} is not supported yet")));
-        }
+        database_engine(&service)?;
         if self.store().live_deployment(service.id).await?.is_none() {
             return Err(rejected("the database has nothing live to restore into".to_string()));
         }

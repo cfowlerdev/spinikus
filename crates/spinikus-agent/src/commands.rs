@@ -30,7 +30,7 @@ use crate::{
 };
 
 /// How long a container gets to stop when the command does not say.
-const DEFAULT_GRACE: Duration = Duration::from_secs(10);
+pub(crate) const DEFAULT_GRACE: Duration = Duration::from_secs(10);
 const MAX_GRACE: Duration = Duration::from_secs(10 * 60);
 
 /// How many finished results are kept to answer repeated commands.

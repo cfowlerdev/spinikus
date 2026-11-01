@@ -1020,3 +1020,116 @@ async fn backs_up_and_restores_a_database_through_s3() {
     assert_eq!(refused.status, BackupStatus::Failed);
     assert!(refused.error.as_deref().unwrap().contains("upload"), "{refused:?}");
 }
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon; pulls redis:8, rustfs/rustfs and amazon/aws-cli"]
+async fn backs_up_and_restores_redis_through_s3() {
+    use spinikus_control::{NewDatabase, NewStorageDestination};
+    use spinikus_core::{backup::BackupStatus, database::Engine, id::RestoreId, variable::VariableScope};
+    use spinikus_store::{VariableRepository, VolumeRepository};
+
+    let s3 = S3Server::start().await;
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let (_stop, _agent) = start_agent_with(&files, Arc::new(DockerRuntime::new()), None);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let (control, admin) = (&control_plane.control, &control_plane.admin);
+    let web = control_plane.service(server, "unused:1", json!({})).await;
+    let environment = control.get_service(admin, web).await.unwrap().environment_id;
+    let network = format!("spinikus-{environment}");
+    let present =
+        |image: &str| std::process::Command::new("docker").args(["image", "inspect", image]).output().unwrap().status.success();
+    let pulled = ["redis:8"].into_iter().filter(|image| !present(image)).collect();
+    let new =
+        NewDatabase { name: "Redis".to_string(), slug: None, engine: Engine::Redis, version: None, server_id: Some(server) };
+    let redis = control.create_database(admin, environment, new).await.unwrap();
+    let volumes = control.store().list_volumes(redis.service.id).await.unwrap();
+    let _cleanup = DatabaseCleanup {
+        services: vec![redis.service.id.to_string()],
+        volumes: volumes.into_iter().map(|volume| volume.id.to_string()).collect(),
+        network: network.clone(),
+        pulled,
+    };
+    control_plane.wait_for_deployment(redis.deployment.id, DeploymentStatus::Live, Duration::from_secs(300)).await;
+    let destination = NewStorageDestination {
+        name: "RustFS".to_string(),
+        endpoint: Some(format!("http://127.0.0.1:{}", s3.port)),
+        region: None,
+        bucket: "backups".to_string(),
+        path_prefix: None,
+        path_style: true,
+        access_key_id: S3_ACCESS_KEY.to_string(),
+        secret_access_key: Secret::new(S3_SECRET_KEY),
+    };
+    let destination = control.create_storage_destination(admin, destination).await.unwrap();
+    let restored = |id: RestoreId| async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let restore = control.get_restore(admin, id).await.unwrap();
+            if restore.status.is_finished() {
+                return restore;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the restore did not finish: {restore:?}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    let variables = control.store().list_variables(VariableScope::Service(redis.service.id)).await.unwrap();
+    let url = variables.into_iter().find(|variable| variable.name.as_str() == "REDIS_URL").unwrap();
+    let url = control.store().reveal_variable(url.id).await.unwrap().expose().to_string();
+    let cli = |args: &[&str]| {
+        let command: Vec<String> = ["redis-cli", "-u", url.as_str()].iter().chain(args).map(|arg| arg.to_string()).collect();
+        let network = network.clone();
+        async move {
+            let command: Vec<&str> = command.iter().map(String::as_str).collect();
+            run_on_network(&network, "redis:8", &command, Duration::from_secs(60)).await.trim().to_string()
+        }
+    };
+    let keys = || async { format!("{}|{}", cli(&["GET", "kept"]).await, cli(&["GET", "added"]).await) };
+
+    cli(&["SET", "kept", "before"]).await;
+    let backup = control.create_backup(admin, redis.service.id, destination.id).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let backup = loop {
+        let backup = control.get_backup(admin, backup.id).await.unwrap();
+        if backup.status.is_finished() {
+            break backup;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the backup did not finish: {backup:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let dump = s3.aws(&["s3", "cp", &format!("s3://backups/{}", backup.object_key), "-"]);
+    cli(&["SET", "added", "after"]).await;
+    cli(&["SET", "kept", "changed"]).await;
+    let restore = control.restore_backup(admin, backup.id).await.unwrap();
+    let restore = restored(restore.id).await;
+    let after_restore = keys().await;
+    // The safety backup undoes the restore.
+    let undo = control.restore_backup(admin, restore.safety_backup_id.unwrap()).await.unwrap();
+    let undo = restored(undo.id).await;
+    let after_undo = keys().await;
+    // Writes after a restore are kept: Redis is back on its append-only file.
+    cli(&["SET", "later", "x"]).await;
+    let container = format!("spinikus-{}", redis.deployment.id);
+    let restarted = std::process::Command::new("docker").args(["restart", &container]).output().unwrap();
+    // redis-cli exits 0 with Redis's LOADING error too.
+    let mut later = String::new();
+    for _ in 0..30 {
+        later = cli(&["GET", "later"]).await;
+        if !later.starts_with("LOADING") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    assert_eq!(backup.status, BackupStatus::Succeeded, "{backup:?}");
+    assert!(dump.stdout.starts_with(b"REDIS"), "{:?}", String::from_utf8_lossy(&dump.stderr));
+    assert_eq!(backup.size_bytes, Some(dump.stdout.len() as u64));
+    assert_eq!(restore.status, BackupStatus::Succeeded, "{restore:?}");
+    assert_eq!(after_restore, "before|");
+    assert_eq!(undo.status, BackupStatus::Succeeded, "{undo:?}");
+    assert_eq!(after_undo, "changed|after");
+    assert!(restarted.status.success(), "{restarted:?}");
+    assert_eq!(later, "x");
+}
