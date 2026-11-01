@@ -7,10 +7,13 @@ pub mod domains;
 pub mod manage;
 pub mod overview;
 pub mod projects;
+pub mod servers;
 pub mod service_settings;
 pub mod services;
 pub mod session;
+pub mod settings;
 pub mod storage;
+pub mod tokens;
 pub mod variables;
 
 use axum::{

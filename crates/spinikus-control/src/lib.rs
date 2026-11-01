@@ -25,6 +25,7 @@ pub mod setup;
 pub mod sources;
 #[cfg(test)]
 mod test_support;
+pub mod tokens;
 pub mod variables;
 pub mod volumes;
 pub mod webhooks;
@@ -48,6 +49,7 @@ pub use projects::{NewProject, ProjectChanges};
 pub use servers::{Enrolled, JoinToken, NewServer};
 pub use services::{NewService, ServiceChanges};
 use spinikus_store::SqliteStore;
+pub use tokens::NewToken;
 use tokio::sync::OnceCell;
 pub use variables::{NewVariable, VariableChanges};
 pub use volumes::{NewVolume, VolumeChanges};

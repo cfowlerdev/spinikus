@@ -79,9 +79,7 @@ pub fn page(signed: &Signed, title: &str, crumbs: &[(&str, String)], content: Ma
                         }
                         nav class="flex items-center gap-4 text-sm" {
                             a href="/" class="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { "Projects" }
-                            @if signed.principal.is_instance_admin() {
-                                a href="/settings/storage" class="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { "Settings" }
-                            }
+                            a href="/settings" class="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { "Settings" }
                         }
                         div class="ml-auto flex items-center gap-4 text-sm" {
                             span class="hidden text-zinc-600 sm:inline dark:text-zinc-400" title=(user.email.as_str()) { (user.name) }

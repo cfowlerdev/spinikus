@@ -21,7 +21,7 @@ use spinikus_core::{
     source::{DeployKey, GitSource, ImageSource, Source, SourceSpec},
 };
 
-use super::{Tab, crumbs, manage::Naming, parse_id, problem, redirect, service_tabs};
+use super::{Tab, crumbs, manage::Naming, parse_id, problem, redirect, servers, service_tabs};
 use crate::{
     auth::Signed,
     error::WebError,
@@ -261,12 +261,19 @@ pub struct NewServiceForm {
     source: SourceForm,
     #[serde(default)]
     port: String,
+    /// Empty for the control plane's server.
+    #[serde(default)]
+    server_id: String,
 }
+
+/// Where a service can run, if there is a choice.
+type Servers = Option<Vec<(String, String)>>;
 
 pub async fn new_service(State(control): State<Control>, signed: Signed, Path(id): Path<String>) -> Result<Markup, WebError> {
     let (environment, project) = environment_as_developer(&control, &signed, &id).await?;
     let form = NewServiceForm { source: SourceForm::new(), ..Default::default() };
-    Ok(new_service_page(&signed, &project, &environment, &form, Notice::None))
+    let servers = servers::choices(&control, &signed, None).await?;
+    Ok(new_service_page(&signed, &project, &environment, &servers, &form, Notice::None))
 }
 
 pub async fn create_service(
@@ -277,20 +284,32 @@ pub async fn create_service(
     Form(form): Form<NewServiceForm>,
 ) -> Result<Response, WebError> {
     let (environment, project) = environment_as_developer(&control, &signed, &id).await?;
+    let servers = servers::choices(&control, &signed, servers::parse_choice(&form.server_id).ok().flatten()).await?;
     let runtime = RuntimeForm { port: form.port.clone(), ..Default::default() };
     let config = match runtime.apply(&ServiceConfig::new(), None) {
         Ok(config) => config,
         Err(message) => {
-            let page = new_service_page(&signed, &project, &environment, &form, Notice::Problem(&message));
+            let page = new_service_page(&signed, &project, &environment, &servers, &form, Notice::Problem(&message));
             return Ok((StatusCode::UNPROCESSABLE_ENTITY, page).into_response());
         }
     };
-    let new =
-        NewService { name: form.naming.name.clone(), slug: form.naming.slug(), kind: ServiceKind::App, config, server_id: None };
-    match control.create_service_with_source(&signed.principal, environment.id, new, form.source.spec()).await {
+    let created = match servers::parse_choice(&form.server_id) {
+        Ok(server_id) => {
+            let new = NewService {
+                name: form.naming.name.clone(),
+                slug: form.naming.slug(),
+                kind: ServiceKind::App,
+                config,
+                server_id,
+            };
+            control.create_service_with_source(&signed.principal, environment.id, new, form.source.spec()).await
+        }
+        Err(error) => Err(error),
+    };
+    match created {
         Ok(service) => Ok(redirect(&headers, &format!("/services/{}", service.id))),
         Err(error) => {
-            problem(error, |message| new_service_page(&signed, &project, &environment, &form, Notice::Problem(message)))
+            problem(error, |message| new_service_page(&signed, &project, &environment, &servers, &form, Notice::Problem(message)))
         }
     }
 }
@@ -312,6 +331,7 @@ fn new_service_page(
     signed: &Signed,
     project: &Project,
     environment: &Environment,
+    servers: &Servers,
     form: &NewServiceForm,
     notice: Notice<'_>,
 ) -> Markup {
@@ -320,6 +340,7 @@ fn new_service_page(
         (form.source.fields())
         (Input::text("service-port", "port", "Port", &form.port).kind("number").mono()
             .hint("The port the app listens on. Leave it empty for a worker that gets no traffic.").render())
+        @if let Some(servers) = servers { (servers::select("service-server", servers, &form.server_id)) }
     };
     let action = format!("/environments/{}/services", environment.id);
     let content = html! {
@@ -342,6 +363,7 @@ struct Context {
     source: Option<Source>,
     deploy_key: Option<DeployKey>,
     file: Option<FromFile>,
+    servers: Servers,
 }
 
 async fn context(control: &Control, signed: &Signed, id: ServiceId) -> Result<Context, ControlError> {
@@ -363,7 +385,8 @@ async fn context(control: &Control, signed: &Signed, id: ServiceId) -> Result<Co
         Some(Source { spec: SourceSpec::Git(_), .. }) => from_file(control, signed, id).await?,
         _ => None,
     };
-    Ok(Context { service, environment, project, role, source, deploy_key, file })
+    let servers = servers::choices(control, signed, service.server_id).await?;
+    Ok(Context { service, environment, project, role, source, deploy_key, file, servers })
 }
 
 /// How many deployments to look through for the newest build.
@@ -401,6 +424,17 @@ struct Sections<'a> {
     general: (Naming, Notice<'a>),
     source: (SourceForm, Notice<'a>),
     runtime: (RuntimeForm, Notice<'a>),
+    placement: (PlacementForm, Notice<'a>),
+}
+
+/// Which server the service runs on.
+#[derive(Deserialize)]
+pub struct PlacementForm {
+    #[serde(default)]
+    revision: Option<i64>,
+    /// Empty for the control plane's server.
+    #[serde(default)]
+    server_id: String,
 }
 
 impl<'a> Sections<'a> {
@@ -413,6 +447,13 @@ impl<'a> Sections<'a> {
             general: (general, notice("general")),
             source: (SourceForm::of(context.source.as_ref()), notice("source")),
             runtime: (RuntimeForm::of(service, context.file.as_ref()), notice("runtime")),
+            placement: (
+                PlacementForm {
+                    revision: Some(service.revision),
+                    server_id: service.server_id.map(|id| id.to_string()).unwrap_or_default(),
+                },
+                notice("placement"),
+            ),
         }
     }
 }
@@ -493,6 +534,30 @@ pub async fn update_runtime(
     }
 }
 
+pub async fn update_placement(
+    State(control): State<Control>,
+    signed: Signed,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<PlacementForm>,
+) -> Result<Response, WebError> {
+    let context = context(&control, &signed, parse_id(&id)?).await?;
+    let updated = match servers::parse_choice(&form.server_id) {
+        Ok(server_id) => {
+            let changes = ServiceChanges { server_id: Some(server_id), ..Default::default() };
+            control.update_service(&signed.principal, context.service.id, form.revision.unwrap_or(-1), changes).await
+        }
+        Err(error) => Err(error),
+    };
+    match updated {
+        Ok(service) => Ok(redirect(&headers, &format!("/services/{}/settings?saved=placement", service.id))),
+        Err(error) => problem(error, |message| {
+            let sections = Sections { placement: (form, Notice::Problem(message)), ..Sections::of(&context, None) };
+            settings_page(&signed, &context, sections)
+        }),
+    }
+}
+
 pub async fn delete(
     State(control): State<Control>,
     signed: Signed,
@@ -532,6 +597,14 @@ fn settings_page(signed: &Signed, context: &Context, sections: Sections<'_>) -> 
                 }
             }
             (forms::card(signed, "Runtime", Some("How the app runs. Settings that the repository's spinikus.json sets can only be changed there."), &format!("{base}/runtime"), sections.runtime.1, sections.runtime.0.fields(context.file.as_ref()), "Save runtime"))
+            @if let Some(servers) = &context.servers {
+                @let (form, notice) = &sections.placement;
+                (forms::card(signed, "Placement", Some("The server the next deployments run on. Volumes' data stays on the server that wrote it."),
+                    &format!("{base}/placement"), *notice, html! {
+                        (servers::select("service-server", servers, &form.server_id))
+                        @if let Some(revision) = form.revision { input type="hidden" name="revision" value=(revision); }
+                    }, "Save placement"))
+            }
             @if context.role >= Role::Admin {
                 (forms::danger(signed, "Delete service", "Only a service without domains can be deleted. Remove them on the Domains tab first.",
                     &format!("/services/{}/delete", service.id), "Delete service", "Delete this service?"))

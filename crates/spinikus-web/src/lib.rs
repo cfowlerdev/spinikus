@@ -64,6 +64,7 @@ pub fn router(control: Control) -> Router {
         .route("/services/{id}/settings/general", post(pages::service_settings::update_general))
         .route("/services/{id}/settings/source", post(pages::service_settings::update_source))
         .route("/services/{id}/settings/runtime", post(pages::service_settings::update_runtime))
+        .route("/services/{id}/settings/placement", post(pages::service_settings::update_placement))
         .route("/services/{id}/delete", post(pages::service_settings::delete))
         .route(
             "/services/{id}/variables",
@@ -82,6 +83,15 @@ pub fn router(control: Control) -> Router {
         .route("/backup-schedules/{id}/delete", post(pages::backups::delete_schedule))
         .route("/backups/{id}/restore", post(pages::backups::restore))
         .route("/backups/{id}/delete", post(pages::backups::delete_backup))
+        .route("/settings", get(pages::settings::index))
+        .route("/settings/general", get(pages::settings::general))
+        .route("/settings/general/{section}", post(pages::settings::update_general))
+        .route("/settings/servers", get(pages::servers::servers).post(pages::servers::create))
+        .route("/settings/servers/{id}", get(pages::servers::server))
+        .route("/settings/servers/{id}/join-token", post(pages::servers::join_token))
+        .route("/settings/servers/{id}/revoke", post(pages::servers::revoke))
+        .route("/settings/tokens", get(pages::tokens::tokens).post(pages::tokens::create))
+        .route("/settings/tokens/{id}/revoke", post(pages::tokens::revoke))
         .route("/settings/storage", get(pages::storage::storage).post(pages::storage::create))
         .route("/settings/storage/{id}", get(pages::storage::edit).post(pages::storage::update))
         .route("/settings/storage/{id}/test", post(pages::storage::test))

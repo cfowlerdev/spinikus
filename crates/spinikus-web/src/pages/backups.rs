@@ -527,7 +527,7 @@ pub fn status_badge(status: BackupStatus) -> Markup {
 }
 
 /// A size in bytes, in the largest unit that keeps it at least 1.
-fn human_size(bytes: u64) -> String {
+pub(super) fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut size = bytes as f64;
     let mut unit = 0;

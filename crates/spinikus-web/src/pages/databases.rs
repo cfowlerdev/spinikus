@@ -12,7 +12,7 @@ use serde::Deserialize;
 use spinikus_control::{Control, ControlError, NewDatabase};
 use spinikus_core::{database::Engine, environment::Environment, membership::Role, project::Project, service::Service};
 
-use super::{crumbs, manage::Naming, parse_id, problem, redirect};
+use super::{crumbs, manage::Naming, parse_id, problem, redirect, servers};
 use crate::{
     auth::Signed,
     error::WebError,
@@ -27,6 +27,9 @@ pub struct NewDatabaseForm {
     /// `<engine>:<version>`, such as `postgres:18`.
     #[serde(default)]
     database: String,
+    /// Empty for the control plane's server.
+    #[serde(default)]
+    server_id: String,
 }
 
 impl NewDatabaseForm {
@@ -65,7 +68,8 @@ pub fn engine_name(engine: Engine) -> &'static str {
 
 pub async fn new_database(State(control): State<Control>, signed: Signed, Path(id): Path<String>) -> Result<Markup, WebError> {
     let (environment, project) = environment_as_developer(&control, &signed, &id).await?;
-    Ok(page(&signed, &project, &environment, &NewDatabaseForm::new(), Notice::None))
+    let servers = servers::choices(&control, &signed, None).await?;
+    Ok(page(&signed, &project, &environment, &servers, &NewDatabaseForm::new(), Notice::None))
 }
 
 pub async fn create_database(
@@ -76,22 +80,23 @@ pub async fn create_database(
     Form(form): Form<NewDatabaseForm>,
 ) -> Result<Response, WebError> {
     let (environment, project) = environment_as_developer(&control, &signed, &id).await?;
-    let created = match form.engine_and_version() {
-        Ok((engine, version)) => {
+    let servers = servers::choices(&control, &signed, servers::parse_choice(&form.server_id).ok().flatten()).await?;
+    let created = match (form.engine_and_version(), servers::parse_choice(&form.server_id)) {
+        (Ok((engine, version)), Ok(server_id)) => {
             let new = NewDatabase {
                 name: form.naming.name.clone(),
                 slug: form.naming.slug(),
                 engine,
                 version: Some(version),
-                server_id: None,
+                server_id,
             };
             control.create_database(&signed.principal, environment.id, new).await
         }
-        Err(error) => Err(error),
+        (Err(error), _) | (_, Err(error)) => Err(error),
     };
     match created {
         Ok(created) => Ok(redirect(&headers, &format!("/services/{}", created.service.id))),
-        Err(error) => problem(error, |message| page(&signed, &project, &environment, &form, Notice::Problem(message))),
+        Err(error) => problem(error, |message| page(&signed, &project, &environment, &servers, &form, Notice::Problem(message))),
     }
 }
 
@@ -104,12 +109,20 @@ async fn environment_as_developer(control: &Control, signed: &Signed, id: &str) 
     Ok((environment, project))
 }
 
-fn page(signed: &Signed, project: &Project, environment: &Environment, form: &NewDatabaseForm, notice: Notice<'_>) -> Markup {
+fn page(
+    signed: &Signed,
+    project: &Project,
+    environment: &Environment,
+    servers: &Option<Vec<(String, String)>>,
+    form: &NewDatabaseForm,
+    notice: Notice<'_>,
+) -> Markup {
     let choices = choices();
     let options: Vec<(&str, &str)> = choices.iter().map(|(value, label)| (value.as_str(), label.as_str())).collect();
     let fields = html! {
         (form.naming.fields("database"))
         (forms::select("database-engine", "database", "Database", &options, &form.database))
+        @if let Some(servers) = servers { (servers::select("database-server", servers, &form.server_id)) }
     };
     let action = format!("/environments/{}/databases", environment.id);
     let description = "Runs the official image with its data on a volume, and generated credentials in its variables. \

@@ -1,5 +1,6 @@
-//! Servers and enrolling their agents. Managing servers is for instance admins; the
-//! enrollment and renewal calls come from agents over the agent listener.
+//! Servers and enrolling their agents. Managing servers is for instance admins, and anyone
+//! signed in can list them, to choose where a service runs; the enrollment and renewal calls
+//! come from agents over the agent listener.
 
 use jiff::Timestamp;
 use serde_json::json;
@@ -51,21 +52,20 @@ impl Control {
         Ok(server)
     }
 
-    /// Servers that are not revoked.
+    /// Servers that are not revoked. Anyone signed in may list them, to choose where a
+    /// service runs.
     pub async fn list_servers(
         &self,
-        principal: &Principal,
+        _principal: &Principal,
         after: Option<ServerId>,
         limit: u32,
     ) -> Result<Page<Server>, ControlError> {
-        require_instance_admin(principal)?;
         let limit = page::limit(limit);
         let items = self.store().list_servers(after, limit + 1).await?;
         Ok(Page::from_overfetch(items, limit))
     }
 
-    pub async fn get_server(&self, principal: &Principal, id: ServerId) -> Result<Server, ControlError> {
-        require_instance_admin(principal)?;
+    pub async fn get_server(&self, _principal: &Principal, id: ServerId) -> Result<Server, ControlError> {
         Ok(self.store().get_server(id).await?)
     }
 
@@ -186,10 +186,11 @@ mod tests {
 
         assert_eq!((server.name.as_str(), server.status), ("web-1", ServerStatus::Pending));
         assert!(matches!(control.create_server(&member, new("web-2")).await, Err(ControlError::Forbidden)));
-        assert!(matches!(control.list_servers(&member, None, 10).await, Err(ControlError::Forbidden)));
         assert!(matches!(control.create_join_token(&read_only_admin, server.id).await, Err(ControlError::Forbidden)));
         assert!(matches!(control.revoke_server(&member, server.id).await, Err(ControlError::Forbidden)));
-        assert_eq!(control.list_servers(&admin, None, 10).await.unwrap().items, [server]);
+        assert_eq!(control.list_servers(&admin, None, 10).await.unwrap().items, std::slice::from_ref(&server));
+        // Anyone may list them, to choose where a service runs.
+        assert_eq!(control.list_servers(&member, None, 10).await.unwrap().items, [server]);
     }
 
     #[tokio::test]

@@ -12,7 +12,10 @@ use serde::Deserialize;
 use spinikus_control::{Control, ControlError, NewStorageDestination, StorageDestinationChanges};
 use spinikus_core::{backup::StorageDestination, secret::Secret};
 
-use super::{parse_id, problem, problem_message, redirect};
+use super::{
+    parse_id, problem, problem_message, redirect,
+    settings::{SettingsTab, require_admin, tabs},
+};
 use crate::{
     auth::Signed,
     error::WebError,
@@ -21,18 +24,6 @@ use crate::{
 };
 
 const URL: &str = "/settings/storage";
-
-/// The instance settings' tabs.
-pub(super) fn settings_tabs() -> Markup {
-    layout::tabs(&[("Storage", URL.to_string(), true)])
-}
-
-fn require_admin(signed: &Signed) -> Result<(), WebError> {
-    match signed.principal.is_instance_admin() {
-        true => Ok(()),
-        false => Err(ControlError::Forbidden.into()),
-    }
-}
 
 #[derive(Deserialize, Default)]
 pub struct DestinationForm {
@@ -237,8 +228,7 @@ async fn list_page(
             Alert::Done(message) => (layout::notice(message)),
             Alert::Problem(message) => (layout::alert(message)),
         }
-        (layout::heading("Settings", None))
-        (settings_tabs())
+        (tabs(signed, SettingsTab::Storage))
         div class="space-y-8" {
             section {
                 h2 class="mb-1 font-semibold" { "Storage destinations" }
@@ -290,8 +280,7 @@ fn destination_row(signed: &Signed, destination: &StorageDestination) -> Markup 
 fn edit_page(signed: &Signed, destination: &StorageDestination, form: &DestinationForm, notice: Notice<'_>) -> Markup {
     let action = format!("{URL}/{}", destination.id);
     let content = html! {
-        (layout::heading("Settings", None))
-        (settings_tabs())
+        (tabs(signed, SettingsTab::Storage))
         div class="max-w-2xl" {
             (forms::card(signed, &format!("Edit {}", destination.fields.name), None, &action, notice, form.fields(true), "Save"))
             div class="mt-4 text-sm" { a href=(URL) class=(LINK) { "Back to storage destinations" } }

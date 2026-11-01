@@ -254,6 +254,35 @@ async fn admins_create_servers_and_join_tokens() {
 }
 
 #[tokio::test]
+async fn users_create_list_and_revoke_their_own_tokens() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+
+    let created = api.send(Method::POST, "/api/v1/tokens", token, &[], Some(json!({ "name": "CI", "role": "developer" }))).await;
+    let secret = created.body["token"].as_str().unwrap().to_string();
+    let id = created.body["api_token"]["id"].as_str().unwrap().to_string();
+    let used = api.send(Method::GET, "/api/v1/me", Some(&secret), &[], None).await;
+    let listed = api.send(Method::GET, "/api/v1/tokens", token, &[], None).await;
+    let wider =
+        api.send(Method::POST, "/api/v1/tokens", Some(&secret), &[], Some(json!({ "name": "Wider", "role": "admin" }))).await;
+    let revoked = api.send(Method::DELETE, &format!("/api/v1/tokens/{id}"), token, &[], None).await;
+    let after = api.send(Method::GET, "/api/v1/me", Some(&secret), &[], None).await;
+    let again = api.send(Method::DELETE, &format!("/api/v1/tokens/{id}"), token, &[], None).await;
+
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert!(secret.starts_with("spk_"));
+    assert_eq!(created.body["api_token"]["role"], "developer");
+    assert_eq!(used.status, StatusCode::OK);
+    let names: Vec<_> = listed.body["items"].as_array().unwrap().iter().map(|token| token["name"].clone()).collect();
+    assert!(names.contains(&json!("CI")), "{names:?}");
+    assert_eq!(wider.status, StatusCode::FORBIDDEN);
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT);
+    assert_eq!(after.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(again.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn sets_a_source_and_deploys_it() {
     let api = Api::new().await;
     let bearer = api.admin_token().await;

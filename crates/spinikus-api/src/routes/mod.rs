@@ -11,6 +11,7 @@ mod services;
 mod session;
 mod settings;
 mod sources;
+mod tokens;
 mod variables;
 mod volumes;
 
@@ -26,6 +27,8 @@ pub fn v1() -> Router<Control> {
         .route("/setup", get(session::setup_status).post(session::setup))
         .route("/login", post(session::login))
         .route("/me", get(session::me))
+        .route("/tokens", get(tokens::list).post(tokens::create))
+        .route("/tokens/{id}", axum::routing::delete(tokens::revoke))
         .route("/projects", get(projects::list).post(projects::create))
         .route("/projects/{id}", get(projects::show).patch(projects::update).delete(projects::delete))
         .route("/projects/{id}/environments", get(environments::list).post(environments::create))

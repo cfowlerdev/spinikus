@@ -595,7 +595,7 @@ async fn creates_edits_and_deletes_projects_environments_and_services() {
     let viewer = web.sign_in("grace%40example.com").await;
     assert!(!web.get("/", Some(&viewer)).await.body.contains("New project"));
     assert!(!web.get(&format!("/environments/{environment_id}"), Some(&viewer)).await.body.contains("New service"));
-    assert!(!web.get(&format!("/services/{service_id}"), Some(&viewer)).await.body.contains("Settings"));
+    assert!(!web.get(&format!("/services/{service_id}"), Some(&viewer)).await.body.contains(&settings));
     assert_eq!(web.get(&settings, Some(&viewer)).await.status, StatusCode::FORBIDDEN);
     assert_eq!(web.get(&format!("/projects/{project_id}/settings"), Some(&viewer)).await.status, StatusCode::FORBIDDEN);
     assert_eq!(web.get("/projects/new", Some(&viewer)).await.status, StatusCode::FORBIDDEN);
@@ -1076,4 +1076,169 @@ async fn creates_databases_and_backs_them_up_and_restores_them() {
     assert!(web.get(&backups, Some(&ada)).await.body.contains("pg_dump: connection refused"));
     let deleted = web.post(&format!("/backups/{}/delete", safety.id), Some(&ada), &format!("_csrf={admin_token}")).await;
     assert_eq!(deleted.status, StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn instance_admins_change_the_general_settings() {
+    let web = Web::new().await;
+    let (admin, _, _, _) = shop_with_team(&web).await;
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+    assert_eq!(web.get("/settings", Some(&ada)).await.header("location"), Some("/settings/general"));
+    assert_eq!(web.get("/settings", Some(&dev)).await.header("location"), Some("/settings/tokens"));
+    assert_eq!(web.get("/settings/general", Some(&dev)).await.status, StatusCode::FORBIDDEN);
+    let page = web.get("/settings/general", Some(&ada)).await;
+    assert!(page.body.contains(r#"value="localhost""#), "the default base domain is shown");
+    let token = page.csrf();
+
+    let domains =
+        |domain: &str, revision: &str| form(&[("_csrf", &token), ("base_domain", domain), ("base_domain_revision", revision)]);
+    let saved = web.post("/settings/general/domains", Some(&ada), &domains("apps.example.com", "0")).await;
+    let stale = web.post("/settings/general/domains", Some(&ada), &domains("other.example.com", "0")).await;
+    let https = form(&[
+        ("_csrf", &token),
+        ("acme_email", "not an email"),
+        ("acme_email_revision", "0"),
+        ("acme_directory_url", ""),
+        ("acme_directory_url_revision", "0"),
+    ]);
+    let bad_email = web.post("/settings/general/https", Some(&ada), &https).await;
+    let releases = |count: &str| form(&[("_csrf", &token), ("releases_kept", count), ("releases_kept_revision", "0")]);
+    let bad_count = web.post("/settings/general/releases", Some(&ada), &releases("many")).await;
+    let count = web.post("/settings/general/releases", Some(&ada), &releases("3")).await;
+    let by_dev = web.post("/settings/general/domains", Some(&dev), &domains("x.example.com", "1")).await;
+
+    assert_eq!(saved.header("location"), Some("/settings/general?saved=domains"));
+    assert_eq!(stale.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(stale.body.contains("Someone changed this") && stale.body.contains("other.example.com"), "what was typed is kept");
+    assert_eq!(bad_email.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(bad_email.body.contains("Give an email address"), "{}", bad_email.body);
+    assert_eq!(bad_count.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(count.status, StatusCode::SEE_OTHER);
+    assert_eq!(by_dev.status, StatusCode::FORBIDDEN);
+    let setting = |key| web.control.get_setting(&admin, key);
+    assert_eq!(setting("base_domain").await.unwrap().value, "apps.example.com");
+    assert_eq!(setting("releases_kept").await.unwrap().value, 3);
+    // The directory was saved before the email was refused; the default it was given is no change.
+    assert_eq!(setting("acme_email").await.unwrap().value, serde_json::Value::Null);
+
+    // Empty turns the generated hostnames off.
+    let page = web.get("/settings/general?saved=domains", Some(&ada)).await;
+    assert!(page.body.contains("Saved."));
+    let revision = setting("base_domain").await.unwrap().revision.to_string();
+    assert_eq!(web.post("/settings/general/domains", Some(&ada), &domains("", &revision)).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(setting("base_domain").await.unwrap().value, serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn admins_add_servers_and_developers_place_services_on_them() {
+    let web = Web::new().await;
+    let (admin, _, production, service) = shop_with_team(&web).await;
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+    let token = web.get("/", Some(&ada)).await.csrf();
+    let dev_token = web.get("/", Some(&dev)).await.csrf();
+    let settings = format!("/services/{}/settings", service.id);
+
+    // With only the control plane's server there is nothing to choose.
+    web.control.embedded_server("local").await.unwrap();
+    assert!(!web.get(&settings, Some(&dev)).await.body.contains("Placement"));
+    assert_eq!(web.get("/settings/servers", Some(&dev)).await.status, StatusCode::FORBIDDEN);
+    let refused = web.post("/settings/servers", Some(&ada), &form(&[("_csrf", &token), ("name", " ")])).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let added = web.post("/settings/servers", Some(&ada), &form(&[("_csrf", &token), ("name", "web-2")])).await;
+    let id = created(&added, "/settings/servers/");
+    let list = web.get("/settings/servers", Some(&ada)).await;
+    assert!(list.body.contains("web-2") && list.body.contains("waiting for its agent"), "{}", list.body);
+    assert!(list.body.contains("(this control plane)"));
+    let join = web.post(&format!("/settings/servers/{id}/join-token"), Some(&ada), &form(&[("_csrf", &token)])).await;
+    assert_eq!(join.status, StatusCode::OK);
+    assert_eq!(join.header("hx-replace-url"), Some(format!("/settings/servers/{id}").as_str()));
+    assert!(join.body.contains("SPINIKUS_JOIN_TOKEN=spj_"), "{}", join.body);
+    assert!(join.body.contains("spinikus agent join https://spinikus.test:8443 --ca-fingerprint sha256:"));
+    assert!(!web.get(&format!("/settings/servers/{id}"), Some(&ada)).await.body.contains("spj_"), "shown only once");
+
+    // Developers see the server among the choices, and place the service there.
+    let page = web.get(&settings, Some(&dev)).await;
+    assert!(
+        page.body.contains("Placement")
+            && page.body.contains("web-2")
+            && page.body.contains("local (the control plane's server)"),
+        "{}",
+        page.body
+    );
+    let placement =
+        |server: &str| form(&[("_csrf", &dev_token), ("server_id", server), ("revision", &service.revision.to_string())]);
+    let placed = web.post(&format!("{settings}/placement"), Some(&dev), &placement(&id)).await;
+    assert_eq!(placed.header("location"), Some(format!("{settings}?saved=placement").as_str()));
+    let placed_service = web.control.get_service(&admin, service.id).await.unwrap();
+    assert_eq!(placed_service.server_id.map(|id| id.to_string()), Some(id.clone()));
+    let bogus = web.post(&format!("{settings}/placement"), Some(&dev), &placement("srv_bogus")).await;
+    assert_eq!(bogus.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // New databases and services can go there too.
+    let new_database = web.get(&format!("/environments/{}/databases/new", production.id), Some(&dev)).await;
+    assert!(new_database.body.contains("web-2"));
+    let database = form(&[("_csrf", &dev_token), ("name", "Cache"), ("slug", ""), ("database", "redis:8"), ("server_id", &id)]);
+    let reply = web.post(&format!("/environments/{}/databases", production.id), Some(&dev), &database).await;
+    let cache = web.control.get_service(&admin, created(&reply, "/services/").parse().unwrap()).await.unwrap();
+    assert_eq!(cache.server_id.map(|id| id.to_string()), Some(id.clone()));
+
+    // A revoked server can't be chosen any more, but the service still names it.
+    let revoked = web.post(&format!("/settings/servers/{id}/revoke"), Some(&ada), &form(&[("_csrf", &token)])).await;
+    assert_eq!(revoked.status, StatusCode::SEE_OTHER);
+    let page = web.get(&format!("/settings/servers/{id}"), Some(&ada)).await;
+    assert!(page.body.contains("revoked") && !page.body.contains("Create a join token"));
+    assert!(!web.get("/settings/servers", Some(&ada)).await.body.contains(&format!("/settings/servers/{id}")));
+    assert!(web.get(&settings, Some(&dev)).await.body.contains("web-2 (revoked)"));
+    let new_service = web.get(&format!("/environments/{}/services/new", production.id), Some(&dev)).await;
+    assert!(!new_service.body.contains("web-2"));
+}
+
+#[tokio::test]
+async fn everyone_manages_their_own_api_tokens() {
+    let web = Web::new().await;
+    let (_, shop, production, _) = shop_with_team(&web).await;
+    let dev = web.sign_in("dev%40example.com").await;
+    let page = web.get("/settings/tokens", Some(&dev)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("No API tokens.") && page.body.contains("Shop / Production"), "{}", page.body);
+    assert!(!page.body.contains(r#"href="/settings/general""#), "only instance admins get the instance's tabs");
+    let token = page.csrf();
+
+    let new = |name: &str, scope: &str| {
+        form(&[("_csrf", &token), ("name", name), ("role", "developer"), ("scope", scope), ("expires", "30")])
+    };
+    let refused = web.post("/settings/tokens", Some(&dev), &new("", "")).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let reply = web.post("/settings/tokens", Some(&dev), &new("CI", &format!("environment:{}", production.id))).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.header("hx-replace-url"), Some("/settings/tokens"));
+    let start = reply.body.find("spk_").expect("the secret is shown");
+    let secret: String =
+        reply.body[start..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+    let principal = web.control.authenticate_api_token(&secret).await.unwrap();
+    let tokens = web.control.list_api_tokens(&principal).await.unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!((tokens[0].role, tokens[0].scope), (Role::Developer, Some(MembershipScope::Environment(production.id))));
+    assert!(tokens[0].expires_at.is_some());
+    let page = web.get("/settings/tokens", Some(&dev)).await;
+    assert!(page.body.contains("CI") && page.body.contains("Shop / Production") && !page.body.contains(&secret));
+    // A project the developer has only an environment in is still theirs to scope to; one
+    // they can't see is not a page.
+    let in_project = web.post("/settings/tokens", Some(&dev), &new("Shop", &format!("project:{}", shop.id))).await;
+    assert_eq!(in_project.status, StatusCode::OK);
+    let bad_scope = web.post("/settings/tokens", Some(&dev), &new("Bad", "project:nope")).await;
+    assert_eq!(bad_scope.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let revoked = web.post(&format!("/settings/tokens/{}/revoke", tokens[0].id), Some(&dev), &form(&[("_csrf", &token)])).await;
+    assert_eq!(revoked.header("location"), Some("/settings/tokens"));
+    assert!(web.control.authenticate_api_token(&secret).await.is_err());
+    // Someone else's token is not theirs to revoke.
+    let ada = web.sign_in("ada%40example.com").await;
+    let ada_token = web.get("/", Some(&ada)).await.csrf();
+    let other = web.control.list_api_tokens(&principal).await.unwrap().remove(0);
+    web.post(&format!("/settings/tokens/{}/revoke", other.id), Some(&ada), &form(&[("_csrf", &ada_token)])).await;
+    assert!(web.control.list_api_tokens(&principal).await.unwrap().iter().any(|token| token.id == other.id));
 }
