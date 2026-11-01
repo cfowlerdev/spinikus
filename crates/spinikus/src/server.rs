@@ -12,7 +12,7 @@ use crate::{cli::ServerRunArgs, secrets};
 pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result<()> {
     let control = open_control(config).await?;
     if control.needs_setup().await? {
-        tracing::warn!("No users yet: create the first admin with `spinikus admin create-user`");
+        tracing::warn!("No users yet: open the dashboard to create the first admin, or use `spinikus admin create-user`");
     }
 
     let http_address = args.listen.unwrap_or(config.http.listen);
@@ -22,9 +22,10 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
         TcpListener::bind(agent_address).await.with_context(|| format!("Failed to listen for agents on {agent_address}"))?;
 
     let (stop, stopped) = watch::channel(false);
-    let http =
-        axum::serve(http_listener, spinikus_api::router(control.clone()).into_make_service_with_connect_info::<SocketAddr>())
-            .with_graceful_shutdown(until(stopped.clone()));
+    // The API under /api/v1 and /hooks, the dashboard everywhere else.
+    let router = spinikus_api::router(control.clone()).merge(spinikus_web::router(control.clone()));
+    let http = axum::serve(http_listener, router.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(until(stopped.clone()));
     let agent_address = agent_listener.local_addr().context("Failed to read the agent listener's address")?;
     let proxy = match config.agents.embedded {
         true => crate::agent::proxy_listeners(config).await?,
@@ -53,7 +54,7 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
         tokio::spawn(async move { control.run_backups(shutdown).await })
     };
     let agents = spinikus_control::agents::serve(control, agent_listener, until(stopped));
-    tracing::info!(%http_address, "Server started, press Ctrl+C to stop");
+    tracing::info!(dashboard = %format!("http://{http_address}/"), "Server started, press Ctrl+C to stop");
 
     let mut http = tokio::spawn(async move { http.await.context("HTTP server failed") });
     let mut agents =

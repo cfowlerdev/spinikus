@@ -1,0 +1,4 @@
+/* The web UI's stylesheet: Tailwind, with the classes it finds in the crate's Rust source.
+   Built into ../assets/app.css (committed) by `cargo xtask css`. */
+@import "tailwindcss" source(none);
+@source "../src";

@@ -4,3 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+axum.workspace = true
+jiff.workspace = true
+maud.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+
+spinikus-control.workspace = true
+spinikus-core.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tower.workspace = true
+
+spinikus-store.workspace = true

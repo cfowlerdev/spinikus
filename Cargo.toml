@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/*"
+    "crates/*",
+    "xtask",
 ]
 
 [workspace.dependencies]
@@ -20,6 +21,7 @@ hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "http2"
 instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 croner = { version = "4.0.2", default-features = false, features = ["jiff"] }
 jiff = { version = "0.2.38", features = ["serde"] }
+maud = { version = "0.27.0", features = ["axum"] }
 prost = "0.14.4"
 prost-types = "0.14.4"
 object_store = { version = "0.14.2", default-features = false, features = ["aws-base", "reqwest", "ring"] }

@@ -20,6 +20,7 @@ spinikus-api.workspace = true
 spinikus-control.workspace = true
 spinikus-core.workspace = true
 spinikus-store.workspace = true
+spinikus-web.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

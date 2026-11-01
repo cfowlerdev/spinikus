@@ -133,6 +133,11 @@ Next step: decide the architecture (control plane vs. agent, proxy approach, con
 - **The UI does not need to be complete for every feature at MVP.** Features reach the UI one step at a time.
 - **Mobile support is limited to monitoring and rollback for now.** Full configuration is desktop-only.
 - **The frontend is Axum, Maud and HTMX with SSE, plus vendored JS islands** (web terminal, charts, log viewer, command palette). HTML endpoints and the public API share one service layer. An SPA (React) and a Rust-native frontend (Leptos, Dioxus) were considered and not chosen.
+- **Styles are Tailwind, built by `cargo xtask css` and committed**: the classes are written in the Maud templates, and the Tailwind standalone CLI (pinned by version and SHA-256, downloaded into `target/xtask/`) scans the crate's Rust source and writes `crates/spinikus-web/assets/app.css`, which is committed, so Cargo alone still builds Spinikus and only someone changing classes needs the CLI (`--check` tells whether the committed file is current). Hand-written CSS and a vendored classless framework (Pico) were the alternatives; Tailwind keeps the styling next to the markup and the output small.
+- **The dashboard and the API share one listener**: the API answers under `/api/v1` and `/hooks`, the dashboard everywhere else. Assets are embedded with `include_bytes!` and linked with their content hash (`?v=`), so the current version is cached for good and an old one never is.
+- **Web sessions are cookies, with CSRF protection by token and by origin**: the session cookie holds the session's secret (`HttpOnly`, `SameSite=Lax`, `Secure` when a proxy says the browser came over HTTPS). Every request that changes something must come from the site itself (`Sec-Fetch-Site` and `Origin`, when sent) and, with a session, carry its CSRF token: a hash of the cookie, so it needs no storage, changes with each session, and can't be made without the cookie. Forms send it as a hidden field, HTMX as the `X-CSRF-Token` header. Sign-in and setup have no session yet and rely on the origin checks.
+- **Pages allow only their own scripts and styles**: a strict Content Security Policy (no inline scripts or styles, no frames), so HTMX runs with `includeIndicatorStyles` and `allowEval` off. Its history cache is off too, since pages may show secrets, and pages are `Cache-Control: no-store`. Links and forms are boosted (`hx-boost`); error responses are pages and are swapped in like any other, a redirect after a form is `HX-Location` (a plain redirect would leave the old URL in the address bar), and a lost session sends HTMX to the sign-in page with `HX-Redirect`.
+- **Setup and sign-in are pages**: on first visit the dashboard asks for the first admin and signs them in; signing in returns to the page that asked, and only to a path on this site.
 
 ## `spinikus.json` scope
 
@@ -384,7 +389,7 @@ spinikus/
 ├── Cargo.toml              # workspace, shared dependency versions and lints
 ├── rust-toolchain.toml     # pinned stable toolchain
 ├── deny.toml               # cargo-deny: licenses and advisories
-├── xtask/                  # dev tasks: OpenAPI generation, asset build, release
+├── xtask/                  # dev tasks: the stylesheet (`cargo xtask css`); later OpenAPI generation, release
 └── crates/
     ├── spinikus/           # the binary: CLI, client, wiring
     ├── spinikus-proto/
