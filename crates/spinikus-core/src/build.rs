@@ -3,10 +3,13 @@
 //!
 //! ```json
 //! { "build": { "dockerfile": "docker/Dockerfile", "context": ".", "target": "release", "args": { "NODE_ENV": "production" } } }
+//! { "build": { "strategy": "railpack", "command": "npm run build:prod" } }
 //! ```
 //!
-//! Paths are relative to the source's root directory. Unknown fields are rejected, and so
-//! are build strategies Spinikus cannot run yet.
+//! Without a strategy, a repository with a Dockerfile is built from it and one without is
+//! built by Railpack, which detects the language and framework. Paths are relative to the
+//! source's root directory. Unknown fields are rejected, and so are build strategies
+//! Spinikus cannot run yet and settings that don't apply to the chosen strategy.
 
 use std::collections::BTreeMap;
 
@@ -48,8 +51,11 @@ impl BuildStrategy {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildSettings {
-    /// How to build; a Dockerfile is the only strategy so far.
+    /// How to build: a Dockerfile, or Railpack. Chosen by whether there is a Dockerfile if
+    /// left out (see [`BuildSettings::strategy`]).
     pub strategy: Option<BuildStrategy>,
+    /// Railpack only: the build command, in place of the one Railpack detects.
+    pub command: Option<String>,
     /// The Dockerfile, `Dockerfile` by default. It must be inside the context.
     pub dockerfile: Option<String>,
     /// The directory sent to the builder, the root directory by default.
@@ -78,10 +84,30 @@ impl BuildSettings {
 
     fn check(&self) -> Result<(), BuildSettingsError> {
         match self.strategy {
-            None | Some(BuildStrategy::Dockerfile) => {}
+            None | Some(BuildStrategy::Dockerfile | BuildStrategy::Railpack) => {}
             Some(strategy) => {
-                let problem = format!("the `{}` build strategy is not supported yet; use `dockerfile`", strategy.as_str());
+                let problem =
+                    format!("the `{}` build strategy is not supported yet; use `dockerfile` or `railpack`", strategy.as_str());
                 return Err(BuildSettingsError(problem));
+            }
+        }
+        if self.strategy == Some(BuildStrategy::Railpack) {
+            let dockerfile_only = [
+                ("dockerfile", self.dockerfile.is_some()),
+                ("context", self.context.is_some()),
+                ("target", self.target.is_some()),
+                ("args", !self.args.is_empty()),
+            ];
+            if let Some((field, _)) = dockerfile_only.into_iter().find(|(_, set)| *set) {
+                return Err(BuildSettingsError(format!("{field} is for Dockerfile builds, not `railpack`")));
+            }
+        }
+        if let Some(command) = &self.command {
+            if self.strategy == Some(BuildStrategy::Dockerfile) || self.dockerfile.is_some() {
+                return Err(BuildSettingsError("command is for Railpack builds; a Dockerfile says how to build".to_string()));
+            }
+            if command.trim().is_empty() || command.contains('\0') {
+                return Err(BuildSettingsError("command is empty".to_string()));
             }
         }
         for (field, path) in [("dockerfile", &self.dockerfile), ("context", &self.context)] {
@@ -102,6 +128,17 @@ impl BuildSettings {
             }
         }
         Ok(())
+    }
+
+    /// How to build, given whether the Dockerfile ([`Self::dockerfile`]) exists: the strategy
+    /// set, else a Dockerfile build if there is one (or one was named, so its absence is an
+    /// error rather than a different build), else Railpack.
+    pub fn strategy(&self, dockerfile_exists: bool) -> BuildStrategy {
+        match self.strategy {
+            Some(strategy) => strategy,
+            None if dockerfile_exists || self.dockerfile.is_some() || self.target.is_some() => BuildStrategy::Dockerfile,
+            None => BuildStrategy::Railpack,
+        }
     }
 
     pub fn dockerfile(&self) -> &str {
@@ -142,10 +179,30 @@ mod tests {
     }
 
     #[test]
+    fn a_dockerfile_decides_unless_a_strategy_is_set() {
+        let strategy = |build, exists| BuildSettings::from_config(&config(build)).unwrap().strategy(exists);
+
+        assert_eq!(strategy(json!({}), true), BuildStrategy::Dockerfile);
+        assert_eq!(strategy(json!({}), false), BuildStrategy::Railpack);
+        assert_eq!(strategy(json!({ "command": "npm run build" }), false), BuildStrategy::Railpack);
+        assert_eq!(strategy(json!({ "strategy": "railpack" }), true), BuildStrategy::Railpack);
+        // A Dockerfile that was named but is missing is an error, not a Railpack build.
+        assert_eq!(strategy(json!({ "dockerfile": "docker/Dockerfile" }), false), BuildStrategy::Dockerfile);
+        assert_eq!(strategy(json!({ "strategy": "dockerfile" }), false), BuildStrategy::Dockerfile);
+    }
+
+    #[test]
     fn rejects_what_it_cannot_build() {
         let problem = |build| BuildSettings::from_config(&config(build)).unwrap_err().to_string();
 
-        assert!(problem(json!({ "strategy": "railpack" })).contains("`railpack` build strategy is not supported yet"));
+        assert!(problem(json!({ "strategy": "compose" })).contains("`compose` build strategy is not supported yet"));
+        assert_eq!(
+            problem(json!({ "strategy": "railpack", "target": "app" })),
+            "target is for Dockerfile builds, not `railpack`"
+        );
+        assert!(problem(json!({ "strategy": "dockerfile", "command": "make" })).starts_with("command is for Railpack builds"));
+        assert!(problem(json!({ "dockerfile": "Dockerfile.prod", "command": "make" })).starts_with("command is for Railpack"));
+        assert_eq!(problem(json!({ "command": " " })), "command is empty");
         assert!(problem(json!({ "strategy": "magic" })).contains("unknown variant"));
         assert!(problem(json!({ "cache": true })).contains("unknown field `cache`"));
         assert!(problem(json!({ "dockerfile": "../Dockerfile" })).contains("dockerfile `../Dockerfile`"));

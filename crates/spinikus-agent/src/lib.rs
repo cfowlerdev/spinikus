@@ -21,6 +21,7 @@ mod facts;
 mod files;
 mod health;
 mod proxy;
+mod railpack;
 mod report;
 mod restore;
 pub mod runtime;

@@ -93,6 +93,18 @@ fn variables(variables: &[ResolvedVariable], build: bool) -> Vec<pb::Variable> {
         .collect()
 }
 
+/// The container's variables, with `PORT` set to the app port unless a variable sets it, as
+/// apps (and the start commands Railpack writes) expect.
+fn runtime_variables(resolved: &[ResolvedVariable], port: Option<u16>) -> Vec<pb::Variable> {
+    let mut variables = variables(resolved, false);
+    if let Some(port) = port
+        && !variables.iter().any(|variable| variable.name == "PORT")
+    {
+        variables.push(pb::Variable { name: "PORT".to_string(), value: port.to_string(), secret: false });
+    }
+    variables
+}
+
 impl Control {
     pub(crate) async fn prepare_command(&self, deployment: &Deployment) -> Result<pb::Command, ControlError> {
         let source = match &deployment.snapshot.source {
@@ -159,7 +171,7 @@ impl Control {
             deployment_id: deployment.id.to_string(),
             service_id: deployment.service_id.to_string(),
             image,
-            variables: variables(&resolved, false),
+            variables: runtime_variables(&resolved, settings.port),
             strategy: strategy.into(),
             port: settings.port.map(u32::from).unwrap_or(0),
             volumes: volumes
@@ -202,5 +214,29 @@ mod tests {
         assert_eq!(parse_command_id(&format!("{deployment}/build")), None);
         assert_eq!(parse_command_id("cmd-1"), None);
         assert_eq!(parse_command_id("svc_01/start"), None);
+    }
+
+    #[test]
+    fn containers_get_their_port_unless_a_variable_sets_it() {
+        use spinikus_core::{id::VariableId, secret::Secret, variable::ScopeLevel};
+        let variable = |name: &str, value: &str, availability| ResolvedVariable {
+            name: name.parse().unwrap(),
+            value: Secret::new(value),
+            availability,
+            secret: false,
+            level: ScopeLevel::Service,
+            variable_id: VariableId::new(),
+        };
+        let names = |variables: Vec<pb::Variable>| -> Vec<String> {
+            variables.into_iter().map(|variable| format!("{}={}", variable.name, variable.value)).collect()
+        };
+        let mode = variable("MODE", "web", VariableAvailability::Runtime);
+
+        assert_eq!(names(runtime_variables(std::slice::from_ref(&mode), Some(3000))), ["MODE=web", "PORT=3000"]);
+        assert_eq!(names(runtime_variables(std::slice::from_ref(&mode), None)), ["MODE=web"]);
+        let own = variable("PORT", "8080", VariableAvailability::Both);
+        assert_eq!(names(runtime_variables(&[own], Some(3000))), ["PORT=8080"]);
+        let build_only = variable("PORT", "1", VariableAvailability::Build);
+        assert_eq!(names(runtime_variables(&[build_only], Some(3000))), ["PORT=3000"]);
     }
 }

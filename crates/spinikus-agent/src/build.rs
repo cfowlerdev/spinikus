@@ -1,6 +1,7 @@
 //! Building a deployment from Git: a shallow checkout with the `git` command, then the
 //! settings from the service config and the checkout's `spinikus.json`, then an image
-//! built from the Dockerfile by the container runtime.
+//! built by the container runtime, from the Dockerfile or, without one, from the plan
+//! Railpack writes (`railpack.rs`).
 //!
 //! Each build has its own directory under the work directory, removed when it ends. Git
 //! runs without the user's or system's Git config, never prompts, and only speaks
@@ -16,7 +17,7 @@ use std::{
 
 use spinikus_core::{
     app_file::{APP_FILE, AppFile, MAX_APP_FILE_SIZE},
-    build::BuildSettings,
+    build::{BuildSettings, BuildStrategy},
     id::{DeploymentId, ServiceId},
     service::ServiceConfig,
 };
@@ -28,6 +29,7 @@ use tokio::{
 
 use crate::{
     commands::{Progress, failure, parse_id},
+    railpack,
     runtime::{BuildSpec, ContainerRuntime},
 };
 
@@ -40,12 +42,20 @@ pub struct BuildOptions {
     pub known_hosts: PathBuf,
     /// Also allow local repositories (`file`), for tests.
     pub local_repositories: bool,
+    /// The `railpack` command, for builds without a Dockerfile.
+    pub railpack: PathBuf,
 }
 
 impl BuildOptions {
-    /// Builds under the agent's own directory.
+    /// Builds under the agent's own directory, with `railpack` from `$SPINIKUS_RAILPACK` or
+    /// the `PATH`.
     pub fn in_dir(agent_dir: &Path) -> Self {
-        Self { work_dir: agent_dir.join("builds"), known_hosts: agent_dir.join("known_hosts"), local_repositories: false }
+        Self {
+            work_dir: agent_dir.join("builds"),
+            known_hosts: agent_dir.join("known_hosts"),
+            local_repositories: false,
+            railpack: railpack::command(),
+        }
     }
 }
 
@@ -111,11 +121,36 @@ async fn build(
         None => config,
     };
     let settings = BuildSettings::from_config(&config).map_err(|error| build_failed(format!("build settings: {error}")))?;
-    let context = inside(&repo, &root, settings.context(), "the build context")?;
-    let dockerfile = inside(&repo, &root, settings.dockerfile(), "the Dockerfile").map_err(|failed| {
-        let hint = "; building without a Dockerfile (Railpack) is not supported yet";
-        build_failed(format!("{}{hint}", failed.message))
-    })?;
+    let tag = spinikus_core::build::image_tag(service, deployment);
+    let dockerfile_exists = tokio::fs::symlink_metadata(root.join(settings.dockerfile())).await.is_ok();
+    let spec = match settings.strategy(dockerfile_exists) {
+        BuildStrategy::Dockerfile => dockerfile_build(&repo, &root, settings, prepare, tag, progress)?,
+        BuildStrategy::Railpack => {
+            progress.phase("planning");
+            let variables = &prepare.build_variables;
+            let planned = railpack::plan(&options.railpack, &root, work, &settings, variables, service, progress).await?;
+            BuildSpec { context: root.clone(), dockerfile: planned.plan_file, target: None, args: planned.args, tag }
+        }
+        strategy => return Err(build_failed(format!("the `{}` build strategy is not supported yet", strategy.as_str()))),
+    };
+
+    progress.phase("building");
+    let image = runtime.build(&spec, &|line| progress.line(line)).await.map_err(|error| build_failed(error.to_string()))?;
+    progress.line(format!("Built {image}"));
+    Ok(pb::PreparedImage { image, commit_sha: commit, app_file: app_file.unwrap_or_default() })
+}
+
+/// What to build from the Dockerfile, with the build variables as build arguments.
+fn dockerfile_build(
+    repo: &Path,
+    root: &Path,
+    settings: BuildSettings,
+    prepare: &pb::PrepareDeployment,
+    tag: String,
+    progress: &Progress,
+) -> Result<BuildSpec, pb::CommandFailed> {
+    let context = inside(repo, root, settings.context(), "the build context")?;
+    let dockerfile = inside(repo, root, settings.dockerfile(), "the Dockerfile")?;
     let dockerfile = dockerfile
         .strip_prefix(&context)
         .map_err(|_| build_failed(format!("the Dockerfile `{}` is not inside the build context", settings.dockerfile())))?
@@ -129,18 +164,7 @@ async fn build(
         args.push((variable.name.clone(), variable.value.clone()));
     }
     progress.redact(prepare.build_variables.iter().filter(|variable| variable.secret).map(|variable| variable.value.clone()));
-
-    progress.phase("building");
-    let spec = BuildSpec {
-        context,
-        dockerfile,
-        target: settings.target,
-        args,
-        tag: spinikus_core::build::image_tag(service, deployment),
-    };
-    let image = runtime.build(&spec, &|line| progress.line(line)).await.map_err(|error| build_failed(error.to_string()))?;
-    progress.line(format!("Built {image}"));
-    Ok(pb::PreparedImage { image, commit_sha: commit, app_file: app_file.unwrap_or_default() })
+    Ok(BuildSpec { context, dockerfile, target: settings.target, args, tag })
 }
 
 /// `relative` under `base`, which must exist and stay inside `repo` once symlinks resolve.
@@ -321,7 +345,9 @@ mod tests {
 
     fn setup() -> Setup {
         let dir = tempfile::tempdir().unwrap();
-        let options = BuildOptions { local_repositories: true, ..BuildOptions::in_dir(&dir.path().join("agent")) };
+        // Never a `railpack` installed on this machine.
+        let railpack = dir.path().join("no-railpack");
+        let options = BuildOptions { local_repositories: true, railpack, ..BuildOptions::in_dir(&dir.path().join("agent")) };
         Setup { dir, options, runtime: MemoryRuntime::new() }
     }
 
@@ -427,6 +453,7 @@ mod tests {
         };
 
         let no_dockerfile = failure("web", serde_json::json!({})).await;
+        let named_dockerfile = failure("web", serde_json::json!({ "build": { "dockerfile": "Dockerfile.prod" } })).await;
         let bad_file = failure("bad", serde_json::json!({})).await;
         let missing_root = failure("nope", serde_json::json!({})).await;
         let (prepare_branch, mut git) = prepare(&repo, "", serde_json::json!({}));
@@ -434,8 +461,12 @@ mod tests {
         let missing_branch = run(&setup, &prepare_branch, &git).await.0.unwrap_err();
 
         assert_eq!(no_dockerfile.reason, FailureReason::BuildFailed as i32);
-        assert!(no_dockerfile.message.contains("the Dockerfile `Dockerfile` does not exist"), "{}", no_dockerfile.message);
-        assert!(no_dockerfile.message.contains("Railpack"), "{}", no_dockerfile.message);
+        assert!(no_dockerfile.message.contains("needs Railpack, which isn't installed"), "{}", no_dockerfile.message);
+        assert!(
+            named_dockerfile.message.contains("the Dockerfile `Dockerfile.prod` does not exist"),
+            "{}",
+            named_dockerfile.message
+        );
         assert!(bad_file.message.contains("spinikus.json: unknown field `cron`"), "{}", bad_file.message);
         assert!(missing_root.message.contains("the root directory `nope` does not exist"), "{}", missing_root.message);
         assert!(missing_branch.message.starts_with("git fetch failed"), "{}", missing_branch.message);
@@ -444,6 +475,84 @@ mod tests {
             let escaped = failure("escape", serde_json::json!({})).await;
             assert!(escaped.message.contains("outside the repository"), "{}", escaped.message);
         }
+    }
+
+    /// A stand-in for `railpack`: reports version 0.43.0, records its arguments in `args`
+    /// next to itself, fails for a directory with a `FAIL` file, and otherwise writes a plan
+    /// whose secrets are the `--env` names, as Railpack does.
+    #[cfg(unix)]
+    fn fake_railpack(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = r#"#!/bin/sh
+if [ "$1" = --version ]; then echo "railpack version 0.43.0"; exit 0; fi
+printf '%s\n' "$@" > "$(dirname "$0")/args"
+if [ -f "$2/FAIL" ]; then echo "Detecting"; echo "error: no provider matched" >&2; exit 1; fi
+shift 2
+secrets=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --plan-out) plan="$2" ;;
+    --env) secrets="$secrets${secrets:+,}\"${2%%=*}\"" ;;
+  esac
+  shift 2
+done
+echo "Detected Node"
+printf '{"steps":[{"name":"build","secrets":["*"]}],"secrets":[%s],"deploy":{"startCommand":"node server.js"}}' "$secrets" > "$plan"
+"#;
+        let path = dir.join("bin/railpack");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn builds_without_a_dockerfile_from_railpacks_plan() {
+        let mut setup = setup();
+        setup.options.railpack = fake_railpack(setup.dir.path());
+        let (repo, _) =
+            repository(setup.dir.path(), &[("app/package.json", "{}"), ("broken/FAIL", ""), ("both/Dockerfile", "FROM a\n")]);
+        let (mut prepare, git) = prepare(&repo, "app", serde_json::json!({ "build": { "command": "npm run build:prod" } }));
+        prepare.build_variables.retain(|variable| !variable.secret);
+
+        let (result, reported) = run(&setup, &prepare, &git).await;
+
+        result.unwrap();
+        let builds = setup.runtime.builds();
+        let (spec, plan) = &builds[0];
+        assert!(spec.context.ends_with("app"), "{:?}", spec.context);
+        assert_eq!((spec.dockerfile.as_str(), spec.target.as_deref()), (railpack::PLAN_FILE, None));
+        let syntax = ("BUILDKIT_SYNTAX".to_string(), "ghcr.io/railwayapp/railpack-frontend:v0.43.0".to_string());
+        assert_eq!(spec.args, [syntax, ("cache-key".to_string(), prepare.service_id.clone())]);
+        let plan: serde_json::Value = serde_json::from_str(plan).unwrap();
+        assert_eq!(plan["steps"][0]["variables"], serde_json::json!({ "NODE_ENV": "staging" }));
+        assert_eq!(plan.get("secrets"), None);
+        assert_eq!(plan["exclude"], serde_json::json!([railpack::PLAN_FILE]));
+        let args = std::fs::read_to_string(setup.dir.path().join("bin/args")).unwrap();
+        assert!(args.contains("--env\nNODE_ENV=staging\n--build-cmd\nnpm run build:prod\n"), "{args}");
+        let phases: Vec<_> = reported.iter().map(|progress| progress.phase.as_str()).collect();
+        assert!(phases.contains(&"planning") && phases.contains(&"building"), "{phases:?}");
+        let lines: Vec<_> =
+            reported.iter().flat_map(|progress| progress.log_lines.iter().map(|line| line.text.as_str())).collect();
+        assert!(lines.contains(&"No Dockerfile: building with Railpack 0.43.0") && lines.contains(&"Detected Node"), "{lines:?}");
+
+        // Secret build variables have no way into a Railpack build yet.
+        let (with_secret, _) = self::prepare(&repo, "app", serde_json::json!({}));
+        let refused = run(&setup, &with_secret, &git).await.0.unwrap_err();
+        assert!(refused.message.contains("secret build variables yet (TOKEN)"), "{}", refused.message);
+        let (broken, git_broken) = self::prepare(&repo, "broken", serde_json::json!({}));
+        let mut broken = broken;
+        broken.build_variables.clear();
+        let failed = run(&setup, &broken, &git_broken).await.0.unwrap_err();
+        assert_eq!(failed.message, "railpack prepare failed: Detecting error: no provider matched");
+        // `railpack` is asked for explicitly even with a Dockerfile, and a Dockerfile setting is refused.
+        let (both, git_both) = self::prepare(&repo, "both", serde_json::json!({ "build": { "strategy": "railpack" } }));
+        let mut both = both;
+        both.build_variables.clear();
+        run(&setup, &both, &git_both).await.0.unwrap();
+        assert_eq!(setup.runtime.builds()[1].0.dockerfile, railpack::PLAN_FILE);
     }
 
     #[tokio::test]

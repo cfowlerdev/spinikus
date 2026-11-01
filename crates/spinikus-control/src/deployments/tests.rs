@@ -190,7 +190,7 @@ async fn prepares_starts_and_verifies_a_deployment() {
         .iter()
         .map(|variable| (variable.name.as_str(), variable.value.as_str(), variable.secret))
         .collect();
-    assert_eq!(variables, [("API_KEY", "k", true)]);
+    assert_eq!(variables, [("API_KEY", "k", true), ("PORT", "3000", false)]);
     assert_eq!(control.store().get_deployment(deployment.id).await.unwrap().image.as_deref(), Some("ghcr.io/acme/web@sha256:01"));
 
     let progress =
@@ -669,7 +669,8 @@ async fn rolls_back_to_the_last_release_without_building() {
     let Some(Kind::StartDeployment(start)) = &start.kind else { panic!("{start:?}") };
     assert_eq!(start.image, "web@sha256:01");
     // The variables of the deployment rolled back to, not the service's current ones.
-    assert!(start.variables.is_empty(), "{:?}", start.variables);
+    let names: Vec<_> = start.variables.iter().map(|variable| variable.name.as_str()).collect();
+    assert_eq!(names, ["PORT"], "only the runtime port's");
     let path: Vec<_> =
         control.list_deployment_events(&setup.admin, rollback.id).await.unwrap().iter().map(|event| event.to).collect();
     assert_eq!(path, [Queued, Starting, Verifying, Live]);
