@@ -322,14 +322,18 @@ pub enum Engine {
 
 #[derive(Subcommand, Debug)]
 pub enum DbCommand {
-    /// Create a database and deploy it
+    /// Create a database and deploy it, empty or with the data of a backup
     Create {
         name: String,
-        #[arg(long, value_enum)]
-        engine: Engine,
-        /// A major version, such as 17 (default: the newest)
+        /// Required unless it starts from a backup
+        #[arg(long, value_enum, required_unless_present = "from_backup")]
+        engine: Option<Engine>,
+        /// A major version, such as 17 (default: the newest, or the backup's database's)
         #[arg(long)]
         version: Option<String>,
+        /// A backup of another database (its ID) to restore into this one once it runs
+        #[arg(long = "from-backup")]
+        from_backup: Option<String>,
         /// The environment (default: the linked one)
         #[arg(short, long)]
         environment: Option<String>,

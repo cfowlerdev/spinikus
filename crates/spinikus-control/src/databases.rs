@@ -4,18 +4,26 @@
 //! apps of the environment reference (`${{ postgres.DATABASE_URL }}`). Then it is deployed.
 //! Each part is made through the same operations as by hand, so the same permissions and
 //! audit entries apply: developers of the environment create databases.
+//!
+//! A database can start from a backup of another (`from_backup`): it gets the backup's
+//! engine, at the same version or a newer one, and a restore of the backup that waits for
+//! its first deployment to go live. There is nothing to protect yet, so no safety backup.
+//! Copying a database's data takes the admin role in its environment, as restoring does.
 
 use serde::Serialize;
+use serde_json::json;
 use spinikus_core::{
+    backup::{Backup, BackupStatus, NewRestore, Restore},
     database::{DatabaseSpec, Engine},
     deployment::Deployment,
-    id::{EnvironmentId, ServerId},
+    id::{BackupId, EnvironmentId, ServerId},
+    membership::Role,
     secret::Secret,
     service::{Service, ServiceKind},
     source::{ImageSource, SourceSpec},
     variable::{VariableAvailability, VariableScope},
 };
-use spinikus_store::ServiceRepository;
+use spinikus_store::{EnvironmentRepository, RestoreRepository, ServiceRepository};
 
 use crate::{Control, ControlError, NewService, NewVariable, NewVolume, Principal};
 
@@ -24,11 +32,14 @@ pub struct NewDatabase {
     pub name: String,
     /// Made from the name when not given. It is the name apps reach the database by.
     pub slug: Option<String>,
-    pub engine: Engine,
-    /// A major version, the engine's newest if `None`.
+    /// Required unless it starts from a backup, whose engine it then must be.
+    pub engine: Option<Engine>,
+    /// A major version: the engine's newest if `None`, or the backup's database's version.
     pub version: Option<String>,
     /// The server to run on; `None` means the embedded server.
     pub server_id: Option<ServerId>,
+    /// A backup of another database to restore into this one once it runs.
+    pub from_backup: Option<BackupId>,
 }
 
 /// A database just created, and its first deployment.
@@ -36,6 +47,9 @@ pub struct NewDatabase {
 pub struct CreatedDatabase {
     pub service: Service,
     pub deployment: Deployment,
+    /// The restore of the backup it starts from, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore: Option<Restore>,
 }
 
 impl Control {
@@ -45,8 +59,28 @@ impl Control {
         environment_id: EnvironmentId,
         new: NewDatabase,
     ) -> Result<CreatedDatabase, ControlError> {
-        let spec = DatabaseSpec::new(new.engine, new.version.as_deref())
+        let source = match new.from_backup {
+            Some(id) => Some(self.backup_to_copy(principal, id).await?),
+            None => None,
+        };
+        let engine = match (new.engine, &source) {
+            (Some(engine), Some((_, from))) if engine != from.engine() => {
+                let problem = format!("the backup is of a {} database", from.engine());
+                return Err(ControlError::Invalid { field: "engine", problem });
+            }
+            (Some(engine), _) => engine,
+            (None, Some((_, from))) => from.engine(),
+            (None, None) => return Err(ControlError::Invalid { field: "engine", problem: "choose an engine".to_string() }),
+        };
+        let version = new.version.as_deref().or(source.as_ref().map(|(_, from)| from.version()));
+        let spec = DatabaseSpec::new(engine, version)
             .map_err(|error| ControlError::Invalid { field: "version", problem: error.to_string() })?;
+        if let Some((_, from)) = &source
+            && !from.restores_into(&spec)
+        {
+            let problem = format!("the backup is of {engine} {}, which doesn't restore into an older version", from.version());
+            return Err(ControlError::Invalid { field: "version", problem });
+        }
         let service = NewService {
             name: new.name,
             slug: new.slug,
@@ -55,8 +89,9 @@ impl Control {
             server_id: new.server_id,
         };
         let service = self.create_service(principal, environment_id, service).await?;
-        match self.set_up_database(principal, &service, &spec).await {
-            Ok(deployment) => Ok(CreatedDatabase { service, deployment }),
+        let backup = source.map(|(backup, _)| backup);
+        match self.set_up_database(principal, &service, &spec, backup.as_ref()).await {
+            Ok((deployment, restore)) => Ok(CreatedDatabase { service, deployment, restore }),
             Err(error) => {
                 // Don't leave half a database behind.
                 if let Err(cleanup) = self.store().delete_service(service.id).await {
@@ -67,12 +102,26 @@ impl Control {
         }
     }
 
+    /// A backup that can be copied into a new database, and its database's spec.
+    async fn backup_to_copy(&self, principal: &Principal, id: BackupId) -> Result<(Backup, DatabaseSpec), ControlError> {
+        let (backup, _) = self.backup_with_access(principal, id, Role::Admin).await?;
+        let rejected =
+            |problem: &str| ControlError::Rejected { entity: "backup", id: id.to_string(), problem: problem.to_string() };
+        if backup.status != BackupStatus::Succeeded {
+            return Err(rejected("only a backup that succeeded can be restored"));
+        }
+        let database = self.store().get_service(backup.service_id).await?;
+        let spec = DatabaseSpec::of(&database.config).ok_or_else(|| rejected("its database names no version Spinikus knows"))?;
+        Ok((backup, spec))
+    }
+
     async fn set_up_database(
         &self,
         principal: &Principal,
         service: &Service,
         spec: &DatabaseSpec,
-    ) -> Result<Deployment, ControlError> {
+        from_backup: Option<&Backup>,
+    ) -> Result<(Deployment, Option<Restore>), ControlError> {
         let image = SourceSpec::Image(ImageSource { image: spec.image() });
         self.create_source(principal, service.id, image).await?;
         let volume = NewVolume { name: "data".to_string(), mount_path: spec.data_path().to_string() };
@@ -87,7 +136,17 @@ impl Control {
             };
             self.create_variable(principal, VariableScope::Service(service.id), new).await?;
         }
-        self.create_deployment(principal, service.id).await
+        let deployment = self.create_deployment(principal, service.id).await?;
+        let Some(backup) = from_backup else {
+            return Ok((deployment, None));
+        };
+        let new = NewRestore { service_id: service.id, backup_id: backup.id, safety_backup_id: None };
+        let restore = self.store().create_restore(new).await?;
+        let environment = self.store().get_environment(service.environment_id).await?;
+        let details = json!({ "service_id": service.id.to_string(), "backup_id": backup.id.to_string(), "new_database": true });
+        self.audit_by(principal, "backup.restore", restore.id, Some(environment.project_id), details).await?;
+        self.wake_backups();
+        Ok((deployment, Some(restore)))
     }
 }
 
@@ -107,7 +166,14 @@ mod tests {
     };
 
     fn new(name: &str, engine: Engine, version: Option<&str>) -> NewDatabase {
-        NewDatabase { name: name.to_string(), slug: None, engine, version: version.map(str::to_string), server_id: None }
+        NewDatabase {
+            name: name.to_string(),
+            slug: None,
+            engine: Some(engine),
+            version: version.map(str::to_string),
+            server_id: None,
+            from_backup: None,
+        }
     }
 
     #[tokio::test]

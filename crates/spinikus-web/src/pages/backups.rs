@@ -362,7 +362,7 @@ async fn activity_section(
                     (layout::empty("No backups yet."))
                 } @else {
                     ul class={ (CARD) " divide-y divide-zinc-200 dark:divide-zinc-800" } {
-                        @for backup in &backups.items { (backup_row(signed, backup, names, admin, safety.contains(&backup.id))) }
+                        @for backup in &backups.items { (backup_row(signed, &context.service, backup, names, admin, safety.contains(&backup.id))) }
                     }
                     @if let (true, Some(last)) = (backups.has_more, backups.items.last()) {
                         div class="mt-3 text-sm" { a href={ (context.url()) "?after=" (last.id) } class=(LINK) { "Older backups" } }
@@ -375,6 +375,7 @@ async fn activity_section(
 
 fn backup_row(
     signed: &Signed,
+    database: &Service,
     backup: &Backup,
     names: &HashMap<StorageDestinationId, String>,
     admin: bool,
@@ -391,13 +392,15 @@ fn backup_row(
                 @if let Some(size) = backup.size_bytes { " · " (human_size(size)) }
             }
             @if admin && backup.status.is_finished() {
-                div class="ml-auto flex gap-2" {
+                div class="ml-auto flex flex-wrap gap-2" {
                     @if backup.status == BackupStatus::Succeeded {
                         form method="post" action={ "/backups/" (backup.id) "/restore" }
                             hx-confirm="Restore this backup? The database's current data is backed up first, then replaced. Apps using it may get errors until the restore finishes." {
                             (csrf_field(signed))
                             button type="submit" class={ (BUTTON_SECONDARY) " py-1" } { "Restore" }
                         }
+                        a href={ "/environments/" (database.environment_id) "/databases/new?from_backup=" (backup.id) }
+                            class={ (BUTTON_SECONDARY) " py-1" } { "Restore into a new database" }
                     }
                     form method="post" action={ "/backups/" (backup.id) "/delete" } hx-confirm="Delete this backup? Its file is deleted from the storage too." {
                         (csrf_field(signed))
@@ -424,7 +427,9 @@ fn restore_row(restore: &Restore, backups: &[Backup]) -> Markup {
                     Some(backup) => { "of the backup from " (layout::time(backup.created_at)) },
                     None => { "of the backup " span class="font-mono" { (restore.backup_id) } },
                 }
-                @if restore.status == BackupStatus::Queued { " · waiting for the safety backup" }
+                @if restore.status == BackupStatus::Queued {
+                    @if restore.safety_backup_id.is_some() { " · waiting for the safety backup" } @else { " · waiting for the database to start" }
+                }
             }
             @if let Some(error) = &restore.error {
                 p class="w-full text-xs break-words text-red-700 dark:text-red-400" { (error) }

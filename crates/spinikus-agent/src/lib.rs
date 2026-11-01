@@ -6,7 +6,8 @@
 //! runs commands: building from Git or pulling an image, starting a deployment and verifying
 //! it with its health check, and stopping, restarting and removing containers. It applies the
 //! route tables and certificates it is sent to its proxy ([`spinikus_proxy`]), which serves
-//! the apps on this server, and serves log tails as sessions. Release commands come next.
+//! the apps on this server, serves log tails as sessions, runs release commands, and keeps
+//! the build cache and networks from piling up ([`housekeeping`]).
 
 mod backoff;
 mod backup;
@@ -20,8 +21,10 @@ mod error;
 mod facts;
 mod files;
 mod health;
+mod housekeeping;
 mod proxy;
 mod railpack;
+mod release;
 mod report;
 mod restore;
 pub mod runtime;

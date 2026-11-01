@@ -117,22 +117,7 @@ fn spec(start: &pb::StartDeployment) -> Result<ContainerSpec, pb::CommandFailed>
             Ok(Mount { volume: volume.volume_id.clone(), path: volume.mount_path.clone() })
         })
         .collect::<Result<_, _>>()?;
-    let network = match &start.network {
-        None => None,
-        Some(network) => {
-            // Only Spinikus's own networks: never `host`, or another project's network.
-            let name_ok = network.name.strip_prefix(NETWORK_PREFIX).is_some_and(|rest| {
-                !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-            });
-            if !name_ok {
-                return Err(invalid(format!("invalid network `{}`", network.name)));
-            }
-            if let Some(alias) = network.aliases.iter().find(|alias| alias.parse::<spinikus_core::slug::Slug>().is_err()) {
-                return Err(invalid(format!("invalid network alias `{alias}`")));
-            }
-            Some(Network { name: network.name.clone(), aliases: network.aliases.clone() })
-        }
-    };
+    let network = network(start.network.as_ref())?;
     Ok(ContainerSpec {
         name: format!("spinikus-{deployment_id}"),
         image: start.image.clone(),
@@ -148,6 +133,25 @@ fn spec(start: &pb::StartDeployment) -> Result<ContainerSpec, pb::CommandFailed>
 
 /// Every network a deployment joins is named with this prefix.
 const NETWORK_PREFIX: &str = "spinikus-";
+
+/// The network a command names, checked: only Spinikus's own networks, never `host` or
+/// another project's network, and slugs as aliases.
+pub(crate) fn network(network: Option<&pb::ServiceNetwork>) -> Result<Option<Network>, pb::CommandFailed> {
+    let Some(network) = network else {
+        return Ok(None);
+    };
+    let invalid = |problem: String| failure(FailureReason::Internal, problem);
+    let name_ok = network.name.strip_prefix(NETWORK_PREFIX).is_some_and(|rest| {
+        !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    });
+    if !name_ok {
+        return Err(invalid(format!("invalid network `{}`", network.name)));
+    }
+    if let Some(alias) = network.aliases.iter().find(|alias| alias.parse::<spinikus_core::slug::Slug>().is_err()) {
+        return Err(invalid(format!("invalid network alias `{alias}`")));
+    }
+    Ok(Some(Network { name: network.name.clone(), aliases: network.aliases.clone() }))
+}
 
 #[cfg(test)]
 mod tests {

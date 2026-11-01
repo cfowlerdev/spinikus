@@ -950,3 +950,60 @@ async fn deleting_a_service_stops_and_removes_its_deployments() {
     control.advance_deployments().await;
     assert!(everything(&mut agent).removed.is_empty(), "nothing left to remove");
 }
+
+#[tokio::test]
+async fn runs_the_release_command_between_the_build_and_the_start() {
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    let mut agent = connect(control, setup.server.id);
+    let app_file = r#"{ "runtime": { "release": "npm run migrate", "release_timeout": "5m" } }"#;
+    let prepared = |prepare: &pb::Command| {
+        let mut result = succeeded(prepare, Some("ghcr.io/acme/web@sha256:01"));
+        let Some(Outcome::Succeeded(succeeded)) = &mut result.outcome else { unreachable!() };
+        succeeded.prepared.as_mut().unwrap().app_file = app_file.to_string();
+        result
+    };
+    // Builds until the release command, which `spinikus.json` names.
+    let released = async |agent: &mut mpsc::Receiver<pb::ControlMessage>| {
+        let deployment = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+        control.advance_deployments().await;
+        let prepare = only(sent(agent));
+        control.deployment_result(setup.server.id, prepared(&prepare)).await;
+        assert_eq!(status(control, deployment.id).await, Releasing);
+        (deployment, only(sent(agent)))
+    };
+
+    let (first, release) = released(&mut agent).await;
+    assert_eq!(release.command_id, format!("{}/release", first.id));
+    let Some(Kind::RunRelease(run)) = &release.kind else { panic!("{release:?}") };
+    assert_eq!((run.image.as_str(), run.command.as_str()), ("ghcr.io/acme/web@sha256:01", "npm run migrate"));
+    assert_eq!(run.timeout, Some(prost_types::Duration { seconds: 300, nanos: 0 }));
+    assert_eq!(run.service_id, setup.service.id.to_string());
+    let network = run.network.as_ref().unwrap();
+    assert_eq!((network.name.clone(), network.aliases.len()), (format!("spinikus-{}", setup.environment.id), 0));
+    assert!(run.variables.iter().any(|variable| variable.name == "PORT"));
+    control.advance_deployments().await;
+    assert!(sent(&mut agent).is_empty(), "not sent again while it runs");
+    control.deployment_result(setup.server.id, succeeded(&release, None)).await;
+    let start = only(sent(&mut agent));
+    assert!(matches!(start.kind, Some(Kind::StartDeployment(_))), "{start:?}");
+    control.deployment_result(setup.server.id, succeeded(&start, None)).await;
+    assert_eq!(status(control, first.id).await, Live);
+
+    // A failed release fails the deployment, and the live one stays.
+    let (second, release) = released(&mut agent).await;
+    control.deployment_result(setup.server.id, failed(&release, pb::FailureReason::ReleaseFailed, "exited with code 1")).await;
+    let second = control.store().get_deployment(second.id).await.unwrap();
+    assert_eq!((second.status, second.reason), (Failed, Some(EndReason::ReleaseFailed)));
+    assert_eq!(status(control, first.id).await, Live);
+    assert!(sent(&mut agent).is_empty(), "nothing starts");
+
+    // Canceling one that is releasing stops it.
+    let (third, _) = released(&mut agent).await;
+    control.cancel_deployment(&setup.admin, third.id).await.unwrap();
+    let stop = only(sent(&mut agent));
+    assert_eq!(stop.command_id, format!("{}/stop", third.id));
+    let path: Vec<_> =
+        control.list_deployment_events(&setup.admin, first.id).await.unwrap().iter().map(|event| event.to).collect();
+    assert_eq!(path, [Queued, Preparing, Releasing, Starting, Verifying, Live]);
+}

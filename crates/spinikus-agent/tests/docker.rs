@@ -10,7 +10,7 @@ use bollard::{
 };
 use spinikus_agent::runtime::{
     BuildSpec, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, DockerRuntime, ExecOutput, LogOptions, Mount, Network,
-    RuntimeError, SERVICE_LABEL,
+    OneOffExit, OneOffSpec, RuntimeError, SERVICE_LABEL,
 };
 use spinikus_core::{
     id::{DeploymentId, ServiceId, VolumeId},
@@ -393,4 +393,83 @@ async fn containers_on_an_environments_network_reach_each_other_by_alias() {
     let again = ContainerSpec { name: format!("spinikus-{}", DeploymentId::new()), deployment_id: DeploymentId::new(), ..spec };
     let second = runtime.create(&again).await.unwrap();
     let _second = Cleanup(runtime.clone(), second);
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn runs_a_one_off_container_to_completion_and_removes_it() {
+    let runtime = DockerRuntime::new();
+    runtime.pull(IMAGE, &|_| {}).await.unwrap();
+    let network = format!("spinikus-test-{}", DeploymentId::new());
+    let _network = NetworkCleanup(runtime.clone(), network.clone());
+    let deployment = DeploymentId::new();
+    let spec = OneOffSpec {
+        name: format!("spinikus-{deployment}-release"),
+        image: IMAGE.to_string(),
+        service_id: ServiceId::new(),
+        deployment_id: deployment,
+        env: vec![("GREETING".to_string(), "migrating".to_string())],
+        network: Some(Network { name: network.clone(), aliases: Vec::new() }),
+        command: ["/bin/sh", "-c", "echo \"$GREETING\"; echo oops >&2; exit 3"].map(str::to_string).to_vec(),
+        timeout: Duration::from_secs(60),
+    };
+    let _container = Cleanup(runtime.clone(), spec.name.clone());
+    let lines = std::sync::Mutex::new(Vec::new());
+
+    let exit = runtime.run_once(&spec, &|line| lines.lock().unwrap().push((line.stderr, line.text))).await.unwrap();
+
+    assert_eq!(exit, OneOffExit::Exited(3));
+    assert_eq!(*lines.lock().unwrap(), [(false, "migrating".to_string()), (true, "oops".to_string())]);
+    let inspected = runtime.client().unwrap().inspect_container(&spec.name, None).await;
+    assert!(inspected.is_err(), "the container is removed: {inspected:?}");
+    assert!(runtime.list().await.unwrap().iter().all(|instance| instance.deployment_id != deployment));
+
+    // Killed after its timeout, and removed.
+    let slow = OneOffSpec {
+        command: ["/bin/sh", "-c", "sleep 30"].map(str::to_string).to_vec(),
+        timeout: Duration::from_secs(1),
+        ..spec.clone()
+    };
+    assert_eq!(runtime.run_once(&slow, &|_| {}).await.unwrap(), OneOffExit::TimedOut);
+    assert!(runtime.client().unwrap().inspect_container(&spec.name, None).await.is_err());
+    // Removing one that is gone succeeds.
+    runtime.remove_one_off(&spec.name).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn removes_networks_no_container_is_on() {
+    let runtime = DockerRuntime::new();
+    runtime.pull(IMAGE, &|_| {}).await.unwrap();
+    let (used, unused) = (format!("spinikus-test-{}", DeploymentId::new()), format!("spinikus-test-{}", DeploymentId::new()));
+    let _used = NetworkCleanup(runtime.clone(), used.clone());
+    let _unused = NetworkCleanup(runtime.clone(), unused.clone());
+    let spec = |network: &str| {
+        let deployment = DeploymentId::new();
+        ContainerSpec {
+            name: format!("spinikus-{deployment}"),
+            image: IMAGE.to_string(),
+            service_id: ServiceId::new(),
+            deployment_id: deployment,
+            env: Vec::new(),
+            port: None,
+            volumes: Vec::new(),
+            network: Some(Network { name: network.to_string(), aliases: Vec::new() }),
+            command: Vec::new(),
+        }
+    };
+    // Never started: created containers count too.
+    let kept = runtime.create(&spec(&used)).await.unwrap();
+    let _kept = Cleanup(runtime.clone(), kept);
+    let gone = runtime.create(&spec(&unused)).await.unwrap();
+    runtime.remove(&gone).await.unwrap();
+
+    let removed = runtime.remove_unused_networks().await.unwrap();
+
+    assert!(removed.contains(&unused) && !removed.contains(&used), "{removed:?}");
+    let docker = runtime.client().unwrap();
+    assert!(docker.inspect_network(&unused, None).await.is_err());
+    assert!(docker.inspect_network(&used, None).await.is_ok());
+    // Only what nothing has used for a week goes, so a fresh cache stays.
+    runtime.prune_build_cache(Duration::from_secs(7 * 24 * 60 * 60)).await.unwrap();
 }

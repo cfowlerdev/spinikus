@@ -94,6 +94,20 @@ impl DatabaseSpec {
         Ok(Self { engine, version })
     }
 
+    /// What a database service's config names (`database.engine` and `version`), if it is
+    /// one this version of Spinikus knows.
+    pub fn of(config: &ServiceConfig) -> Option<Self> {
+        let version = config.get("database")?.get("version")?.as_str()?;
+        Self::new(Engine::of(config)?, Some(version)).ok()
+    }
+
+    /// Whether a dump of this database can be restored into `target`: the same engine at the
+    /// same version or a newer one, since dumps don't load into older versions.
+    pub fn restores_into(&self, target: &Self) -> bool {
+        let position = |spec: &Self| spec.engine.versions().iter().position(|version| *version == spec.version);
+        self.engine == target.engine && position(self) <= position(target)
+    }
+
     pub fn engine(&self) -> Engine {
         self.engine
     }
@@ -164,6 +178,19 @@ mod tests {
         assert_eq!((newest.image(), newest.data_path().as_str()), ("postgres:18".to_string(), "/var/lib/postgresql"));
         assert_eq!((old.image(), old.data_path().as_str()), ("postgres:16".to_string(), "/var/lib/postgresql/data"));
         assert_eq!(unknown.to_string(), "redis has no version `6`; use one of 7, 8");
+    }
+
+    #[test]
+    fn dumps_restore_into_the_same_engine_at_the_same_version_or_newer() {
+        let spec = |engine, version| DatabaseSpec::new(engine, Some(version)).unwrap();
+        let postgres16 = DatabaseSpec::of(&spec(Engine::Postgres, "16").config()).unwrap();
+
+        assert_eq!(postgres16, spec(Engine::Postgres, "16"));
+        assert!(postgres16.restores_into(&spec(Engine::Postgres, "16")));
+        assert!(postgres16.restores_into(&spec(Engine::Postgres, "18")));
+        assert!(!postgres16.restores_into(&spec(Engine::Postgres, "15")));
+        assert!(!postgres16.restores_into(&spec(Engine::Redis, "8")));
+        assert_eq!(DatabaseSpec::of(&ServiceConfig::new()), None);
     }
 
     #[test]

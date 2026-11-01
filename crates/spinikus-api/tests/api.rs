@@ -559,6 +559,9 @@ async fn creates_a_database_with_its_parts() {
     let unknown_engine = api.send(Method::POST, &databases, token, &[], Some(json!({ "name": "X", "engine": "oracle" }))).await;
     let bad_version =
         api.send(Method::POST, &databases, token, &[], Some(json!({ "name": "X", "engine": "postgres", "version": "9" }))).await;
+    let no_engine = api.send(Method::POST, &databases, token, &[], Some(json!({ "name": "X" }))).await;
+    let unknown_backup = json!({ "name": "X", "from_backup": "bkp_01J0000000000000000000000Z" });
+    let unknown_backup = api.send(Method::POST, &databases, token, &[], Some(unknown_backup)).await;
     let location = created.header(header::LOCATION).to_string();
     let variables = api.send(Method::GET, &format!("{location}/variables"), token, &[], None).await;
     let volumes = api.send(Method::GET, &format!("{location}/volumes"), token, &[], None).await;
@@ -576,6 +579,9 @@ async fn creates_a_database_with_its_parts() {
     assert_eq!(volumes.body[0]["mount_path"], "/data");
     assert_eq!(unknown_engine.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!((bad_version.status, &bad_version.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("version")));
+    assert_eq!((no_engine.status, &no_engine.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("engine")));
+    assert_eq!(unknown_backup.status, StatusCode::NOT_FOUND, "{:?}", unknown_backup.body);
+    assert!(created.body.get("restore").is_none(), "only when it starts from a backup");
 }
 
 #[tokio::test]

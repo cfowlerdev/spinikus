@@ -681,6 +681,7 @@ async fn runtime_settings_from_the_repository_are_read_only() {
         ("_csrf", token.as_str()),
         ("port", "9999"),
         ("start", "./new"),
+        ("release", "./migrate"),
         ("health_path", ""),
         ("start_period", ""),
         ("shutdown_timeout", ""),
@@ -691,7 +692,7 @@ async fn runtime_settings_from_the_repository_are_read_only() {
     let service = control.get_service(&admin, service.id).await.unwrap();
     assert_eq!(
         service.config.get("runtime"),
-        Some(&serde_json::json!({ "port": 3000, "start": "./new" })),
+        Some(&serde_json::json!({ "port": 3000, "start": "./new", "release": "./migrate" })),
         "the stored port is kept"
     );
 }
@@ -1071,6 +1072,27 @@ async fn creates_databases_and_backs_them_up_and_restores_them() {
     let page = web.get(&format!("{backups}?restoring=1"), Some(&ada)).await;
     assert!(page.body.contains("Restore queued") && page.body.contains("waiting for the safety backup"), "{}", page.body);
     assert_eq!(web.post(&restore, Some(&dev), &format!("_csrf={token}")).await.status, StatusCode::FORBIDDEN);
+
+    // Or into a new database, which waits to run before the restore.
+    let environment = control.get_service(&admin, id).await.unwrap().environment_id;
+    let new_page = format!("/environments/{environment}/databases/new?from_backup={}", backup.id);
+    assert!(page.body.contains(&new_page.replace('&', "&amp;")) || page.body.contains(&new_page), "{}", page.body);
+    let page = web.get(&new_page, Some(&ada)).await;
+    assert!(page.body.contains("Starts with the data of"), "{}", page.body);
+    assert!(page.body.contains(r#"value="postgres:"#) && !page.body.contains(r#"value="redis:"#), "{}", page.body);
+    let fields = form(&[
+        ("_csrf", &page.csrf()),
+        ("name", "Copy"),
+        ("slug", ""),
+        ("database", "postgres:18"),
+        ("server_id", ""),
+        ("from_backup", &backup.id.to_string()),
+    ]);
+    let created = web.post(&format!("/environments/{environment}/databases"), Some(&ada), &fields).await;
+    assert_eq!(created.status, StatusCode::SEE_OTHER, "{}", created.body);
+    let copy = created.header("location").unwrap().to_string();
+    assert!(copy.ends_with("/backups"), "{copy}");
+    assert!(web.get(&copy, Some(&ada)).await.body.contains("waiting for the database to start"));
 
     // A failed backup can be deleted; one still queued can't.
     let backups_now = control.list_backups(&admin, id, None, 10).await.unwrap().items;

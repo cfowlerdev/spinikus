@@ -126,6 +126,8 @@ pub struct RuntimeForm {
     #[serde(default)]
     start: String,
     #[serde(default)]
+    release: String,
+    #[serde(default)]
     health_path: String,
     #[serde(default)]
     start_period: String,
@@ -149,6 +151,7 @@ impl FromFile {
 /// The runtime fields a form edits, as `spinikus.json` names them.
 const PORT: &str = "runtime.port";
 const START: &str = "runtime.start";
+const RELEASE: &str = "runtime.release";
 const SHUTDOWN_TIMEOUT: &str = "runtime.shutdown_timeout";
 const HEALTHCHECK: &str = "runtime.healthcheck";
 
@@ -157,7 +160,7 @@ impl RuntimeForm {
     fn of(service: &Service, file: Option<&FromFile>) -> Self {
         let mut shown = service.config.get("runtime").and_then(Value::as_object).cloned().unwrap_or_default();
         if let Some(from) = file.and_then(|file| file.config.get("runtime")).and_then(Value::as_object) {
-            for field in [PORT, START, SHUTDOWN_TIMEOUT, HEALTHCHECK] {
+            for field in [PORT, START, RELEASE, SHUTDOWN_TIMEOUT, HEALTHCHECK] {
                 if FromFile::sets(file, field) {
                     let key = &field["runtime.".len()..];
                     set(&mut shown, key, from.get(key).cloned());
@@ -175,6 +178,7 @@ impl RuntimeForm {
             revision: Some(service.revision),
             port: text(runtime.and_then(|runtime| runtime.get("port"))),
             start: text(runtime.and_then(|runtime| runtime.get("start"))),
+            release: text(runtime.and_then(|runtime| runtime.get("release"))),
             health_path: text(check.and_then(|check| check.get("path"))),
             start_period: text(check.and_then(|check| check.get("start_period"))),
             shutdown_timeout: text(runtime.and_then(|runtime| runtime.get("shutdown_timeout"))),
@@ -197,6 +201,9 @@ impl RuntimeForm {
         }
         if !FromFile::sets(file, START) {
             set(&mut runtime, "start", text(&self.start));
+        }
+        if !FromFile::sets(file, RELEASE) {
+            set(&mut runtime, "release", text(&self.release));
         }
         if !FromFile::sets(file, SHUTDOWN_TIMEOUT) {
             set(&mut runtime, "shutdown_timeout", text(&self.shutdown_timeout));
@@ -227,6 +234,8 @@ impl RuntimeForm {
             }
             (Input::text("runtime-start", "start", "Start command", &self.start).mono().readonly(locked(START))
                 .hint(hint(START, "Run with /bin/sh -c instead of the image's own command. The image's command if empty.")).render())
+            (Input::text("runtime-release", "release", "Release command", &self.release).mono().placeholder("npm run migrate").readonly(locked(RELEASE))
+                .hint(hint(RELEASE, "Runs once per deployment before the new version starts, such as migrations. If it fails, the deployment does too and the current version stays live.")).render())
             div class="grid gap-4 sm:grid-cols-2" {
                 (Input::text("runtime-health", "health_path", "Health check path", &self.health_path).mono().placeholder("/healthz").readonly(locked(HEALTHCHECK))
                     .hint(hint(HEALTHCHECK, "Must answer 2xx or 3xx before traffic switches. Without one, the container only has to keep running.")).render())

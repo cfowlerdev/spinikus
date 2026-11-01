@@ -237,6 +237,9 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
     let no_destination = cli(&["db", "backup", "production/cache"]).await;
     assert!(no_destination.stderr.contains("there are no storage destinations"), "{}", no_destination.stderr);
     assert_eq!(cli(&["db", "backup"]).await.stderr, "error: web is not a database\n");
+    assert_eq!(cli(&["db", "create", "Copy"]).await.code, 2, "an engine, or a backup to start from");
+    let unknown = cli(&["db", "create", "Copy", "--from-backup", "bkp_01J0000000000000000000000Z"]).await;
+    assert_eq!(unknown.code, 5, "{}", unknown.stderr);
 
     // Tokens, and using one for CI.
     let created = cli(&["token", "create", "ci", "--role", "viewer", "--project", "shop", "-o", "json"]).await.json();

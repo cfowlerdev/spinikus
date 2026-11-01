@@ -25,6 +25,7 @@ use crate::{
     backup::{BackupStores, backup_database},
     build::BuildOptions,
     deploy::{prepare_deployment, start_deployment},
+    release::{self, run_release},
     restore::restore_database,
     runtime::{ContainerRuntime, RuntimeError},
 };
@@ -158,6 +159,10 @@ impl Commands {
                 tracing::info!(command = id, deployment = prepare.deployment_id, "preparing a deployment");
                 let build = self.build.clone();
                 Box::pin(async move { prepare_deployment(&*runtime, &build, prepare, &progress).await }) as Work
+            }
+            Some(Kind::RunRelease(release)) => {
+                tracing::info!(command = id, deployment = release.deployment_id, "running a release command");
+                Box::pin(async move { run_release(&*runtime, release, &progress).await })
             }
             Some(Kind::StartDeployment(start)) => {
                 tracing::info!(command = id, deployment = start.deployment_id, "starting a deployment");
@@ -301,13 +306,14 @@ async fn stop_deployment(runtime: &dyn ContainerRuntime, stop: pb::StopDeploymen
     Ok(stop_containers(runtime, deployment, grace(stop.grace_period)).await?)
 }
 
-/// Stops and removes every container of a deployment. Containers already gone count as
-/// stopped, so repeating it succeeds.
+/// Stops and removes every container of a deployment, its release container included.
+/// Containers already gone count as stopped, so repeating it succeeds.
 pub(crate) async fn stop_containers(
     runtime: &dyn ContainerRuntime,
     deployment: DeploymentId,
     grace: Duration,
 ) -> Result<(), RuntimeError> {
+    runtime.remove_one_off(&release::container_name(deployment)).await?;
     let containers = runtime.list().await?.into_iter().filter(|instance| instance.deployment_id == deployment);
     for container in containers {
         gone_is_done(runtime.stop(&container.container_id, grace).await)?;
@@ -431,6 +437,7 @@ mod tests {
         assert!(succeeded(&result), "{result:?}");
         let left: Vec<_> = runtime.containers().into_iter().map(|instance| instance.container_id).collect();
         assert_eq!(left, ["new"]);
+        assert_eq!(runtime.removed_one_offs(), [format!("spinikus-{draining}-release")], "a running release is killed");
         assert!(commands.in_flight().is_empty());
         assert!(!commands.busy());
     }
@@ -531,15 +538,15 @@ mod tests {
     #[tokio::test]
     async fn refuses_commands_it_cannot_run_yet() {
         let mut commands = Commands::new(Arc::new(MemoryRuntime::new()), builds(), BackupStores::default());
-        let start = Kind::RunRelease(pb::RunRelease::default());
+        let cancel = Kind::CancelCommand(pb::CancelCommand::default());
         let invalid = Kind::StopDeployment(pb::StopDeployment { deployment_id: "web".to_string(), grace_period: None });
 
-        let refused = commands.start(command("cmd-1", start)).unwrap();
+        let refused = commands.start(command("cmd-1", cancel)).unwrap();
         let unknown = commands.start(pb::Command { command_id: "cmd-2".to_string(), kind: None }).unwrap();
         commands.start(command("cmd-3", invalid));
         let invalid = finish(&mut commands).await;
 
-        assert_eq!(failed(&refused).message, "this agent cannot run RunRelease yet");
+        assert_eq!(failed(&refused).message, "this agent cannot run CancelCommand yet");
         assert_eq!(failed(&unknown).message, "this agent does not know this kind of command");
         assert_eq!(failed(&invalid).message, "invalid deployment ID `web`");
     }

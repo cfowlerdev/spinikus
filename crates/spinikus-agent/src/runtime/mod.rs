@@ -25,6 +25,9 @@ pub const SERVICE_LABEL: &str = "spinikus.service";
 pub const DEPLOYMENT_LABEL: &str = "spinikus.deployment";
 /// The label holding the port the app listens on inside the container, if it has one.
 pub const PORT_LABEL: &str = "spinikus.port";
+/// The label holding the deployment ID on a one-off container ([`ContainerRuntime::run_once`]),
+/// in place of [`DEPLOYMENT_LABEL`], so it is never taken for one of the deployment's own.
+pub const ONE_OFF_LABEL: &str = "spinikus.one-off";
 
 /// A container to create for a deployment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +48,30 @@ pub struct ContainerSpec {
     pub network: Option<Network>,
     /// The command to run in place of the image's; the image's if empty.
     pub command: Vec<String>,
+}
+
+/// A container that runs a command once, such as a release command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OneOffSpec {
+    /// Unique on the server; a container left with this name by an earlier run is replaced.
+    pub name: String,
+    pub image: String,
+    pub service_id: spinikus_core::id::ServiceId,
+    pub deployment_id: spinikus_core::id::DeploymentId,
+    /// Environment variables. Values may be secrets: never log them.
+    pub env: Vec<(String, String)>,
+    pub network: Option<Network>,
+    pub command: Vec<String>,
+    /// How long it may run before it is killed.
+    pub timeout: Duration,
+}
+
+/// How a one-off container ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OneOffExit {
+    Exited(i64),
+    /// Killed after its timeout.
+    TimedOut,
 }
 
 /// A network shared with other containers, and the names they reach this one by.
@@ -172,6 +199,25 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// Where the container's app port is published on this host, or `None` if it has no
     /// port or is not running.
     async fn endpoint(&self, container_id: &str) -> Result<Option<SocketAddr>, RuntimeError>;
+
+    /// Runs a one-off container to completion: created without a restart policy, published
+    /// port or volumes, its output given to `output` as it is written, killed after its
+    /// timeout, and removed once it has stopped. A container left with the same name by an
+    /// earlier run is removed first. It carries [`ONE_OFF_LABEL`], so listings leave it out.
+    async fn run_once(&self, spec: &OneOffSpec, output: &(dyn Fn(LogLine) + Send + Sync)) -> Result<OneOffExit, RuntimeError>;
+
+    /// Kills and removes a one-off container by name, such as when its deployment is
+    /// canceled. One that does not exist counts as removed.
+    async fn remove_one_off(&self, name: &str) -> Result<(), RuntimeError>;
+
+    /// Removes the build cache no build has used for `unused_for`, and returns the bytes
+    /// freed. Cache in use by a running build stays.
+    async fn prune_build_cache(&self, unused_for: Duration) -> Result<u64, RuntimeError>;
+
+    /// Removes the networks Spinikus created that no container is on, running or not, and
+    /// returns their names. A network can't go between being created for a container and
+    /// the container joining it.
+    async fn remove_unused_networks(&self) -> Result<Vec<String>, RuntimeError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

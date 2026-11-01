@@ -4,12 +4,13 @@
 //! restarted control plane carries on where it stopped. Each pass over the active
 //! deployments starts queued ones (one per service at a time), fails those past their
 //! phase's timeout or whose agent is gone, and sends the command for the current phase:
-//! prepare, start (which also verifies), or stop for a draining deployment. Commands are
+//! prepare, release (the release command, if the deployment has one), start (which also
+//! verifies), or stop for a draining deployment. Commands are
 //! sent again when unanswered for a while and when the agent reconnects; the agent
 //! recognizes repeats by command ID.
 //!
 //! Results and progress come back from the agent and move the deployment on: a prepared
-//! image leads to starting, a verified start to `live` (which drains the previous live
+//! image leads to releasing or starting, a successful release to starting, a verified start to `live` (which drains the previous live
 //! deployment), and a stopped draining deployment to `superseded`. A result only counts
 //! from the agent of the server the deployment runs on.
 //!
@@ -226,10 +227,6 @@ impl Control {
                 tracing::info!(deployment = %deployment.id, service = %deployment.service_id, "starting a deployment");
                 self.store().transition_deployment(deployment.id, next, None, None, Actor::System).await?
             }
-            // Release commands are not supported yet, so nothing stops here.
-            DeploymentStatus::Releasing => {
-                self.store().transition_deployment(deployment.id, DeploymentStatus::Starting, None, None, Actor::System).await?
-            }
             _ => deployment,
         };
 
@@ -246,6 +243,16 @@ impl Control {
         }
         let command = match deployment.status {
             DeploymentStatus::Preparing => self.prepare_command(&deployment).await?,
+            DeploymentStatus::Releasing => match self.release_command(&deployment).await? {
+                Some(command) => command,
+                // Its settings have no release command (only from before there were any).
+                None => {
+                    let starting = DeploymentStatus::Starting;
+                    let deployment =
+                        self.store().transition_deployment(deployment.id, starting, None, None, Actor::System).await?;
+                    self.start_command(&deployment).await?
+                }
+            },
             DeploymentStatus::Starting | DeploymentStatus::Verifying => self.start_command(&deployment).await?,
             DeploymentStatus::Draining if server.revoked_at.is_some() => {
                 // Its containers cannot be stopped any more; it no longer serves anything.
@@ -304,6 +311,7 @@ impl Control {
         let timings = self.runner().timings;
         Ok(match deployment.status {
             DeploymentStatus::Preparing => timings.prepare_timeout,
+            DeploymentStatus::Releasing => settings(deployment)?.release_timeout() + timings.start_margin,
             _ => settings(deployment)?.health_check().longest_run() + timings.start_margin,
         })
     }
@@ -330,7 +338,7 @@ impl Control {
         let Some((id, step)) = parse_command_id(&progress.command_id) else {
             return;
         };
-        if matches!(step, Step::Prepare | Step::Start) {
+        if matches!(step, Step::Prepare | Step::Release | Step::Start) {
             self.log_progress(server, id, &progress).await;
         }
         if step != Step::Start || progress.phase != "verifying" {
@@ -392,9 +400,26 @@ impl Control {
                     },
                 };
                 self.store().record_build(id, commit, Some(prepared.image), snapshot).await?;
+                // The settings as the build left them: its `spinikus.json` may name a release command.
+                let built = self.store().get_deployment(id).await?;
+                let next = match settings(&built)?.release {
+                    Some(_) => DeploymentStatus::Releasing,
+                    None => DeploymentStatus::Starting,
+                };
+                let next = self.store().transition_deployment(id, next, None, None, actor).await?;
+                // Go on right away rather than on the next pass.
+                self.advance(&mut sent, next, &mut HashSet::new()).await?;
+            }
+            (Step::Release, Some(Outcome::Succeeded(_)), DeploymentStatus::Releasing) => {
                 let starting = self.store().transition_deployment(id, DeploymentStatus::Starting, None, None, actor).await?;
-                // Start right away rather than on the next pass.
                 self.advance(&mut sent, starting, &mut HashSet::new()).await?;
+            }
+            (Step::Release, Some(Outcome::Failed(failed)), DeploymentStatus::Releasing) => {
+                let reason = match failed.reason() {
+                    FailureReason::Timeout => EndReason::Timeout,
+                    _ => EndReason::ReleaseFailed,
+                };
+                self.fail(&deployment, reason, &failed.message, actor).await?;
             }
             (Step::Prepare, Some(Outcome::Failed(failed)), DeploymentStatus::Preparing) => {
                 let reason = match failed.reason() {

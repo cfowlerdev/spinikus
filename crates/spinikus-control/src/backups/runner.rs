@@ -7,7 +7,9 @@
 //! agent stays away too long), a running one is sent again while unanswered, and fails after
 //! `run_timeout`. Command IDs are `<backup ID>/backup` and `<restore ID>/restore`, so the
 //! agent answers a repeat with the result it already has. A result only counts from the
-//! server the run started on. A restore waits for its safety backup, and fails if it fails.
+//! server the run started on. A restore waits for its safety backup, and fails if it fails,
+//! and for the database's deployment in progress when it has none live, such as a new
+//! database's first, failing if that deployment fails.
 //!
 //! A schedule that missed runs while the control plane was down makes one backup, not one
 //! per missed run.
@@ -21,6 +23,7 @@ use std::{
 use jiff::Timestamp;
 use spinikus_core::{
     backup::{Backup, BackupStatus, Restore},
+    deployment::DeploymentStatus,
     id::{BackupId, RestoreId, ServerId, ServiceId},
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, command_result::Outcome, control_message};
@@ -286,6 +289,27 @@ impl Control {
                 // Only finished backups can be deleted.
                 Err(StoreError::NotFound { .. }) => {}
                 Err(error) => return Err(error.into()),
+            }
+        }
+        // A database with nothing live yet, such as a new one restored into, is waited for
+        // while its deployment runs, and counts as waiting from when it went live.
+        if restore.status == BackupStatus::Queued {
+            match self.store().live_deployment(restore.service_id).await? {
+                Some(live) => waiting_since = waiting_since.max(live.updated_at),
+                None => {
+                    let newest = self.store().list_deployments(restore.service_id, None, 1).await?;
+                    match newest.first() {
+                        Some(deployment) if deployment.status.is_in_progress() => return Ok(()),
+                        Some(deployment)
+                            if matches!(deployment.status, DeploymentStatus::Failed | DeploymentStatus::Canceled) =>
+                        {
+                            let problem = format!("the database's deployment {} ended as {}", deployment.id, deployment.status);
+                            return self.fail_restore(restore, &problem).await;
+                        }
+                        // Left to `locate_database`, which explains it.
+                        _ => {}
+                    }
+                }
             }
         }
         let run = Run {

@@ -2,11 +2,11 @@
 //! `runtime` in `spinikus.json`, so the file can later set the same fields.
 //!
 //! ```json
-//! { "runtime": { "port": 3000, "healthcheck": { "path": "/healthz", "interval": "10s" }, "shutdown_timeout": "30s" } }
+//! { "runtime": { "port": 3000, "release": "npm run migrate", "healthcheck": { "path": "/healthz", "interval": "10s" }, "shutdown_timeout": "30s" } }
 //! ```
 //!
-//! Unknown fields are rejected, so a setting Spinikus cannot apply yet (such as `release`)
-//! fails loudly instead of being ignored.
+//! Unknown fields are rejected, so a setting Spinikus cannot apply fails loudly instead of
+//! being ignored.
 
 use std::time::Duration;
 
@@ -17,8 +17,11 @@ use crate::service::ServiceConfig;
 /// The longest duration any setting accepts.
 pub const MAX_SETTING_DURATION: Duration = Duration::from_secs(60 * 60);
 
-/// The longest start command allowed.
+/// The longest start or release command allowed.
 pub const MAX_START_LEN: usize = 4096;
+
+/// How long a release command may run when `release_timeout` is unset.
+pub const DEFAULT_RELEASE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// How long a container gets to stop when `shutdown_timeout` is unset.
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -59,6 +62,15 @@ pub struct RuntimeSettings {
     /// it can use the container's environment (`"exec redis-server --requirepass \"$PASSWORD\""`).
     /// The image's command if unset.
     pub start: Option<String>,
+    /// A command run once per deployment, after the build and before the new containers
+    /// start, such as database migrations: in a one-off container from the deployment's
+    /// image, through `/bin/sh -c`, with the runtime variables and on the environment's
+    /// network, but without volumes. If it fails, the deployment fails and the previous one
+    /// stays live. Rollbacks skip it.
+    pub release: Option<String>,
+    /// How long the release command may run, [`DEFAULT_RELEASE_TIMEOUT`] by default.
+    #[serde(default, deserialize_with = "duration")]
+    pub release_timeout: Option<Duration>,
     pub healthcheck: Option<HealthCheckSettings>,
     /// How long a replaced container gets to finish in-flight requests before it is killed.
     #[serde(default, deserialize_with = "duration")]
@@ -99,10 +111,16 @@ impl RuntimeSettings {
         if self.port == Some(0) {
             return Err(RuntimeSettingsError("port must be between 1 and 65535".to_string()));
         }
-        if let Some(start) = &self.start
-            && (start.trim().is_empty() || start.len() > MAX_START_LEN || start.contains('\0'))
-        {
-            return Err(RuntimeSettingsError("start must be a command of at most 4096 characters, without NUL".to_string()));
+        for (field, command) in [("start", &self.start), ("release", &self.release)] {
+            if let Some(command) = command
+                && (command.trim().is_empty() || command.len() > MAX_START_LEN || command.contains('\0'))
+            {
+                let problem = format!("{field} must be a command of at most 4096 characters, without NUL");
+                return Err(RuntimeSettingsError(problem));
+            }
+        }
+        if self.release_timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(RuntimeSettingsError("release_timeout must be longer than zero".to_string()));
         }
         let Some(check) = &self.healthcheck else {
             return Ok(());
@@ -140,6 +158,10 @@ impl RuntimeSettings {
             Some(start) => vec!["/bin/sh".to_string(), "-c".to_string(), start.clone()],
             None => Vec::new(),
         }
+    }
+
+    pub fn release_timeout(&self) -> Duration {
+        self.release_timeout.unwrap_or(DEFAULT_RELEASE_TIMEOUT)
     }
 
     pub fn shutdown_timeout(&self) -> Duration {
@@ -201,6 +223,11 @@ mod tests {
 
         assert_eq!(settings.command(), ["/bin/sh", "-c", "exec node server.js"]);
         assert!(RuntimeSettings::default().command().is_empty());
+        let release =
+            RuntimeSettings::from_config(&config(json!({ "release": "npm run migrate", "release_timeout": "2m" }))).unwrap();
+        assert_eq!(release.release.as_deref(), Some("npm run migrate"));
+        assert_eq!(release.release_timeout(), Duration::from_secs(120));
+        assert_eq!(settings.release_timeout(), DEFAULT_RELEASE_TIMEOUT);
     }
 
     #[test]
@@ -218,7 +245,9 @@ mod tests {
     fn rejects_what_it_cannot_apply() {
         let problem = |runtime| RuntimeSettings::from_config(&config(runtime)).unwrap_err().to_string();
 
-        assert!(problem(json!({ "release": "npm run migrate" })).contains("unknown field `release`"));
+        assert!(problem(json!({ "cron": [] })).contains("unknown field `cron`"));
+        assert!(problem(json!({ "release": "" })).contains("release must be a command"));
+        assert!(problem(json!({ "release": "x", "release_timeout": "0s" })).contains("longer than zero"));
         assert!(problem(json!({ "port": 70000 })).contains("invalid value"));
         assert!(problem(json!({ "port": 0 })).contains("between 1 and 65535"));
         assert!(problem(json!({ "port": 80, "shutdown_timeout": "soon" })).contains("invalid duration `soon`"));

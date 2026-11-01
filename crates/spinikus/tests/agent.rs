@@ -834,8 +834,14 @@ async fn databases_are_reachable_by_name_and_keep_their_data() {
     let present =
         |image: &str| std::process::Command::new("docker").args(["image", "inspect", image]).output().unwrap().status.success();
     let pulled = ["postgres:18", "redis:8"].into_iter().filter(|image| !present(image)).collect();
-    let database =
-        |name: &str, engine| NewDatabase { name: name.to_string(), slug: None, engine, version: None, server_id: Some(server) };
+    let database = |name: &str, engine| NewDatabase {
+        name: name.to_string(),
+        slug: None,
+        engine: Some(engine),
+        version: None,
+        server_id: Some(server),
+        from_backup: None,
+    };
     let postgres = control.create_database(admin, environment, database("Postgres", Engine::Postgres)).await.unwrap();
     let redis = control.create_database(admin, environment, database("Redis", Engine::Redis)).await.unwrap();
     let mut cleanup = DatabaseCleanup { services: Vec::new(), volumes: Vec::new(), network: network.clone(), pulled };
@@ -973,9 +979,10 @@ async fn backs_up_and_restores_a_database_through_s3() {
     let new = NewDatabase {
         name: "Postgres".to_string(),
         slug: None,
-        engine: Engine::Postgres,
+        engine: Some(Engine::Postgres),
         version: None,
         server_id: Some(server),
+        from_backup: None,
     };
     let postgres = control.create_database(admin, environment, new).await.unwrap();
     let volumes = control.store().list_volumes(postgres.service.id).await.unwrap();
@@ -1103,8 +1110,14 @@ async fn backs_up_and_restores_redis_through_s3() {
     let present =
         |image: &str| std::process::Command::new("docker").args(["image", "inspect", image]).output().unwrap().status.success();
     let pulled = ["redis:8"].into_iter().filter(|image| !present(image)).collect();
-    let new =
-        NewDatabase { name: "Redis".to_string(), slug: None, engine: Engine::Redis, version: None, server_id: Some(server) };
+    let new = NewDatabase {
+        name: "Redis".to_string(),
+        slug: None,
+        engine: Some(Engine::Redis),
+        version: None,
+        server_id: Some(server),
+        from_backup: None,
+    };
     let redis = control.create_database(admin, environment, new).await.unwrap();
     let volumes = control.store().list_volumes(redis.service.id).await.unwrap();
     let _cleanup = DatabaseCleanup {

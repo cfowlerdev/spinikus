@@ -22,8 +22,9 @@ use bollard::{
     },
     query_parameters::{
         BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptionsBuilder, CreateImageOptionsBuilder, EventsOptionsBuilder,
-        ListContainersOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder,
-        RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
+        ListContainersOptionsBuilder, ListNetworksOptionsBuilder, LogsOptionsBuilder, PruneBuildOptionsBuilder,
+        RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
+        WaitContainerOptionsBuilder,
     },
 };
 use jiff::Timestamp;
@@ -33,7 +34,7 @@ use tokio_stream::StreamExt;
 
 use super::{
     BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, ExecInput, ExecOutput, ExecStream, LogLine,
-    LogLines, LogOptions, Network, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
+    LogLines, LogOptions, Network, ONE_OFF_LABEL, OneOffExit, OneOffSpec, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
 };
 
 /// Aborts a task when dropped, such as stdin's writer once the command's output ends.
@@ -62,6 +63,9 @@ const REPORTED_ACTIONS: [&str; 12] =
 #[derive(Clone, Default)]
 pub struct DockerRuntime {
     docker: Arc<Mutex<Option<Docker>>>,
+    /// Held to read while a container is created on a network it may have just created, and
+    /// to write while unused networks are removed, so none goes in between.
+    networks: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl DockerRuntime {
@@ -387,6 +391,7 @@ impl ContainerRuntime for DockerRuntime {
             network_mode: spec.network.as_ref().map(|network| network.name.clone()),
             ..Default::default()
         };
+        let _networks = self.networks.read().await;
         if let Some(network) = &spec.network {
             self.ensure_network(network).await?;
         }
@@ -436,6 +441,117 @@ impl ContainerRuntime for DockerRuntime {
             Err(error) => return Err(error),
         };
         Ok(published(&inspected))
+    }
+
+    async fn run_once(&self, spec: &OneOffSpec, output: &(dyn Fn(LogLine) + Send + Sync)) -> Result<OneOffExit, RuntimeError> {
+        self.remove_one_off(&spec.name).await?;
+        let networks = self.networks.read().await;
+        if let Some(network) = &spec.network {
+            self.ensure_network(network).await?;
+        }
+        let labels = HashMap::from([
+            (SERVICE_LABEL.to_string(), spec.service_id.to_string()),
+            (ONE_OFF_LABEL.to_string(), spec.deployment_id.to_string()),
+        ]);
+        let networking_config = spec.network.as_ref().map(|network| NetworkingConfig {
+            endpoints_config: Some(HashMap::from([(network.name.clone(), EndpointSettings::default())])),
+        });
+        let body = ContainerCreateBody {
+            image: Some(spec.image.clone()),
+            cmd: Some(spec.command.clone()),
+            env: Some(spec.env.iter().map(|(name, value)| format!("{name}={value}")).collect()),
+            labels: Some(labels),
+            host_config: Some(HostConfig {
+                network_mode: spec.network.as_ref().map(|network| network.name.clone()),
+                ..Default::default()
+            }),
+            networking_config,
+            ..Default::default()
+        };
+        let options = CreateContainerOptionsBuilder::new().name(&spec.name).build();
+        let docker = self.client()?;
+        let created = docker.create_container(Some(options), body).await.map_err(|error| match error {
+            Error::DockerResponseServerError { status_code: 404, message } => RuntimeError::Failed(message),
+            error => runtime_error(error),
+        })?;
+        drop(networks);
+        let id = created.id;
+        let ran = async {
+            docker.start_container(&id, None).await.map_err(runtime_error)?;
+            // Long requests: the log until the container stops, and the wait for its exit.
+            let long = self.waiting(spec.timeout)?;
+            let query = LogsOptionsBuilder::new().follow(true).stdout(true).stderr(true).timestamps(true).build();
+            let mut logs = long.logs(&id, Some(query));
+            while let Some(frame) = logs.next().await {
+                match frame {
+                    Ok(LogOutput::StdErr { message }) => log_lines(&message, true).into_iter().for_each(output),
+                    Ok(LogOutput::StdOut { message } | LogOutput::Console { message }) => {
+                        log_lines(&message, false).into_iter().for_each(output)
+                    }
+                    Ok(LogOutput::StdIn { .. }) => {}
+                    Err(error) => return Err(runtime_error(error)),
+                }
+            }
+            let options = WaitContainerOptionsBuilder::new().condition("not-running").build();
+            match long.wait_container(&id, Some(options)).next().await {
+                Some(Ok(response)) => Ok(response.status_code),
+                Some(Err(Error::DockerContainerWaitError { code, .. })) => Ok(code),
+                Some(Err(error)) => Err(runtime_error(error)),
+                None => Err(RuntimeError::Failed("Docker did not say how the container exited".to_string())),
+            }
+        };
+        let exit = match tokio::time::timeout(spec.timeout, ran).await {
+            Ok(Ok(code)) => Ok(OneOffExit::Exited(code)),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Ok(OneOffExit::TimedOut),
+        };
+        // Killed if still running.
+        let removed = self.remove_one_off(&spec.name).await;
+        let exit = exit?;
+        removed?;
+        Ok(exit)
+    }
+
+    async fn remove_one_off(&self, name: &str) -> Result<(), RuntimeError> {
+        let options = RemoveContainerOptionsBuilder::new().force(true).v(true).build();
+        match self.client()?.remove_container(name, Some(options)).await.map_err(runtime_error) {
+            Ok(()) | Err(RuntimeError::NotFound) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn prune_build_cache(&self, unused_for: Duration) -> Result<u64, RuntimeError> {
+        let until = format!("{}s", unused_for.as_secs());
+        let filters = HashMap::from([("until", vec![until.as_str()])]);
+        // `all`: not only dangling records, but anything unused for that long.
+        let options = PruneBuildOptionsBuilder::new().all(true).filters(&filters).build();
+        let pruned = self.waiting(Duration::from_secs(10 * 60))?.prune_build(Some(options)).await.map_err(runtime_error)?;
+        Ok(pruned.space_reclaimed.and_then(|bytes| u64::try_from(bytes).ok()).unwrap_or(0))
+    }
+
+    async fn remove_unused_networks(&self) -> Result<Vec<String>, RuntimeError> {
+        let _networks = self.networks.write().await;
+        let docker = self.client()?;
+        let filters = HashMap::from([("label", vec![NETWORK_LABEL])]);
+        let options = ListNetworksOptionsBuilder::new().filters(&filters).build();
+        let mut removed = Vec::new();
+        for network in docker.list_networks(Some(options)).await.map_err(runtime_error)? {
+            let Some(name) = network.name else { continue };
+            // Stopped containers count: they would not start again without it.
+            let filters = HashMap::from([("network", vec![name.as_str()])]);
+            let options = ListContainersOptionsBuilder::new().all(true).filters(&filters).build();
+            if !docker.list_containers(Some(options)).await.map_err(runtime_error)?.is_empty() {
+                continue;
+            }
+            match docker.remove_network(&name).await.map_err(runtime_error) {
+                Ok(()) => removed.push(name),
+                // Gone already, or joined since.
+                Err(RuntimeError::NotFound) => {}
+                Err(RuntimeError::Failed(problem)) => tracing::debug!(network = name, problem, "kept a network"),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(removed)
     }
 }
 

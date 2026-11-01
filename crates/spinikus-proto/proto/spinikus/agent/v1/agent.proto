@@ -300,13 +300,20 @@ message Variable {
   bool secret = 3;
 }
 
-// Run the release command (such as migrations) once, in a one-off container.
+// Run the release command (such as migrations) once, in a one-off container from the
+// deployment's image, without volumes or a published port. Fails with RELEASE_FAILED if it
+// exits with anything but 0, and TIMEOUT if it runs past `timeout`.
 message RunRelease {
   string deployment_id = 1;
   string image = 2;
+  // Run by `/bin/sh -c`.
   string command = 3;
   repeated Variable variables = 4;
   google.protobuf.Duration timeout = 5;
+  string service_id = 6;
+  // The network to join, as for StartDeployment, so the command reaches the environment's
+  // databases.
+  ServiceNetwork network = 7;
 }
 
 // Start a deployment's containers and verify them; the result reports the health check.

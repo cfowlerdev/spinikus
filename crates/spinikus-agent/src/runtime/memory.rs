@@ -19,7 +19,7 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 use super::{
     BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, ExecInput, ExecOutput, ExecStream, LogLine, LogLines,
-    LogOptions, RuntimeError,
+    LogOptions, OneOffExit, OneOffSpec, RuntimeError,
 };
 
 #[derive(Clone)]
@@ -51,6 +51,14 @@ pub struct MemoryRuntime {
     /// What each command given input read on stdin, in order.
     exec_inputs: std::sync::Arc<Mutex<Vec<Vec<u8>>>>,
     exit_on_start: AtomicBool,
+    /// One-off containers run so far, how the next ones end (with what they write), and the
+    /// names removed with `remove_one_off`.
+    one_offs: Mutex<Vec<OneOffSpec>>,
+    one_off_outcomes: Mutex<VecDeque<(Vec<String>, OneOffExit)>>,
+    removed_one_offs: Mutex<Vec<String>>,
+    /// The networks containers were created on, and the build cache prunes so far.
+    networks: Mutex<std::collections::BTreeSet<String>>,
+    build_cache_prunes: Mutex<Vec<Duration>>,
     next_id: AtomicU64,
     events: broadcast::Sender<Event>,
     available: AtomicBool,
@@ -79,6 +87,11 @@ impl MemoryRuntime {
             execs: Mutex::default(),
             exec_inputs: std::sync::Arc::default(),
             exit_on_start: AtomicBool::new(false),
+            one_offs: Mutex::default(),
+            one_off_outcomes: Mutex::default(),
+            removed_one_offs: Mutex::default(),
+            networks: Mutex::default(),
+            build_cache_prunes: Mutex::default(),
             next_id: AtomicU64::new(1),
             events: broadcast::channel(256).0,
             available: AtomicBool::new(true),
@@ -137,6 +150,33 @@ impl MemoryRuntime {
     /// What the commands given input read on stdin, in order, once they have read it all.
     pub fn exec_inputs(&self) -> Vec<Vec<u8>> {
         lock(&self.exec_inputs).clone()
+    }
+
+    /// How the next one-off container ends, and the lines it writes first; each call queues
+    /// one more. Without one queued, they write nothing and exit with 0.
+    pub fn queue_one_off(&self, lines: &[&str], exit: OneOffExit) {
+        let lines = lines.iter().map(|line| line.to_string()).collect();
+        lock(&self.one_off_outcomes).push_back((lines, exit));
+    }
+
+    /// The one-off containers run so far.
+    pub fn one_offs(&self) -> Vec<OneOffSpec> {
+        lock(&self.one_offs).clone()
+    }
+
+    /// The one-off containers removed by name so far.
+    pub fn removed_one_offs(&self) -> Vec<String> {
+        lock(&self.removed_one_offs).clone()
+    }
+
+    /// The networks that exist: those containers were created on, until removed as unused.
+    pub fn networks(&self) -> Vec<String> {
+        lock(&self.networks).iter().cloned().collect()
+    }
+
+    /// The `unused_for` of each build cache prune so far.
+    pub fn build_cache_prunes(&self) -> Vec<Duration> {
+        lock(&self.build_cache_prunes).clone()
     }
 
     /// Makes builds fail with `message`, or succeed again with `None`.
@@ -347,6 +387,9 @@ impl ContainerRuntime for MemoryRuntime {
             return Err(RuntimeError::Conflict);
         }
         let id = format!("mem-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        if let Some(network) = &spec.network {
+            lock(&self.networks).insert(network.name.clone());
+        }
         specs.insert(id.clone(), spec.clone());
         drop(specs);
         self.put(ObservedInstance {
@@ -377,6 +420,39 @@ impl ContainerRuntime for MemoryRuntime {
         let running = self.get(container_id).is_some_and(|instance| instance.status == InstanceStatus::Running);
         let has_port = self.spec(container_id).is_some_and(|spec| spec.port.is_some());
         Ok((running && has_port).then(|| *lock(&self.endpoint)).flatten())
+    }
+
+    async fn run_once(&self, spec: &OneOffSpec, output: &(dyn Fn(LogLine) + Send + Sync)) -> Result<OneOffExit, RuntimeError> {
+        self.check()?;
+        lock(&self.one_offs).push(spec.clone());
+        let (lines, exit) = lock(&self.one_off_outcomes).pop_front().unwrap_or((Vec::new(), OneOffExit::Exited(0)));
+        for text in lines {
+            output(LogLine { at: Some(Timestamp::now()), stderr: false, text });
+        }
+        Ok(exit)
+    }
+
+    async fn remove_one_off(&self, name: &str) -> Result<(), RuntimeError> {
+        self.check()?;
+        lock(&self.removed_one_offs).push(name.to_string());
+        Ok(())
+    }
+
+    async fn prune_build_cache(&self, unused_for: Duration) -> Result<u64, RuntimeError> {
+        self.check()?;
+        lock(&self.build_cache_prunes).push(unused_for);
+        Ok(0)
+    }
+
+    async fn remove_unused_networks(&self) -> Result<Vec<String>, RuntimeError> {
+        self.check()?;
+        let specs = lock(&self.specs);
+        let used: std::collections::HashSet<&str> =
+            specs.values().filter_map(|spec| spec.network.as_ref()).map(|network| network.name.as_str()).collect();
+        let mut networks = lock(&self.networks);
+        let unused: Vec<String> = networks.iter().filter(|name| !used.contains(name.as_str())).cloned().collect();
+        networks.retain(|name| used.contains(name.as_str()));
+        Ok(unused)
     }
 }
 

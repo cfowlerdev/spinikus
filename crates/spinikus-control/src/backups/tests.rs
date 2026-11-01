@@ -78,8 +78,14 @@ async fn live_database(fixture: &mut Fixture) -> (Service, Deployment) {
 /// A database of `engine`, live in a container named after it.
 async fn live_engine(fixture: &mut Fixture, engine: Engine) -> (Service, Deployment) {
     let control = &fixture.setup.control;
-    let new =
-        NewDatabase { name: engine.to_string(), slug: None, engine, version: None, server_id: Some(fixture.setup.server.id) };
+    let new = NewDatabase {
+        name: engine.to_string(),
+        slug: None,
+        engine: Some(engine),
+        version: None,
+        server_id: Some(fixture.setup.server.id),
+        from_backup: None,
+    };
     let created = control.create_database(&fixture.setup.admin, fixture.setup.service.environment_id, new).await.unwrap();
     for step in ["prepare", "start"] {
         control.advance_deployments().await;
@@ -442,4 +448,80 @@ async fn redis_restores_by_restarting_and_waiting_until_it_answers() {
     assert_eq!(command.object_key, backup.object_key);
     assert!(command.object_key.ends_with(".rdb"));
     assert_eq!((command.command, command.restart, command.ready_command), (plan.command, true, plan.ready_command));
+}
+
+#[tokio::test]
+async fn backups_restore_into_a_new_database_once_it_runs() {
+    let mut fixture = fixture(BackupTimings::default()).await;
+    let (database, _) = live_database(&mut fixture).await;
+    let (control, admin, server) = (&fixture.setup.control, &fixture.setup.admin, fixture.setup.server.id);
+    let developer = user(control, "ada@example.com", false).await;
+    grant(control, &developer, MembershipScope::Environment(database.environment_id), Role::Developer).await;
+    let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
+    let backup = backed_up(&mut fixture, database.id, destination.id).await;
+    let (control, admin) = (&fixture.setup.control, &fixture.setup.admin);
+    let copy = |name: &str, engine: Option<Engine>, version: Option<&str>| NewDatabase {
+        name: name.to_string(),
+        slug: None,
+        engine,
+        version: version.map(str::to_string),
+        server_id: Some(server),
+        from_backup: Some(backup.id),
+    };
+    let environment = database.environment_id;
+
+    let by_developer = control.create_database(&developer, environment, copy("Copy", None, None)).await;
+    let older = control.create_database(admin, environment, copy("Copy", None, Some("17"))).await;
+    let other_engine = control.create_database(admin, environment, copy("Copy", Some(Engine::Redis), None)).await;
+    let created = control.create_database(admin, environment, copy("Copy", None, None)).await.unwrap();
+    control.advance_backups().await;
+    let before_it_runs = kinds(&commands(&mut fixture.agent));
+
+    assert!(matches!(by_developer, Err(ControlError::Forbidden)), "{by_developer:?}");
+    assert!(matches!(older, Err(ControlError::Invalid { field: "version", .. })), "{older:?}");
+    assert!(matches!(other_engine, Err(ControlError::Invalid { field: "engine", .. })), "{other_engine:?}");
+    assert_eq!(created.service.config, database.config, "the same engine and version");
+    let restore = created.restore.clone().unwrap();
+    assert_eq!((restore.service_id, restore.backup_id, restore.safety_backup_id), (created.service.id, backup.id, None));
+    assert!(before_it_runs.is_empty(), "{before_it_runs:?}");
+
+    // Once it is live, the restore goes to its container.
+    for step in ["prepare", "start"] {
+        control.advance_deployments().await;
+        let command = commands(&mut fixture.agent).into_iter().find(|command| command.command_id.ends_with(step)).unwrap();
+        let prepared =
+            (step == "prepare").then(|| pb::PreparedImage { image: "postgres@sha256:18".to_string(), ..Default::default() });
+        let outcome = Outcome::Succeeded(pb::CommandSucceeded { prepared, backup: None });
+        control.deployment_result(server, result(&command.command_id, outcome)).await;
+    }
+    let container = ObservedInstance {
+        service_id: created.service.id,
+        deployment_id: created.deployment.id,
+        container_id: "copy-container".to_string(),
+        status: InstanceStatus::Running,
+        health: InstanceHealth::None,
+        restart_count: 0,
+        started_at: None,
+    };
+    control.store().upsert_instance(server, container).await.unwrap();
+    control.advance_backups().await;
+    let Some(Kind::RestoreDatabase(command)) = commands(&mut fixture.agent).into_iter().find_map(|command| match command.kind {
+        Some(Kind::RestoreDatabase(_)) => command.kind,
+        _ => None,
+    }) else {
+        panic!("no restore sent");
+    };
+    assert_eq!((command.container_id.as_str(), command.object_key.as_str()), ("copy-container", backup.object_key.as_str()));
+
+    // A new database whose deployment fails gets no restore.
+    let failing = control.create_database(admin, environment, copy("Broken", None, None)).await.unwrap();
+    control.advance_deployments().await;
+    let prepare = commands(&mut fixture.agent).into_iter().find(|command| command.command_id.ends_with("prepare")).unwrap();
+    let failure = pb::CommandFailed { reason: pb::FailureReason::BuildFailed.into(), message: "pull failed".to_string() };
+    control.deployment_result(server, result(&prepare.command_id, Outcome::Failed(failure))).await;
+    control.advance_backups().await;
+    let failed = control.get_restore(admin, failing.restore.unwrap().id).await.unwrap();
+    assert_eq!(failed.status, BackupStatus::Failed);
+    let error = failed.error.unwrap();
+    assert!(error.starts_with("the database's deployment") && error.ends_with("ended as failed"), "{error}");
 }

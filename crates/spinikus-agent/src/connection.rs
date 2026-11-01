@@ -80,7 +80,7 @@ pub async fn run(files: &AgentFiles, options: RunOptions, shutdown: impl Future<
             let _ = proxy_stopped.wait_for(|stopped| *stopped).await;
         }
     };
-    let mut serving = Vec::new();
+    let mut serving = vec![tokio::spawn(crate::housekeeping::run(runtime.clone(), stopped()))];
     let mut served = None;
     if let Some(ProxyListeners { http, https }) = proxy {
         let https_port = https.as_ref().and_then(|listener| listener.local_addr().ok()).map(|address| address.port());

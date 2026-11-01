@@ -12,7 +12,7 @@
 //! }
 //! ```
 //!
-//! Fields Spinikus cannot apply yet (`env`, `cron`, `apps`, and `release` in `runtime`) are
+//! Fields Spinikus cannot apply yet (`env`, `cron` and `apps`) are
 //! rejected, so a deployment fails loudly instead of ignoring them.
 
 use serde::Deserialize;
@@ -170,7 +170,7 @@ mod tests {
         let problem = |text: &str| AppFile::parse(text).unwrap_err().to_string();
 
         assert!(problem(r#"{ "cron": [] }"#).contains("unknown field `cron`"), "{}", problem(r#"{ "cron": [] }"#));
-        assert!(problem(r#"{ "runtime": { "release": "x" } }"#).contains("runtime: unknown field `release`"));
+        assert!(problem(r#"{ "runtime": { "cron": "x" } }"#).contains("runtime: unknown field `cron`"));
         assert!(problem(r#"{ "build": { "strategy": "compose" } }"#).contains("build: the `compose` build strategy"));
         assert!(problem(r#"{ "build": 3 }"#).starts_with("spinikus.json: invalid type"));
         assert!(problem("{ /* open").contains("not closed"));

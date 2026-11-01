@@ -263,7 +263,7 @@ mod tests {
         let service = control.create_service(&admin, production.id, placed).await.unwrap();
         let on_revoked = NewService { server_id: Some(revoked.id), ..new("Worker") };
         let on_revoked = control.create_service(&admin, production.id, on_revoked).await;
-        let unknown = NewService { config: runtime(json!({ "release": "migrate" })), ..new("Worker") };
+        let unknown = NewService { config: runtime(json!({ "cron": "migrate" })), ..new("Worker") };
         let unknown = control.create_service(&admin, production.id, unknown).await;
         let moved =
             ServiceChanges { server_id: Some(None), config: Some(runtime(json!({ "port": 3000 }))), ..Default::default() };

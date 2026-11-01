@@ -23,6 +23,8 @@ pub fn network_name(environment: EnvironmentId) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
     Prepare,
+    /// Runs the release command, between `Prepare` and `Start`.
+    Release,
     Start,
     Stop,
     /// A second stop, for what a start finished after the deployment was canceled: the
@@ -36,6 +38,7 @@ impl Step {
     fn as_str(self) -> &'static str {
         match self {
             Self::Prepare => "prepare",
+            Self::Release => "release",
             Self::Start => "start",
             Self::Stop => "stop",
             Self::Cleanup => "cleanup",
@@ -53,6 +56,7 @@ pub(crate) fn parse_command_id(id: &str) -> Option<(DeploymentId, Step)> {
     let (deployment, step) = id.split_once('/')?;
     let step = match step {
         "prepare" => Step::Prepare,
+        "release" => Step::Release,
         "start" => Step::Start,
         "stop" => Step::Stop,
         "cleanup" => Step::Cleanup,
@@ -70,6 +74,14 @@ fn command(deployment: DeploymentId, step: Step, kind: Kind) -> pb::Command {
 pub(crate) fn settings(deployment: &Deployment) -> Result<RuntimeSettings, ControlError> {
     RuntimeSettings::from_config(&deployment.snapshot.config)
         .map_err(|error| ControlError::internal("reading a deployment's runtime settings", error))
+}
+
+/// The image a prepared deployment runs.
+fn image(deployment: &Deployment) -> Result<String, ControlError> {
+    deployment.image.clone().ok_or_else(|| {
+        let problem = format!("deployment {} has no image", deployment.id);
+        ControlError::internal("running a deployment", std::io::Error::other(problem))
+    })
 }
 
 fn duration(duration: std::time::Duration) -> Option<prost_types::Duration> {
@@ -136,23 +148,47 @@ impl Control {
         Ok(command(deployment.id, Step::Prepare, Kind::PrepareDeployment(prepare)))
     }
 
+    /// The `RunRelease` for a deployment whose settings have a release command, else `None`.
+    pub(crate) async fn release_command(&self, deployment: &Deployment) -> Result<Option<pb::Command>, ControlError> {
+        let settings = settings(deployment)?;
+        let Some(release) = settings.release.clone() else {
+            return Ok(None);
+        };
+        let image = image(deployment)?;
+        let resolved = self.store().deployment_variables(deployment.id).await?;
+        // On the network without the service's name: other services don't reach it.
+        let network = self.network(deployment).await?.map(|network| pb::ServiceNetwork { aliases: Vec::new(), ..network });
+        let run = pb::RunRelease {
+            deployment_id: deployment.id.to_string(),
+            image,
+            command: release,
+            variables: runtime_variables(&resolved, settings.port),
+            timeout: duration(settings.release_timeout()),
+            service_id: deployment.service_id.to_string(),
+            network,
+        };
+        Ok(Some(command(deployment.id, Step::Release, Kind::RunRelease(run))))
+    }
+
+    /// The environment's network, where the service's slug is its name. A deleted service
+    /// keeps the default network.
+    async fn network(&self, deployment: &Deployment) -> Result<Option<pb::ServiceNetwork>, ControlError> {
+        match self.store().get_service(deployment.service_id).await {
+            Ok(service) => Ok(Some(pb::ServiceNetwork {
+                name: network_name(service.environment_id),
+                aliases: vec![service.slug.to_string()],
+            })),
+            Err(StoreError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub(crate) async fn start_command(&self, deployment: &Deployment) -> Result<pb::Command, ControlError> {
         let settings = settings(deployment)?;
-        let image = deployment.image.clone().ok_or_else(|| {
-            let problem = format!("deployment {} has no image", deployment.id);
-            ControlError::internal("starting a deployment", std::io::Error::other(problem))
-        })?;
+        let image = image(deployment)?;
         let resolved = self.store().deployment_variables(deployment.id).await?;
         let volumes = self.store().list_volumes(deployment.service_id).await?;
-        // The environment's network, where the service's slug is its name. A deleted service
-        // keeps the default network.
-        let network = match self.store().get_service(deployment.service_id).await {
-            Ok(service) => {
-                Some(pb::ServiceNetwork { name: network_name(service.environment_id), aliases: vec![service.slug.to_string()] })
-            }
-            Err(StoreError::NotFound { .. }) => None,
-            Err(error) => return Err(error.into()),
-        };
+        let network = self.network(deployment).await?;
         let check = settings.health_check();
         let strategy = match deployment.strategy {
             DeploymentStrategy::BlueGreen => pb::DeploymentStrategy::BlueGreen,
@@ -208,7 +244,7 @@ mod tests {
     fn command_ids_name_the_deployment_and_step() {
         let deployment = DeploymentId::new();
 
-        for step in [Step::Prepare, Step::Start, Step::Stop, Step::Cleanup, Step::Remove] {
+        for step in [Step::Prepare, Step::Release, Step::Start, Step::Stop, Step::Cleanup, Step::Remove] {
             assert_eq!(parse_command_id(&command_id(deployment, step)), Some((deployment, step)));
         }
         assert_eq!(parse_command_id(&format!("{deployment}/build")), None);

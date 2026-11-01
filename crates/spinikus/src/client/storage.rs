@@ -20,21 +20,37 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub async fn db(session: &Session, command: DbCommand) -> anyhow::Result<()> {
     let (api, out) = (&session.api, &session.out);
     match command {
-        DbCommand::Create { name, engine, version, environment, slug, server_id, detach } => {
+        DbCommand::Create { name, engine, version, from_backup, environment, slug, server_id, detach } => {
             let environment = session.environment(environment.as_deref()).await?;
-            let engine = match engine {
+            let engine = engine.map(|engine| match engine {
                 Engine::Postgres => "postgres",
                 Engine::Redis => "redis",
-            };
-            let body = json!({ "name": name, "slug": slug, "engine": engine, "version": version, "server_id": server_id });
+            });
+            let body = json!({
+                "name": name,
+                "slug": slug,
+                "engine": engine,
+                "version": version,
+                "server_id": server_id,
+                "from_backup": from_backup,
+            });
             let created: Value = api.post(&format!("/environments/{}/databases", environment.id), &body).await?;
             let service: Service = views::read(&created["service"])?;
             let path = format!("{}/{}", session.environment_path(&environment).await?, service.slug);
             out.info(&format!("Created {path} ({}); deploying it", service.id));
             deploy::finish(session, &service, created["deployment"].clone(), detach).await?;
+            if let Some(restore) = created.get("restore").filter(|restore| !detach && !restore.is_null()) {
+                let restore: Restore = views::read(restore)?;
+                out.info(&format!("Restoring the backup into it ({})", restore.id));
+                let finished: Restore = views::read(&wait(session, &format!("/restores/{}", restore.id)).await?)?;
+                if finished.status != "succeeded" {
+                    let problem = finished.error.unwrap_or_default();
+                    return Err(fail(Exit::Failed, format!("restore {} failed: {problem}", finished.id)));
+                }
+            }
             if !out.json() {
-                let reference = match engine {
-                    "redis" => "REDIS_URL",
+                let reference = match created["service"]["config"]["database"]["engine"].as_str() {
+                    Some("redis") => "REDIS_URL",
                     _ => "DATABASE_URL",
                 };
                 out.done(&format!(
