@@ -79,6 +79,9 @@ pub fn page(signed: &Signed, title: &str, crumbs: &[(&str, String)], content: Ma
                         }
                         nav class="flex items-center gap-4 text-sm" {
                             a href="/" class="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { "Projects" }
+                            @if signed.principal.is_instance_admin() {
+                                a href="/settings/storage" class="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { "Settings" }
+                            }
                         }
                         div class="ml-auto flex items-center gap-4 text-sm" {
                             span class="hidden text-zinc-600 sm:inline dark:text-zinc-400" title=(user.email.as_str()) { (user.name) }
@@ -233,6 +236,15 @@ pub fn status_badge(status: DeploymentStatus) -> Markup {
 pub fn alert(message: &str) -> Markup {
     html! {
         div role="alert" class="mb-6 rounded-md bg-red-50 px-4 py-3 text-sm text-red-700 ring-1 ring-red-600/10 ring-inset dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20" {
+            (message)
+        }
+    }
+}
+
+/// A message above a page's content saying something worked, such as a test.
+pub fn notice(message: &str) -> Markup {
+    html! {
+        div role="status" class="mb-6 rounded-md bg-emerald-50 px-4 py-3 text-sm text-emerald-700 ring-1 ring-emerald-600/10 ring-inset dark:bg-emerald-500/10 dark:text-emerald-400 dark:ring-emerald-500/20" {
             (message)
         }
     }

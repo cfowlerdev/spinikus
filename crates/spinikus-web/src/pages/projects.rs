@@ -9,7 +9,7 @@ use super::{Tab, crumbs, environment_tabs, parse_id, project_tabs};
 use crate::{
     auth::Signed,
     error::WebError,
-    layout::{self, BUTTON_PRIMARY, CARD, LINK, environment_badge, service_badge},
+    layout::{self, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, LINK, environment_badge, service_badge},
 };
 
 /// How many services an environment shows; more are on the environment's page.
@@ -63,7 +63,10 @@ pub async fn environment(State(control): State<Control>, signed: Signed, Path(id
     let subtitle = html! { span class="inline-flex items-center gap-2" { span class="font-mono" { (environment.slug) } (environment_badge(environment.kind)) } };
     let role = control.environment_role(&signed.principal, &environment).await?;
     let actions = html! {
-        @if role >= Role::Developer { a href={ "/environments/" (environment.id) "/services/new" } class=(BUTTON_PRIMARY) { "New service" } }
+        @if role >= Role::Developer {
+            a href={ "/environments/" (environment.id) "/databases/new" } class=(BUTTON_SECONDARY) { "New database" }
+            a href={ "/environments/" (environment.id) "/services/new" } class=(BUTTON_PRIMARY) { "New service" }
+        }
     };
     let content = html! {
         (layout::header(&environment.name, Some(subtitle), actions))

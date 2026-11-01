@@ -77,10 +77,12 @@ pub(crate) async fn verify(
             }
             None => return Err(failure(FailureReason::StartFailed, "the container is gone")),
         }
-        let in_start_period = started.elapsed() < check.start_period;
+        // Read once: the start period can end between two reads.
+        let elapsed = started.elapsed();
+        let in_start_period = elapsed < check.start_period;
         let Some(path) = &check.path else {
             if in_start_period {
-                tokio::time::sleep(check.interval.min(check.start_period - started.elapsed())).await;
+                tokio::time::sleep(check.interval.min(check.start_period - elapsed)).await;
                 continue;
             }
             return Ok(());

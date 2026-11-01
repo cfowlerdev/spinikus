@@ -895,3 +895,185 @@ async fn adds_redirects_and_removes_domains() {
     assert!(!cache_page.body.contains("/domains") && cache_page.body.contains("/variables"), "{}", cache_page.body);
     assert!(web.get(&format!("/services/{}/domains", cache.id), Some(&ada)).await.body.contains("Only apps have domains"));
 }
+
+#[tokio::test]
+async fn instance_admins_manage_storage_destinations() {
+    use spinikus_store::StorageDestinationRepository;
+
+    let mut web = Web::new().await;
+    web.control = web.control.clone().with_backup_store(std::sync::Arc::new(object_store::memory::InMemory::new()));
+    web.router = spinikus_web::router(web.control.clone());
+    let (_, _, _, _) = shop_with_team(&web).await;
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+    let page = web.get("/settings/storage", Some(&ada)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains(r#"href="/settings/storage""#), "the header links to the settings");
+    let token = page.csrf();
+    assert_eq!(web.get("/settings/storage", Some(&dev)).await.status, StatusCode::FORBIDDEN);
+    assert!(!web.get("/", Some(&dev)).await.body.contains(r#"href="/settings/storage""#));
+
+    let fields = |name: &str, secret: &str| {
+        form(&[
+            ("_csrf", &token),
+            ("name", name),
+            ("endpoint", ""),
+            ("region", ""),
+            ("bucket", "backups"),
+            ("path_prefix", "shop"),
+            ("access_key_id", "AKIA123"),
+            ("secret_access_key", secret),
+        ])
+    };
+    let refused = web.post("/settings/storage", Some(&ada), &fields("", "s3cr3t-key")).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!refused.body.contains("s3cr3t-key"), "the secret is never sent back");
+    assert_eq!(web.post("/settings/storage", Some(&ada), &fields("Offsite", "s3cr3t-key")).await.status, StatusCode::SEE_OTHER);
+    let admin = web.control.authenticate_session(&ada).await.unwrap();
+    let destination = web.control.list_storage_destinations(&admin).await.unwrap().remove(0);
+    assert_eq!((destination.fields.region.as_str(), destination.fields.path_prefix.as_str()), ("us-east-1", "shop/"));
+    let page = web.get("/settings/storage", Some(&ada)).await;
+    assert!(page.body.contains("Offsite") && page.body.contains("Amazon S3") && !page.body.contains("s3cr3t-key"));
+
+    let tested = web.post(&format!("/settings/storage/{}/test", destination.id), Some(&ada), &format!("_csrf={token}")).await;
+    assert_eq!(tested.status, StatusCode::OK);
+    assert!(tested.body.contains("wrote and deleted a test object"), "{}", tested.body);
+    assert_eq!(tested.header("hx-replace-url"), Some("/settings/storage"));
+
+    // Editing keeps the secret when it is left empty.
+    let edit = format!("/settings/storage/{}", destination.id);
+    let edit_page = web.get(&edit, Some(&ada)).await;
+    assert!(edit_page.body.contains("AKIA123") && !edit_page.body.contains("s3cr3t-key"));
+    let changes = format!("{}&path_style=on&revision={}", fields("Offsite R2", ""), destination.revision);
+    assert_eq!(web.post(&edit, Some(&ada), &changes).await.status, StatusCode::SEE_OTHER);
+    let updated = web.control.get_storage_destination(&admin, destination.id).await.unwrap();
+    assert_eq!((updated.fields.name.as_str(), updated.fields.path_style), ("Offsite R2", true));
+    assert_eq!(web.control.store().storage_destination_secret(destination.id).await.unwrap().expose(), "s3cr3t-key");
+    let stale = web.post(&edit, Some(&ada), &changes).await;
+    assert!(stale.body.contains("Someone changed this"));
+
+    let deleted = web.post(&format!("{edit}/delete"), Some(&ada), &format!("_csrf={token}")).await;
+    assert_eq!(deleted.status, StatusCode::SEE_OTHER);
+    assert!(web.control.list_storage_destinations(&admin).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn creates_databases_and_backs_them_up_and_restores_them() {
+    use spinikus_control::NewStorageDestination;
+    use spinikus_core::{backup::BackupStatus, server::ServerFields};
+    use spinikus_store::{BackupRepository, ServerRepository};
+
+    let web = Web::new().await;
+    let control = &web.control;
+    let (admin, _, production, _) = shop_with_team(&web).await;
+    control.store().get_or_create_embedded_server(ServerFields { name: "this machine".to_string() }).await.unwrap();
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+    let viewer = web.sign_in("viewer%40example.com").await;
+    let environment_page = web.get(&format!("/environments/{}", production.id), Some(&dev)).await;
+    assert!(environment_page.body.contains("New database"));
+    let token = environment_page.csrf();
+
+    // A database, from the newest PostgreSQL by default or a chosen version.
+    let new_page = web.get(&format!("/environments/{}/databases/new", production.id), Some(&dev)).await;
+    assert!(new_page.body.contains(r#"value="postgres:18" selected"#) && new_page.body.contains("Redis 7"), "{}", new_page.body);
+    let databases = format!("/environments/{}/databases", production.id);
+    let unknown = web.post(&databases, Some(&dev), &form(&[("_csrf", &token), ("name", "Main"), ("database", "mysql:8")])).await;
+    assert_eq!(unknown.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let reply =
+        web.post(&databases, Some(&dev), &form(&[("_csrf", &token), ("name", "Main DB"), ("database", "postgres:17")])).await;
+    let service_id = created(&reply, "/services/");
+    let id: spinikus_core::id::ServiceId = service_id.parse().unwrap();
+    let source = control.get_source(&admin, id).await.unwrap();
+    assert_eq!(source.spec, SourceSpec::Image(ImageSource { image: "postgres:17".to_string() }));
+    let service_page = web.get(&format!("/services/{service_id}"), Some(&viewer)).await;
+    assert!(
+        service_page.body.contains("${{ main-db.DATABASE_URL }}") && service_page.body.contains("main-db:5432"),
+        "{}",
+        service_page.body
+    );
+    assert!(
+        service_page.body.contains(&format!(r#"href="/services/{service_id}/backups""#))
+            && !service_page.body.contains("/domains")
+    );
+
+    // Without a storage destination, the page says where to add one.
+    let backups = format!("/services/{service_id}/backups");
+    assert!(web.get(&backups, Some(&ada)).await.body.contains(r#"href="/settings/storage""#));
+    let new = NewStorageDestination {
+        name: "Offsite".to_string(),
+        endpoint: None,
+        region: None,
+        bucket: "backups".to_string(),
+        path_prefix: None,
+        path_style: false,
+        access_key_id: "AKIA".to_string(),
+        secret_access_key: Secret::new("key"),
+    };
+    let destination = control.create_storage_destination(&admin, new).await.unwrap().id.to_string();
+
+    // Backing up now: developers may; the list refreshes itself while it is queued.
+    let dev_page = web.get(&backups, Some(&dev)).await;
+    assert!(dev_page.body.contains("Back up now") && !dev_page.body.contains("Add a schedule"));
+    assert_eq!(
+        web.post(&backups, Some(&dev), &form(&[("_csrf", &token), ("destination_id", &destination)])).await.status,
+        StatusCode::SEE_OTHER
+    );
+    let page = web.get(&backups, Some(&ada)).await;
+    assert!(page.body.contains("queued") && page.body.contains(r#"hx-trigger="every 2s""#), "{}", page.body);
+    let activity = web.get(&format!("{backups}/activity"), Some(&viewer)).await;
+    assert!(activity.body.contains("by hand") && !activity.body.contains("<html"));
+    let viewer_page = web.get(&backups, Some(&viewer)).await;
+    assert!(!viewer_page.body.contains("Back up now") && !viewer_page.body.contains("Restore"));
+
+    // Schedules: admins add, turn off and delete them.
+    let admin_token = page.csrf();
+    let schedules = format!("/services/{service_id}/backup-schedules");
+    let schedule =
+        |cron: &str| form(&[("_csrf", &admin_token), ("destination_id", &destination), ("cron", cron), ("keep_last", "3")]);
+    let refused = web.post(&schedules, Some(&ada), &schedule("every day")).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.body.contains("every day"), "what was typed stays: {}", refused.body);
+    assert_eq!(
+        web.post(&schedules, Some(&dev), &schedule("0 3 * * *").replace(&admin_token, &token)).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(web.post(&schedules, Some(&ada), &schedule("0 3 * * *")).await.status, StatusCode::SEE_OTHER);
+    let made = control.list_backup_schedules(&admin, id).await.unwrap().remove(0);
+    assert!(web.get(&backups, Some(&ada)).await.body.contains("keeps 3"));
+    let off = form(&[("_csrf", &admin_token), ("enabled", "false"), ("revision", &made.revision.to_string())]);
+    assert_eq!(web.post(&format!("/backup-schedules/{}", made.id), Some(&ada), &off).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(control.get_backup_schedule(&admin, made.id).await.unwrap().next_run_at, None);
+    assert!(web.get(&backups, Some(&ada)).await.body.contains("Turn on"));
+    let deleted = web.post(&format!("/backup-schedules/{}/delete", made.id), Some(&ada), &format!("_csrf={admin_token}")).await;
+    assert_eq!(deleted.status, StatusCode::SEE_OTHER);
+
+    // Once it succeeded, an admin can restore it, into a database that runs.
+    let backup = control.list_backups(&admin, id, None, 10).await.unwrap().items.remove(0);
+    let server = control.store().find_embedded_server().await.unwrap().unwrap();
+    control.store().start_backup(backup.id, server.id).await.unwrap();
+    control.store().finish_backup(backup.id, Ok(3 * 1024 * 1024)).await.unwrap();
+    let page = web.get(&backups, Some(&ada)).await;
+    assert!(page.body.contains("succeeded") && page.body.contains("3.0 MB") && !page.body.contains("every 2s"), "{}", page.body);
+    let restore = format!("/backups/{}/restore", backup.id);
+    let not_live = web.post(&restore, Some(&ada), &format!("_csrf={admin_token}")).await;
+    assert_eq!(not_live.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(not_live.body.contains("nothing live"), "{}", not_live.body);
+    let deployment = control.list_deployments(&admin, id, None, 1).await.unwrap().items.remove(0);
+    go_live(control, deployment.id, "postgres@sha256:17").await;
+    let restored = web.post(&restore, Some(&ada), &format!("_csrf={admin_token}")).await;
+    assert_eq!(restored.header("location"), Some(format!("{backups}?restoring=1").as_str()));
+    let page = web.get(&format!("{backups}?restoring=1"), Some(&ada)).await;
+    assert!(page.body.contains("Restore queued") && page.body.contains("waiting for the safety backup"), "{}", page.body);
+    assert_eq!(web.post(&restore, Some(&dev), &format!("_csrf={token}")).await.status, StatusCode::FORBIDDEN);
+
+    // A failed backup can be deleted; one still queued can't.
+    let backups_now = control.list_backups(&admin, id, None, 10).await.unwrap().items;
+    let safety = backups_now.iter().find(|item| item.status == BackupStatus::Queued).unwrap();
+    let refused = web.post(&format!("/backups/{}/delete", safety.id), Some(&ada), &format!("_csrf={admin_token}")).await;
+    assert!(refused.body.contains("has not finished yet"), "{}", refused.body);
+    control.store().finish_backup(safety.id, Err("pg_dump: connection refused".to_string())).await.unwrap();
+    assert!(web.get(&backups, Some(&ada)).await.body.contains("pg_dump: connection refused"));
+    let deleted = web.post(&format!("/backups/{}/delete", safety.id), Some(&ada), &format!("_csrf={admin_token}")).await;
+    assert_eq!(deleted.status, StatusCode::SEE_OTHER);
+}

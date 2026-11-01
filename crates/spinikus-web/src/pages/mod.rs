@@ -1,5 +1,7 @@
 //! Page handlers, by area.
 
+pub mod backups;
+pub mod databases;
 pub mod deployments;
 pub mod domains;
 pub mod manage;
@@ -8,6 +10,7 @@ pub mod projects;
 pub mod service_settings;
 pub mod services;
 pub mod session;
+pub mod storage;
 pub mod variables;
 
 use axum::{
@@ -18,6 +21,7 @@ use maud::Markup;
 
 use spinikus_control::ControlError;
 use spinikus_core::{
+    database::Engine,
     environment::Environment,
     membership::Role,
     project::Project,
@@ -33,6 +37,7 @@ enum Tab {
     Main,
     Variables,
     Domains,
+    Backups,
     Settings,
 }
 
@@ -61,7 +66,7 @@ fn environment_tabs(environment: &Environment, role: Role, current: Tab) -> Mark
     layout::tabs(&tabs)
 }
 
-/// A service's tabs; only apps have domains.
+/// A service's tabs; only apps have domains, and only databases backups.
 fn service_tabs(service: &Service, role: Role, current: Tab) -> Markup {
     let base = format!("/services/{}", service.id);
     let mut tabs = vec![
@@ -70,6 +75,9 @@ fn service_tabs(service: &Service, role: Role, current: Tab) -> Markup {
     ];
     if service.kind == ServiceKind::App {
         tabs.push(("Domains", format!("{base}/domains"), current == Tab::Domains));
+    }
+    if Engine::of(&service.config).is_some() {
+        tabs.push(("Backups", format!("{base}/backups"), current == Tab::Backups));
     }
     if role >= Role::Developer {
         tabs.push(("Settings", format!("{base}/settings"), current == Tab::Settings));

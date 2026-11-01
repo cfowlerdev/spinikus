@@ -10,6 +10,7 @@ use maud::{Markup, html};
 use serde::Deserialize;
 use spinikus_control::{Control, ControlError};
 use spinikus_core::{
+    database::Engine,
     deployment::{Deployment, DeploymentStatus},
     id::{DeploymentId, ServiceId},
     membership::Role,
@@ -144,6 +145,7 @@ async fn service_page(
             }
         }
         (service_tabs(&service, role, Tab::Main))
+        @if let Some(engine) = Engine::of(&service.config) { (super::databases::connection(&service, engine)) }
         section class="mb-8" {
             h2 class="mb-3 font-semibold" { "Running now" }
             (current(live.as_ref()))
