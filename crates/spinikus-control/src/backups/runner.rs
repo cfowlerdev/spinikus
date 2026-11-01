@@ -1,11 +1,13 @@
-//! The backup runner: turns due schedules into queued backups, sends each queued backup to
-//! the agent of the server its database is live on, and applies the schedules' retention.
+//! The backup runner: turns due schedules into queued backups, sends each queued backup or
+//! restore to the agent of the server its database is live on, and applies the schedules'
+//! retention.
 //!
-//! The database is the state, like for deployments: a queued backup is sent when its
+//! The database is the state, like for deployments: a queued run is sent when its
 //! database's agent is connected (and fails when the database has nothing live, or the
 //! agent stays away too long), a running one is sent again while unanswered, and fails after
-//! `run_timeout`. The command ID is `<backup ID>/backup`, so the agent answers a repeat with
-//! the result it already has. A result only counts from the server the backup runs on.
+//! `run_timeout`. Command IDs are `<backup ID>/backup` and `<restore ID>/restore`, so the
+//! agent answers a repeat with the result it already has. A result only counts from the
+//! server the run started on. A restore waits for its safety backup, and fails if it fails.
 //!
 //! A schedule that missed runs while the control plane was down makes one backup, not one
 //! per missed run.
@@ -18,13 +20,13 @@ use std::{
 
 use jiff::Timestamp;
 use spinikus_core::{
-    backup::{Backup, BackupStatus},
-    id::{BackupId, ServerId},
+    backup::{Backup, BackupStatus, Restore},
+    id::{BackupId, RestoreId, ServerId, ServiceId},
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, command_result::Outcome, control_message};
 use spinikus_store::{
-    BackupRepository, BackupScheduleRepository, DeploymentRepository, InstanceRepository, ServerRepository, ServiceRepository,
-    StorageDestinationRepository, StoreError,
+    BackupRepository, BackupScheduleRepository, DeploymentRepository, InstanceRepository, RestoreRepository, ServerRepository,
+    ServiceRepository, StorageDestinationRepository, StoreError,
 };
 use tokio::{
     sync::{Mutex, Notify},
@@ -61,9 +63,9 @@ impl Default for BackupTimings {
 pub(crate) struct Backups {
     timings: BackupTimings,
     wake: Notify,
-    /// When each running backup's command was last sent, and to which server. Held across a
-    /// whole pass or result, so they never interleave.
-    sent: Mutex<HashMap<BackupId, (ServerId, Instant)>>,
+    /// When each running backup's or restore's command was last sent, by command ID, and to
+    /// which server. Held across a whole pass or result, so they never interleave.
+    sent: Mutex<Sent>,
     pub(crate) stores: BackupStores,
     /// Waits count from here at the earliest, so a restarted control plane gives agents time
     /// to reconnect.
@@ -80,29 +82,67 @@ impl Backups {
     }
 }
 
-const STEP: &str = "backup";
+const BACKUP_STEP: &str = "backup";
+const RESTORE_STEP: &str = "restore";
 
-fn command_id(backup: BackupId) -> String {
-    format!("{backup}/{STEP}")
+/// What a command ID names: a backup's or a restore's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunId {
+    Backup(BackupId),
+    Restore(RestoreId),
 }
 
-/// The backup a command ID names, or `None` if it is not a backup's.
-pub(crate) fn parse_command_id(id: &str) -> Option<BackupId> {
-    match id.split_once('/') {
-        Some((backup, STEP)) => backup.parse().ok(),
+impl RunId {
+    fn command_id(self) -> String {
+        match self {
+            Self::Backup(id) => format!("{id}/{BACKUP_STEP}"),
+            Self::Restore(id) => format!("{id}/{RESTORE_STEP}"),
+        }
+    }
+}
+
+/// The backup or restore a command ID names, or `None` if it names neither.
+pub(crate) fn parse_command_id(id: &str) -> Option<RunId> {
+    match id.split_once('/')? {
+        (backup, BACKUP_STEP) => backup.parse().ok().map(RunId::Backup),
+        (restore, RESTORE_STEP) => restore.parse().ok().map(RunId::Restore),
         _ => None,
     }
 }
 
-/// Where a backup can run, or why it can't yet or ever.
-enum Target {
+type Sent = HashMap<String, (ServerId, Instant)>;
+
+/// Where a database runs, or why it can't be reached yet or ever.
+enum Located {
     Ready {
         server: ServerId,
-        command: Box<pb::BackupDatabase>,
+        container_id: String,
     },
     /// It may become ready: the agent is away, or the container not reported yet.
     Waiting(String),
     Never(String),
+}
+
+/// A backup or restore, as far as sending it goes.
+struct Run {
+    id: RunId,
+    status: BackupStatus,
+    /// Since when a queued run has been ready to go, for how long it waits for the agent.
+    waiting_since: Timestamp,
+    started_at: Option<Timestamp>,
+    server_id: Option<ServerId>,
+}
+
+/// What to do with a run on this pass.
+enum Next {
+    /// Send its command; `first` if the run is queued and starts with it.
+    Send {
+        server: ServerId,
+        container_id: String,
+        first: bool,
+    },
+    Fail(String),
+    Wait,
 }
 
 /// How long ago `since` was, zero if in the future.
@@ -111,7 +151,7 @@ fn elapsed(since: Timestamp) -> Duration {
 }
 
 impl Control {
-    /// Runs backups until `shutdown` resolves. One runner per control plane.
+    /// Runs backups and restores until `shutdown` resolves. One runner per control plane.
     pub async fn run_backups(&self, shutdown: impl Future<Output = ()>) {
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
@@ -137,18 +177,28 @@ impl Control {
     pub(crate) async fn advance_backups(&self) {
         let mut sent = self.backups.sent.lock().await;
         self.queue_scheduled_backups().await;
-        let active = match self.store().list_active_backups().await {
-            Ok(active) => active,
-            Err(error) => {
-                tracing::error!(%error, "failed to list the active backups");
+        let (backups, restores) = match (self.store().list_active_backups().await, self.store().list_active_restores().await) {
+            (Ok(backups), Ok(restores)) => (backups, restores),
+            (Err(error), _) | (_, Err(error)) => {
+                tracing::error!(%error, "failed to list the active backups and restores");
                 return;
             }
         };
-        let ids: HashSet<BackupId> = active.iter().map(|backup| backup.id).collect();
-        sent.retain(|id, _| ids.contains(id));
-        for backup in active {
+        let active: HashSet<String> = backups
+            .iter()
+            .map(|backup| RunId::Backup(backup.id).command_id())
+            .chain(restores.iter().map(|restore| RunId::Restore(restore.id).command_id()))
+            .collect();
+        sent.retain(|id, _| active.contains(id));
+        // Backups first, so a restore's safety backup goes out before it.
+        for backup in backups {
             if let Err(error) = self.advance_backup(&mut sent, &backup).await {
                 tracing::error!(backup = %backup.id, %error, "failed to advance a backup");
+            }
+        }
+        for restore in restores {
+            if let Err(error) = self.advance_restore(&mut sent, &restore).await {
+                tracing::error!(restore = %restore.id, %error, "failed to advance a restore");
             }
         }
         drop(sent);
@@ -183,106 +233,196 @@ impl Control {
         }
     }
 
-    async fn advance_backup(
-        &self,
-        sent: &mut HashMap<BackupId, (ServerId, Instant)>,
-        backup: &Backup,
-    ) -> Result<(), ControlError> {
-        let timings = self.backups.timings;
-        let started = self.backups.started_at;
-        match backup.status {
-            BackupStatus::Queued => match self.backup_target(backup).await? {
-                Target::Ready { server, command } => {
-                    if self.send_backup(server, *command).await && self.store().start_backup(backup.id, server).await? {
-                        sent.insert(backup.id, (server, Instant::now()));
-                    }
-                }
-                Target::Waiting(problem) if elapsed(backup.created_at.max(started)) > timings.agent_lost_after => {
-                    self.fail_backup(backup, &problem).await?;
-                }
-                Target::Waiting(_) => {}
-                Target::Never(problem) => self.fail_backup(backup, &problem).await?,
-            },
-            BackupStatus::Running => {
-                let running_since = backup.started_at.unwrap_or(backup.created_at).max(started);
-                if elapsed(running_since) > timings.run_timeout {
-                    let problem = format!("it ran for more than {}s", timings.run_timeout.as_secs());
-                    return self.fail_backup(backup, &problem).await;
-                }
-                if sent.get(&backup.id).is_some_and(|(_, at)| at.elapsed() < timings.resend_after) {
-                    return Ok(());
-                }
-                let Some(server) = backup.server_id else {
-                    return self.fail_backup(backup, "it has no server").await;
+    async fn advance_backup(&self, sent: &mut Sent, backup: &Backup) -> Result<(), ControlError> {
+        let run = Run {
+            id: RunId::Backup(backup.id),
+            status: backup.status,
+            waiting_since: backup.created_at,
+            started_at: backup.started_at,
+            server_id: backup.server_id,
+        };
+        let destination = match self.store().get_storage_destination(backup.destination_id).await {
+            Ok(destination) => Some(destination),
+            Err(StoreError::NotFound { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let located = match &destination {
+            Some(_) => self.locate_database(backup.service_id).await?,
+            None => Located::Never("its storage destination was deleted".to_string()),
+        };
+        match self.next_step(sent, &run, located).await? {
+            Next::Send { server, container_id, first } => {
+                let destination = destination.expect("located only with a destination");
+                let secret = self.store().storage_destination_secret(destination.id).await?;
+                let command = pb::BackupDatabase {
+                    backup_id: backup.id.to_string(),
+                    container_id,
+                    command: backup.engine.dump_command(),
+                    destination: Some(super::storage::proto(&destination.fields, &secret)),
+                    object_key: backup.object_key.clone(),
                 };
-                match self.backup_target(backup).await? {
-                    Target::Ready { server: target, command } if target == server => {
-                        if self.send_backup(server, *command).await {
-                            sent.insert(backup.id, (server, Instant::now()));
-                        }
-                    }
-                    Target::Ready { .. } => self.fail_backup(backup, "its database moved to another server").await?,
-                    Target::Waiting(problem) => {
-                        let seen = self.store().get_server(server).await?.last_seen_at;
-                        let since = seen.map_or(running_since, |seen| seen.max(running_since));
-                        if elapsed(since) > timings.agent_lost_after {
-                            self.fail_backup(backup, &problem).await?;
-                        }
-                    }
-                    Target::Never(problem) => self.fail_backup(backup, &problem).await?,
-                }
+                let started = |server| async move { self.store().start_backup(backup.id, server).await };
+                self.send_run(sent, run.id, server, Kind::BackupDatabase(command), first.then_some(started)).await?;
             }
-            BackupStatus::Succeeded | BackupStatus::Failed => {}
+            Next::Fail(problem) => self.fail_backup(backup, &problem).await?,
+            Next::Wait => {}
         }
         Ok(())
     }
 
-    /// The command for the backup, and the server to send it to.
-    async fn backup_target(&self, backup: &Backup) -> Result<Target, ControlError> {
-        let service = match self.store().get_service(backup.service_id).await {
-            Ok(service) => service,
-            Err(StoreError::NotFound { .. }) => return Ok(Target::Never("its database was deleted".to_string())),
+    async fn advance_restore(&self, sent: &mut Sent, restore: &Restore) -> Result<(), ControlError> {
+        let mut waiting_since = restore.created_at;
+        // The safety backup comes first: wait for it, and give up if it failed.
+        if restore.status == BackupStatus::Queued
+            && let Some(safety) = restore.safety_backup_id
+        {
+            match self.store().get_backup(safety).await {
+                Ok(safety) if safety.status == BackupStatus::Failed => {
+                    let problem = format!("the safety backup failed: {}", safety.error.as_deref().unwrap_or("no reason"));
+                    return self.fail_restore(restore, &problem).await;
+                }
+                Ok(safety) if !safety.status.is_finished() => return Ok(()),
+                Ok(safety) => waiting_since = safety.finished_at.unwrap_or(waiting_since).max(waiting_since),
+                // Only finished backups can be deleted.
+                Err(StoreError::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let run = Run {
+            id: RunId::Restore(restore.id),
+            status: restore.status,
+            waiting_since,
+            started_at: restore.started_at,
+            server_id: restore.server_id,
+        };
+        let backup = match self.store().get_backup(restore.backup_id).await {
+            Ok(backup) => Some(backup),
+            Err(StoreError::NotFound { .. }) => None,
             Err(error) => return Err(error.into()),
         };
-        let Some(deployment) = self.store().live_deployment(service.id).await? else {
-            return Ok(Target::Never("the database has nothing live".to_string()));
+        let command = backup.as_ref().and_then(|backup| backup.engine.restore_command());
+        let located = match (&backup, &command) {
+            (None, _) => Located::Never("the backup was deleted".to_string()),
+            (Some(backup), None) => Located::Never(format!("restoring {} is not supported yet", backup.engine)),
+            (Some(_), Some(_)) => self.locate_database(restore.service_id).await?,
+        };
+        match self.next_step(sent, &run, located).await? {
+            Next::Send { server, container_id, first } => {
+                let (backup, command) = (backup.expect("located with a backup"), command.expect("and a command"));
+                // A deleted destination still reaches the backups it holds.
+                let destination = self.store().get_storage_destination_any(backup.destination_id).await?;
+                let secret = self.store().storage_destination_secret(destination.id).await?;
+                let command = pb::RestoreDatabase {
+                    restore_id: restore.id.to_string(),
+                    container_id,
+                    command,
+                    destination: Some(super::storage::proto(&destination.fields, &secret)),
+                    object_key: backup.object_key,
+                };
+                let started = |server| async move { self.store().start_restore(restore.id, server).await };
+                self.send_run(sent, run.id, server, Kind::RestoreDatabase(command), first.then_some(started)).await?;
+            }
+            Next::Fail(problem) => self.fail_restore(restore, &problem).await?,
+            Next::Wait => {}
+        }
+        Ok(())
+    }
+
+    /// Whether to send a run's command now, fail it, or wait: a queued run goes as soon as
+    /// its database can be reached, and fails if it can't for too long; a running one is sent
+    /// again while unanswered, and fails if it runs too long or its agent stays away.
+    async fn next_step(&self, sent: &Sent, run: &Run, located: Located) -> Result<Next, ControlError> {
+        let timings = self.backups.timings;
+        let started = self.backups.started_at;
+        Ok(match run.status {
+            BackupStatus::Queued => match located {
+                Located::Ready { server, container_id } => Next::Send { server, container_id, first: true },
+                Located::Waiting(problem) if elapsed(run.waiting_since.max(started)) > timings.agent_lost_after => {
+                    Next::Fail(problem)
+                }
+                Located::Waiting(_) => Next::Wait,
+                Located::Never(problem) => Next::Fail(problem),
+            },
+            BackupStatus::Running => {
+                let running_since = run.started_at.unwrap_or(run.waiting_since).max(started);
+                if elapsed(running_since) > timings.run_timeout {
+                    return Ok(Next::Fail(format!("it ran for more than {}s", timings.run_timeout.as_secs())));
+                }
+                if sent.get(&run.id.command_id()).is_some_and(|(_, at)| at.elapsed() < timings.resend_after) {
+                    return Ok(Next::Wait);
+                }
+                let Some(server) = run.server_id else {
+                    return Ok(Next::Fail("it has no server".to_string()));
+                };
+                match located {
+                    Located::Ready { server: target, container_id } if target == server => {
+                        Next::Send { server, container_id, first: false }
+                    }
+                    Located::Ready { .. } => Next::Fail("its database moved to another server".to_string()),
+                    Located::Waiting(problem) => {
+                        let seen = self.store().get_server(server).await?.last_seen_at;
+                        let since = seen.map_or(running_since, |seen| seen.max(running_since));
+                        if elapsed(since) > timings.agent_lost_after { Next::Fail(problem) } else { Next::Wait }
+                    }
+                    Located::Never(problem) => Next::Fail(problem),
+                }
+            }
+            BackupStatus::Succeeded | BackupStatus::Failed => Next::Wait,
+        })
+    }
+
+    /// The server and container of the database's live deployment.
+    async fn locate_database(&self, service_id: ServiceId) -> Result<Located, ControlError> {
+        match self.store().get_service(service_id).await {
+            Ok(_) => {}
+            Err(StoreError::NotFound { .. }) => return Ok(Located::Never("its database was deleted".to_string())),
+            Err(error) => return Err(error.into()),
+        }
+        let Some(deployment) = self.store().live_deployment(service_id).await? else {
+            return Ok(Located::Never("the database has nothing live".to_string()));
         };
         let server = self.store().get_server(deployment.server_id).await?;
         if server.revoked_at.is_some() {
-            return Ok(Target::Never(format!("server `{}` was revoked", server.name)));
+            return Ok(Located::Never(format!("server `{}` was revoked", server.name)));
         }
-        let destination = match self.store().get_storage_destination(backup.destination_id).await {
-            Ok(destination) => destination,
-            Err(StoreError::NotFound { .. }) => return Ok(Target::Never("its storage destination was deleted".to_string())),
-            Err(error) => return Err(error.into()),
-        };
         if !self.agents().is_connected(server.id) {
-            return Ok(Target::Waiting(format!("the agent of server `{}` is not connected", server.name)));
+            return Ok(Located::Waiting(format!("the agent of server `{}` is not connected", server.name)));
         }
         let instances = self.store().list_server_instances(server.id).await?;
         let Some(container) = instances.into_iter().find(|instance| instance.observed.deployment_id == deployment.id) else {
-            return Ok(Target::Waiting("the database's container has not been reported".to_string()));
+            return Ok(Located::Waiting("the database's container has not been reported".to_string()));
         };
-        let secret = self.store().storage_destination_secret(destination.id).await?;
-        let command = pb::BackupDatabase {
-            backup_id: backup.id.to_string(),
-            container_id: container.observed.container_id,
-            command: backup.engine.dump_command(),
-            destination: Some(super::storage::proto(&destination.fields, &secret)),
-            object_key: backup.object_key.clone(),
-        };
-        Ok(Target::Ready { server: server.id, command: Box::new(command) })
+        Ok(Located::Ready { server: server.id, container_id: container.observed.container_id })
     }
 
-    async fn send_backup(&self, server: ServerId, command: pb::BackupDatabase) -> bool {
-        let id = command_id(command.backup_id.parse().expect("made from a backup ID"));
-        let command = pb::Command { command_id: id.clone(), kind: Some(Kind::BackupDatabase(command)) };
+    /// Sends a run's command, then records it as sent; a first send also starts the run with
+    /// `start`, and counts only if the run was still queued.
+    async fn send_run<F, Fut>(
+        &self,
+        sent: &mut Sent,
+        id: RunId,
+        server: ServerId,
+        kind: Kind,
+        start: Option<F>,
+    ) -> Result<(), ControlError>
+    where
+        F: FnOnce(ServerId) -> Fut,
+        Fut: Future<Output = Result<bool, StoreError>>,
+    {
+        let command_id = id.command_id();
+        let command = pb::Command { command_id: command_id.clone(), kind: Some(kind) };
         let message = pb::ControlMessage { message: Some(control_message::Message::Command(command)) };
-        let sent = self.agents().send(server, message).await.is_ok();
-        if sent {
-            tracing::debug!(server = %server, command = id, "sent a backup command");
+        if self.agents().send(server, message).await.is_err() {
+            return Ok(());
         }
-        sent
+        tracing::debug!(server = %server, command = command_id, "sent a command");
+        if let Some(start) = start
+            && !start(server).await?
+        {
+            return Ok(());
+        }
+        sent.insert(command_id, (server, Instant::now()));
+        Ok(())
     }
 
     async fn fail_backup(&self, backup: &Backup, problem: &str) -> Result<(), ControlError> {
@@ -291,36 +431,61 @@ impl Control {
         Ok(())
     }
 
-    /// A backup command's result from an agent.
+    async fn fail_restore(&self, restore: &Restore, problem: &str) -> Result<(), ControlError> {
+        tracing::warn!(restore = %restore.id, problem, "restore failed");
+        self.store().finish_restore(restore.id, Err(problem.to_string())).await?;
+        Ok(())
+    }
+
+    /// A backup or restore command's result from an agent. It only counts from the server
+    /// the run started on.
     pub(crate) async fn backup_result(&self, server: ServerId, result: pb::CommandResult) {
         let Some(id) = parse_command_id(&result.command_id) else {
             return;
         };
         let mut sent = self.backups.sent.lock().await;
-        let backup = match self.store().get_backup(id).await {
-            Ok(backup) => backup,
-            Err(StoreError::NotFound { .. }) => return,
-            Err(error) => {
-                tracing::error!(backup = %id, %error, "failed to apply a backup's result");
+        let ran_on = match id {
+            RunId::Backup(id) => self.store().get_backup(id).await.map(|backup| backup.server_id),
+            RunId::Restore(id) => self.store().get_restore(id).await.map(|restore| restore.server_id),
+        };
+        match ran_on {
+            Ok(ran_on) if ran_on == Some(server) => {}
+            Ok(_) => {
+                tracing::warn!(server = %server, command = result.command_id, "ignored a result from another server");
                 return;
             }
-        };
-        if backup.server_id != Some(server) {
-            tracing::warn!(server = %server, backup = %id, "ignored a result for a backup on another server");
-            return;
+            Err(StoreError::NotFound { .. }) => return,
+            Err(error) => {
+                tracing::error!(command = result.command_id, %error, "failed to apply a result");
+                return;
+            }
         }
-        sent.remove(&id);
+        sent.remove(&result.command_id);
         let outcome = match result.outcome {
-            Some(Outcome::Succeeded(succeeded)) => Ok(succeeded.backup.map_or(0, |backup| backup.size_bytes)),
+            Some(Outcome::Succeeded(succeeded)) => Ok(succeeded),
             Some(Outcome::Failed(failed)) => Err(failed.message),
             None => Err("the agent sent no outcome".to_string()),
         };
-        match &outcome {
-            Ok(size) => tracing::info!(backup = %id, size, "backup succeeded"),
-            Err(problem) => tracing::warn!(backup = %id, problem, "backup failed"),
-        }
-        if let Err(error) = self.store().finish_backup(id, outcome).await {
-            tracing::error!(backup = %id, %error, "failed to record a backup's result");
+        let recorded = match id {
+            RunId::Backup(id) => {
+                let outcome = outcome.map(|succeeded| succeeded.backup.map_or(0, |backup| backup.size_bytes));
+                match &outcome {
+                    Ok(size) => tracing::info!(backup = %id, size, "backup succeeded"),
+                    Err(problem) => tracing::warn!(backup = %id, problem, "backup failed"),
+                }
+                self.store().finish_backup(id, outcome).await
+            }
+            RunId::Restore(id) => {
+                let outcome = outcome.map(|_| ());
+                match &outcome {
+                    Ok(()) => tracing::info!(restore = %id, "restore succeeded"),
+                    Err(problem) => tracing::warn!(restore = %id, problem, "restore failed"),
+                }
+                self.store().finish_restore(id, outcome).await
+            }
+        };
+        if let Err(error) = recorded {
+            tracing::error!(command = result.command_id, %error, "failed to record a result");
         }
         drop(sent);
         self.wake_backups();

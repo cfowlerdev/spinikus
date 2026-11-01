@@ -885,10 +885,15 @@ impl Drop for S3Server {
 
 #[tokio::test]
 #[ignore = "needs a Docker daemon; pulls postgres:18, rustfs/rustfs and amazon/aws-cli"]
-async fn backs_up_a_database_straight_to_s3() {
+async fn backs_up_and_restores_a_database_through_s3() {
     use spinikus_control::{NewDatabase, NewStorageDestination};
-    use spinikus_core::{backup::BackupStatus, database::Engine, id::BackupId};
-    use spinikus_store::VolumeRepository;
+    use spinikus_core::{
+        backup::BackupStatus,
+        database::Engine,
+        id::{BackupId, RestoreId},
+        variable::VariableScope,
+    };
+    use spinikus_store::{VariableRepository, VolumeRepository};
 
     let s3 = S3Server::start().await;
     let control_plane = ControlPlane::start().await;
@@ -944,11 +949,45 @@ async fn backs_up_a_database_straight_to_s3() {
         }
     };
 
+    let restored = |id: RestoreId| async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let restore = control.get_restore(admin, id).await.unwrap();
+            if restore.status.is_finished() {
+                return restore;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the restore did not finish: {restore:?}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    let variables = control.store().list_variables(VariableScope::Service(postgres.service.id)).await.unwrap();
+    let url = variables.into_iter().find(|variable| variable.name.as_str() == "DATABASE_URL").unwrap();
+    let url = control.store().reveal_variable(url.id).await.unwrap().expose().to_string();
+    let sql = |statement: &str| {
+        let command = ["psql", url.as_str(), "--tuples-only", "--no-align", "--command", statement].map(str::to_string);
+        let network = network.clone();
+        async move {
+            let command: Vec<&str> = command.iter().map(String::as_str).collect();
+            run_on_network(&network, "postgres:18", &command, Duration::from_secs(60)).await
+        }
+    };
+    let notes = || sql("SELECT string_agg(body, ',' ORDER BY body) FROM notes;");
+
+    sql("CREATE TABLE notes (body text); INSERT INTO notes VALUES ('before');").await;
     let tested = control.test_storage_destination(admin, destination.id).await;
     let backup = control.create_backup(admin, postgres.service.id, destination.id).await.unwrap();
     let backup = wait_for(backup.id).await;
     let key = format!("s3://backups/{}", backup.object_key);
     let head = s3.aws(&["s3", "cp", &key, "-"]);
+    sql("INSERT INTO notes VALUES ('after');").await;
+    let restore = control.restore_backup(admin, backup.id).await.unwrap();
+    let restore = restored(restore.id).await;
+    let after_restore = notes().await;
+    // The safety backup undoes the restore.
+    let safety = restore.safety_backup_id.unwrap();
+    let undo = control.restore_backup(admin, safety).await.unwrap();
+    let undo = restored(undo.id).await;
+    let after_undo = notes().await;
     control.delete_backup(admin, backup.id).await.unwrap();
     let after_delete = s3.aws(&["s3", "ls", &key]);
     let mut wrong = destination.clone();
@@ -968,6 +1007,10 @@ async fn backs_up_a_database_straight_to_s3() {
     let refused = wait_for(refused.id).await;
 
     assert!(tested.is_ok(), "{tested:?}");
+    assert_eq!(restore.status, BackupStatus::Succeeded, "{restore:?}");
+    assert_eq!(after_restore.trim(), "before");
+    assert_eq!(undo.status, BackupStatus::Succeeded, "{undo:?}");
+    assert_eq!(after_undo.trim(), "after,before");
     assert_eq!(backup.status, BackupStatus::Succeeded, "{backup:?}");
     assert!(backup.object_key.starts_with(&format!("spinikus/{}/", postgres.service.id)));
     // pg_dump's custom format starts with this magic.

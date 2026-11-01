@@ -25,6 +25,7 @@ use crate::{
     backup::{BackupStores, backup_database},
     build::BuildOptions,
     deploy::{prepare_deployment, start_deployment},
+    restore::restore_database,
     runtime::{ContainerRuntime, RuntimeError},
 };
 
@@ -175,6 +176,11 @@ impl Commands {
                 let backups = self.backups.clone();
                 Box::pin(async move { backup_database(&*runtime, &backups, backup, &progress).await })
             }
+            Some(Kind::RestoreDatabase(restore)) => {
+                tracing::info!(command = id, restore = restore.restore_id, "restoring a database");
+                let backups = self.backups.clone();
+                Box::pin(async move { restore_database(&*runtime, &backups, restore, &progress).await })
+            }
             Some(Kind::RestartInstance(restart)) => {
                 tracing::info!(command = id, container = restart.container_id, "restarting a container");
                 Box::pin(async move { restart_instance(&*runtime, restart).await.map(|()| pb::CommandSucceeded::default()) })
@@ -251,6 +257,7 @@ fn name(kind: &Kind) -> &'static str {
         Kind::CancelCommand(_) => "CancelCommand",
         Kind::RemoveDeployment(_) => "RemoveDeployment",
         Kind::BackupDatabase(_) => "BackupDatabase",
+        Kind::RestoreDatabase(_) => "RestoreDatabase",
     }
 }
 

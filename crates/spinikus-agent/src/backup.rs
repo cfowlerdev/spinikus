@@ -18,8 +18,8 @@ use crate::{
 /// How many parts may be uploading at once; the dump waits for one to finish beyond that.
 const UPLOADS_AT_ONCE: usize = 4;
 
-/// How much of the dump's stderr is kept for the failure message.
-const MAX_STDERR: usize = 4096;
+/// How much of a command's stderr is kept for the failure message.
+pub(crate) const MAX_STDERR: usize = 4096;
 
 /// Where backups go: each command's destination, or one store for every backup in tests.
 #[derive(Clone, Default)]
@@ -39,7 +39,7 @@ impl std::fmt::Debug for BackupStores {
 }
 
 impl BackupStores {
-    fn store(&self, destination: &pb::StorageDestination) -> Result<Arc<dyn ObjectStore>, pb::CommandFailed> {
+    pub(crate) fn store(&self, destination: &pb::StorageDestination) -> Result<Arc<dyn ObjectStore>, pb::CommandFailed> {
         match self {
             Self::Destination => s3(destination).map_err(|error| backup_failed(format!("invalid storage destination: {error}"))),
             Self::Fixed(store) => Ok(store.clone()),
@@ -85,7 +85,7 @@ pub(crate) async fn backup_database(
     let upload =
         store.put_multipart(&path).await.map_err(|error| backup_failed(format!("could not start the upload: {error}")))?;
     let mut upload = WriteMultipart::new(upload);
-    let mut output = runtime.exec(&backup.container_id, backup.command);
+    let mut output = runtime.exec(&backup.container_id, backup.command, None);
     let mut size: u64 = 0;
     let mut stderr = Vec::new();
     let outcome = loop {
@@ -98,18 +98,10 @@ pub(crate) async fn backup_database(
                 upload.put(bytes);
             }
             Some(Ok(ExecOutput::Stderr(bytes))) => {
-                let room = MAX_STDERR.saturating_sub(stderr.len());
-                stderr.extend_from_slice(&bytes[..bytes.len().min(room)]);
+                keep_stderr(&mut stderr, &bytes);
             }
             Some(Ok(ExecOutput::Exited(0))) => break Ok(()),
-            Some(Ok(ExecOutput::Exited(code))) => {
-                let stderr = String::from_utf8_lossy(&stderr);
-                let stderr = stderr.trim();
-                break Err(match stderr.is_empty() {
-                    true => format!("the dump exited with {code}"),
-                    false => format!("the dump exited with {code}: {stderr}"),
-                });
-            }
+            Some(Ok(ExecOutput::Exited(code))) => break Err(exited("the dump", code, &stderr)),
             Some(Err(error)) => break Err(format!("the dump failed: {error}")),
             None => break Err("the dump ended without an exit code".to_string()),
         }
@@ -130,6 +122,21 @@ pub(crate) async fn backup_database(
             tracing::warn!(backup = %backup_id, message, "a backup failed");
             Err(backup_failed(message))
         }
+    }
+}
+
+/// Keeps the start of a command's stderr, up to [`MAX_STDERR`].
+pub(crate) fn keep_stderr(kept: &mut Vec<u8>, bytes: &[u8]) {
+    let room = MAX_STDERR.saturating_sub(kept.len());
+    kept.extend_from_slice(&bytes[..bytes.len().min(room)]);
+}
+
+/// Why `what` failed: its exit code, and what it wrote to stderr.
+pub(crate) fn exited(what: &str, code: i64, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    match stderr.trim() {
+        "" => format!("{what} exited with {code}"),
+        stderr => format!("{what} exited with {code}: {stderr}"),
     }
 }
 

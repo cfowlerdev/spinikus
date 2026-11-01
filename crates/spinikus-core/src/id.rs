@@ -105,6 +105,7 @@ define_id!(WebhookId, "whk");
 define_id!(StorageDestinationId, "dst");
 define_id!(BackupScheduleId, "bks");
 define_id!(BackupId, "bkp");
+define_id!(RestoreId, "rst");
 define_id!(
     /// A data key for envelope encryption of secrets.
     DataKeyId,

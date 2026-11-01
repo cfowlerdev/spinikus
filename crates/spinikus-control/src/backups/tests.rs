@@ -308,3 +308,126 @@ fn schedules_take_five_field_cron_expressions_in_utc() {
     assert!(cron("61 * * * *").is_err());
     assert!(cron("* * * *").is_err());
 }
+
+/// What a command list holds, by kind: (command ID, `B`ackup or `R`estore).
+fn kinds(commands: &[pb::Command]) -> Vec<(String, char)> {
+    commands
+        .iter()
+        .filter_map(|command| match &command.kind {
+            Some(Kind::BackupDatabase(_)) => Some((command.command_id.clone(), 'B')),
+            Some(Kind::RestoreDatabase(_)) => Some((command.command_id.clone(), 'R')),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A backup of the database that succeeded, made through the fake agent.
+async fn backed_up(fixture: &mut Fixture, database: ServiceId, destination: StorageDestinationId) -> Backup {
+    let control = &fixture.setup.control;
+    let backup = control.create_backup(&fixture.setup.admin, database, destination).await.unwrap();
+    control.advance_backups().await;
+    let (command_id, _) = backup_commands(&mut fixture.agent).pop().unwrap();
+    control.backup_result(fixture.setup.server.id, result(&command_id, uploaded(42))).await;
+    control.store().get_backup(backup.id).await.unwrap()
+}
+
+fn done() -> Outcome {
+    Outcome::Succeeded(pb::CommandSucceeded::default())
+}
+
+#[tokio::test]
+async fn admins_restore_after_a_safety_backup() {
+    let mut fixture = fixture(BackupTimings::default()).await;
+    let (database, _) = live_database(&mut fixture).await;
+    let (control, admin, server) = (&fixture.setup.control, &fixture.setup.admin, fixture.setup.server.id);
+    let developer = user(control, "ada@example.com", false).await;
+    grant(control, &developer, MembershipScope::Environment(database.environment_id), Role::Developer).await;
+    let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
+    let backup = backed_up(&mut fixture, database.id, destination.id).await;
+    let (control, admin) = (&fixture.setup.control, &fixture.setup.admin);
+    let other = control.create_server(admin, crate::NewServer { name: "db-2".to_string() }).await.unwrap();
+
+    let by_developer = control.restore_backup(&developer, backup.id).await;
+    let restore = control.restore_backup(admin, backup.id).await.unwrap();
+    let twice = control.restore_backup(admin, backup.id).await;
+    control.advance_backups().await;
+    let first_pass = kinds(&commands(&mut fixture.agent));
+    let deleting = control.delete_backup(admin, backup.id).await;
+    let safety = restore.safety_backup_id.unwrap();
+    control.backup_result(server, result(&format!("{safety}/backup"), uploaded(7))).await;
+    control.advance_backups().await;
+    let sent = commands(&mut fixture.agent);
+    let running = control.get_restore(&developer, restore.id).await.unwrap();
+    control.backup_result(other.id, result(&format!("{}/restore", restore.id), done())).await;
+    let still_running = control.get_restore(admin, restore.id).await.unwrap().status;
+    control.backup_result(server, result(&format!("{}/restore", restore.id), done())).await;
+    let restored = control.get_restore(admin, restore.id).await.unwrap();
+    let listed = control.list_restores(&developer, database.id, None, 10).await.unwrap().items;
+
+    assert!(matches!(by_developer, Err(ControlError::Forbidden)), "{by_developer:?}");
+    assert_eq!((restore.status, restore.backup_id), (BackupStatus::Queued, backup.id));
+    assert!(matches!(twice, Err(ControlError::Rejected { .. })), "{twice:?}");
+    assert_eq!(first_pass, [(format!("{safety}/backup"), 'B')], "the safety backup goes first, alone");
+    assert!(matches!(deleting, Err(ControlError::Rejected { .. })), "{deleting:?}");
+    let Some(Kind::RestoreDatabase(command)) = sent.into_iter().next().and_then(|command| command.kind) else {
+        panic!("no restore sent");
+    };
+    assert_eq!(command.container_id, "pg-container");
+    assert_eq!(command.command, Engine::Postgres.restore_command().unwrap());
+    assert_eq!(command.object_key, backup.object_key);
+    assert_eq!(command.destination.unwrap().secret_access_key, "s3cret");
+    assert_eq!((running.status, running.server_id), (BackupStatus::Running, Some(server)));
+    assert_eq!(still_running, BackupStatus::Running);
+    assert_eq!(restored.status, BackupStatus::Succeeded);
+    assert_eq!(listed, [restored]);
+    let safety = control.get_backup(admin, safety).await.unwrap();
+    assert_eq!((safety.status, safety.schedule_id), (BackupStatus::Succeeded, None));
+}
+
+#[tokio::test]
+async fn restores_fail_with_their_safety_backup_and_need_something_to_restore() {
+    let mut fixture = fixture(BackupTimings::default()).await;
+    let (database, deployment) = live_database(&mut fixture).await;
+    let (control, admin, server) = (&fixture.setup.control, &fixture.setup.admin, fixture.setup.server.id);
+    let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
+    let backup = backed_up(&mut fixture, database.id, destination.id).await;
+    let (control, admin) = (&fixture.setup.control, &fixture.setup.admin);
+
+    let restore = control.restore_backup(admin, backup.id).await.unwrap();
+    control.advance_backups().await;
+    let safety = restore.safety_backup_id.unwrap();
+    let failure = pb::CommandFailed { reason: pb::FailureReason::BackupFailed.into(), message: "disk full".to_string() };
+    control.backup_result(server, result(&format!("{safety}/backup"), Outcome::Failed(failure))).await;
+    control.advance_backups().await;
+    let failed = control.get_restore(admin, restore.id).await.unwrap();
+    let restored_anything = kinds(&commands(&mut fixture.agent)).iter().any(|(_, kind)| *kind == 'R');
+
+    let failed_backup = control.get_backup(admin, safety).await.unwrap();
+    let of_a_failed_backup = control.restore_backup(admin, failed_backup.id).await;
+    let draining = DeploymentStatus::Draining;
+    control.store().transition_deployment(deployment.id, draining, None, None, Actor::System).await.unwrap();
+    let nothing_live = control.restore_backup(admin, backup.id).await;
+
+    assert_eq!(failed.status, BackupStatus::Failed);
+    assert_eq!(failed.error.as_deref(), Some("the safety backup failed: disk full"));
+    assert!(!restored_anything);
+    assert!(matches!(of_a_failed_backup, Err(ControlError::Rejected { .. })), "{of_a_failed_backup:?}");
+    assert!(matches!(nothing_live, Err(ControlError::Rejected { .. })), "{nothing_live:?}");
+}
+
+#[tokio::test]
+async fn redis_is_not_restored_yet() {
+    let fixture = fixture(BackupTimings::default()).await;
+    let (control, admin) = (&fixture.setup.control, &fixture.setup.admin);
+    let server_id = Some(fixture.setup.server.id);
+    let new = NewDatabase { name: "Cache".to_string(), slug: None, engine: Engine::Redis, version: None, server_id };
+    let redis = control.create_database(admin, fixture.setup.service.environment_id, new).await.unwrap().service;
+    let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
+    let backup = control.queue_backup(&redis, destination.id, None).await.unwrap();
+    control.store().finish_backup(backup.id, Ok(1)).await.unwrap();
+
+    let refused = control.restore_backup(admin, backup.id).await;
+
+    let Err(ControlError::Rejected { problem, .. }) = refused else { panic!("{refused:?}") };
+    assert_eq!(problem, "restoring redis is not supported yet");
+}

@@ -207,6 +207,8 @@ enum FailureReason {
   FAILURE_REASON_INTERNAL = 7;
   // A database dump or its upload failed.
   FAILURE_REASON_BACKUP_FAILED = 8;
+  // Loading a dump into a database failed, or its download did.
+  FAILURE_REASON_RESTORE_FAILED = 9;
 }
 
 // Acknowledges that the agent applied (and saved) a routes or certificates snapshot.
@@ -256,6 +258,7 @@ message Command {
     CancelCommand cancel_command = 8;
     RemoveDeployment remove_deployment = 9;
     BackupDatabase backup_database = 10;
+    RestoreDatabase restore_database = 11;
   }
 }
 
@@ -378,7 +381,18 @@ message BackupDatabase {
   string object_key = 5;
 }
 
-// An S3-compatible bucket and the credentials to write to it.
+// Download `object_key` from `destination` and feed it to `command` run in the database's
+// container, on stdin. A non-zero exit fails the restore; the command is expected to change
+// nothing then.
+message RestoreDatabase {
+  string restore_id = 1;
+  string container_id = 2;
+  repeated string command = 3;
+  StorageDestination destination = 4;
+  string object_key = 5;
+}
+
+// An S3-compatible bucket and the credentials to reach it.
 message StorageDestination {
   // Empty for AWS.
   string endpoint = 1;

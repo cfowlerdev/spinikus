@@ -28,12 +28,22 @@ use bollard::{
 };
 use jiff::Timestamp;
 use spinikus_core::server::{InstanceHealth, InstanceStatus, ObservedInstance};
+use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 
 use super::{
-    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, ExecOutput, ExecStream, LogLine, LogLines,
-    LogOptions, Network, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
+    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, ExecInput, ExecOutput, ExecStream, LogLine,
+    LogLines, LogOptions, Network, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
 };
+
+/// Aborts a task when dropped, such as stdin's writer once the command's output ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// The label on networks Spinikus creates.
 pub const NETWORK_LABEL: &str = "spinikus.network";
@@ -195,7 +205,7 @@ impl ContainerRuntime for DockerRuntime {
         Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
     }
 
-    fn exec(&self, container_id: &str, command: Vec<String>) -> ExecStream {
+    fn exec(&self, container_id: &str, command: Vec<String>, input: Option<ExecInput>) -> ExecStream {
         let docker = match self.client() {
             Ok(docker) => docker,
             Err(error) => return Box::pin(tokio_stream::once(Err(error))),
@@ -206,17 +216,31 @@ impl ContainerRuntime for DockerRuntime {
             let outcome = async {
                 let config = ExecConfig {
                     cmd: Some(command),
+                    attach_stdin: Some(input.is_some()),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     tty: Some(false),
                     ..Default::default()
                 };
                 let exec = docker.create_exec(&container_id, config).await.map_err(runtime_error)?.id;
-                let StartExecResults::Attached { mut output, .. } =
+                let StartExecResults::Attached { mut output, input: mut stdin } =
                     docker.start_exec(&exec, None).await.map_err(runtime_error)?
                 else {
                     return Err(RuntimeError::Failed("the command started detached".to_string()));
                 };
+                // Written alongside reading the output. Closing our side closes the command's
+                // stdin; a command that exits early makes the writes fail, which is its choice.
+                let writer = input.map(|mut input| {
+                    tokio::spawn(async move {
+                        while let Some(chunk) = input.next().await {
+                            if stdin.write_all(&chunk).await.is_err() {
+                                return;
+                            }
+                        }
+                        let _ = stdin.shutdown().await;
+                    })
+                });
+                let _writer = writer.map(AbortOnDrop);
                 while let Some(output) = output.next().await {
                     let output = match output.map_err(runtime_error)? {
                         LogOutput::StdOut { message } | LogOutput::Console { message } => ExecOutput::Stdout(message),

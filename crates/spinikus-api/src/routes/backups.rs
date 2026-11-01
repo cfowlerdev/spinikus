@@ -1,4 +1,5 @@
-//! Storage destinations, backup schedules and backups. Secret access keys are write-only.
+//! Storage destinations, backup schedules, backups and restores. Secret access keys are
+//! write-only.
 
 use axum::{
     extract::State,
@@ -8,8 +9,8 @@ use axum::{
 use serde::Deserialize;
 use spinikus_control::{BackupScheduleChanges, Control, NewBackupSchedule, NewStorageDestination, StorageDestinationChanges};
 use spinikus_core::{
-    backup::{Backup, BackupSchedule, StorageDestination},
-    id::{BackupId, BackupScheduleId, ServiceId, StorageDestinationId},
+    backup::{Backup, BackupSchedule, Restore, StorageDestination},
+    id::{BackupId, BackupScheduleId, RestoreId, ServiceId, StorageDestinationId},
     secret::Secret,
 };
 
@@ -247,4 +248,34 @@ pub async fn delete(
 ) -> Result<StatusCode, ApiError> {
     control.delete_backup(&principal, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Restores the backup into its database, replacing the data there, after a safety backup
+/// of it. The restore starts `queued`; it runs once the safety backup succeeded.
+pub async fn restore(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(id): Path<BackupId>,
+) -> Result<Response, ApiError> {
+    let restore = control.restore_backup(&principal, id).await?;
+    Ok(located(format!("/api/v1/restores/{}", restore.id), restore))
+}
+
+/// The database's restores, newest first.
+pub async fn list_restores(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+    Query(params): Query<PageParams<RestoreId>>,
+) -> Result<Json<PageBody<Restore>>, ApiError> {
+    let page = control.list_restores(&principal, service_id, params.after, params.limit()).await?;
+    Ok(PageBody::new(page, |restore| restore.id.to_string()))
+}
+
+pub async fn show_restore(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(id): Path<RestoreId>,
+) -> Result<Json<Restore>, ApiError> {
+    Ok(Json(control.get_restore(&principal, id).await?))
 }

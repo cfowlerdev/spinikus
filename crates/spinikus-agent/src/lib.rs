@@ -22,6 +22,7 @@ mod files;
 mod health;
 mod proxy;
 mod report;
+mod restore;
 pub mod runtime;
 mod sessions;
 

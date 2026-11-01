@@ -102,7 +102,8 @@ pub trait BackupRepository: Send + Sync {
     /// Every queued and running backup, oldest first.
     async fn list_active_backups(&self) -> Result<Vec<Backup>, StoreError>;
 
-    /// The schedule's successful backups beyond its newest `keep`, which are not deleted.
+    /// The schedule's successful backups beyond its newest `keep`, which are not deleted and
+    /// not being restored.
     async fn list_backups_beyond(&self, schedule_id: BackupScheduleId, keep: u32) -> Result<Vec<Backup>, StoreError>;
 
     /// Moves a queued backup to running on `server`. `false` if it was not queued.
@@ -647,6 +648,8 @@ impl BackupRepository for SqliteStore {
             "SELECT ",
             backup_columns!(),
             " FROM backups WHERE schedule_id = ? AND status = 'succeeded' AND deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM restores
+                               WHERE restores.backup_id = backups.id AND restores.status IN ('queued', 'running'))
              ORDER BY id DESC LIMIT -1 OFFSET ?"
         ))
         .bind(schedule_id.to_string())

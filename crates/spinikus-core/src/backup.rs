@@ -5,13 +5,16 @@
 //! engine's own tool and uploads the dump straight to the destination, as
 //! `<path prefix><service ID>/<backup ID>.<extension>`. Schedules create backups on a cron
 //! expression and keep the newest few of their own.
+//!
+//! A restore loads a backup back into its database, replacing what is there, after taking
+//! a safety backup of the current data. Only Postgres can be restored so far.
 
 use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::{
     database::Engine,
-    id::{BackupId, BackupScheduleId, ServerId, ServiceId, StorageDestinationId},
+    id::{BackupId, BackupScheduleId, RestoreId, ServerId, ServiceId, StorageDestinationId},
     text::impl_text,
 };
 
@@ -131,6 +134,37 @@ impl BackupStatus {
 
 impl_text!(BackupStatus, "backup status");
 
+/// A restore goes through the same states as a backup.
+pub type RestoreStatus = BackupStatus;
+
+/// One restore of a backup into its database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Restore {
+    pub id: RestoreId,
+    pub service_id: ServiceId,
+    /// The backup being restored.
+    pub backup_id: BackupId,
+    /// The backup of the data the restore replaces, taken first. The restore waits for it,
+    /// and fails if it fails.
+    pub safety_backup_id: Option<BackupId>,
+    pub status: RestoreStatus,
+    /// The server that ran it, once it started.
+    pub server_id: Option<ServerId>,
+    /// Why it failed.
+    pub error: Option<String>,
+    pub created_at: Timestamp,
+    pub started_at: Option<Timestamp>,
+    pub finished_at: Option<Timestamp>,
+}
+
+/// A new restore to record, queued.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewRestore {
+    pub service_id: ServiceId,
+    pub backup_id: BackupId,
+    pub safety_backup_id: Option<BackupId>,
+}
+
 impl Engine {
     /// The command, run in the database's container, that writes a dump to stdout. It runs
     /// with the container's environment, so it uses the database's own credentials.
@@ -142,6 +176,21 @@ impl Engine {
             Self::Redis => r#"exec redis-cli -a "$REDIS_PASSWORD" --no-auth-warning --rdb -"#,
         };
         vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()]
+    }
+
+    /// The command, run in the database's container, that loads a dump from stdin, replacing
+    /// what the dump contains, in one transaction. `None` for engines that can't be restored
+    /// yet.
+    pub fn restore_command(self) -> Option<Vec<String>> {
+        let script = match self {
+            // pg_restore needs a seekable file for a dump written to a pipe (it has no data
+            // offsets), so stdin goes to a temporary file in the container first.
+            Self::Postgres => {
+                r#"set -e; dump=$(mktemp); trap 'rm -f "$dump"' EXIT; cat > "$dump"; pg_restore --clean --if-exists --no-owner --single-transaction --exit-on-error --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" "$dump""#
+            }
+            Self::Redis => return None,
+        };
+        Some(vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()])
     }
 
     /// The extension of a dump's object key.
@@ -178,6 +227,15 @@ mod tests {
         assert_eq!(postgres[..2], ["/bin/sh", "-c"]);
         assert!(postgres[2].contains(r#"--username="$POSTGRES_USER""#));
         assert!(redis[2].contains("--rdb -"));
+    }
+
+    #[test]
+    fn restores_postgres_in_one_transaction_and_not_redis_yet() {
+        let postgres = Engine::Postgres.restore_command().unwrap();
+
+        assert!(postgres[2].contains("--single-transaction") && postgres[2].contains("--clean"));
+        assert!(postgres[2].contains(r#"--dbname="$POSTGRES_DB""#));
+        assert_eq!(Engine::Redis.restore_command(), None);
     }
 
     #[test]

@@ -18,8 +18,8 @@ use tokio::sync::broadcast;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 use super::{
-    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, ExecOutput, ExecStream, LogLine, LogLines, LogOptions,
-    RuntimeError,
+    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, ExecInput, ExecOutput, ExecStream, LogLine, LogLines,
+    LogOptions, RuntimeError,
 };
 
 #[derive(Clone)]
@@ -46,6 +46,8 @@ pub struct MemoryRuntime {
     /// What every command run in a container writes, and the commands run so far.
     exec_output: Mutex<Vec<ExecOutput>>,
     execs: Mutex<Vec<(String, Vec<String>)>>,
+    /// What each command given input read on stdin, in order.
+    exec_inputs: std::sync::Arc<Mutex<Vec<Vec<u8>>>>,
     exit_on_start: AtomicBool,
     next_id: AtomicU64,
     events: broadcast::Sender<Event>,
@@ -72,6 +74,7 @@ impl MemoryRuntime {
             build_failure: Mutex::default(),
             exec_output: Mutex::new(vec![ExecOutput::Exited(0)]),
             execs: Mutex::default(),
+            exec_inputs: std::sync::Arc::default(),
             exit_on_start: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             events: broadcast::channel(256).0,
@@ -120,6 +123,11 @@ impl MemoryRuntime {
     /// The commands run in containers so far, with the container each ran in.
     pub fn execs(&self) -> Vec<(String, Vec<String>)> {
         lock(&self.execs).clone()
+    }
+
+    /// What the commands given input read on stdin, in order, once they have read it all.
+    pub fn exec_inputs(&self) -> Vec<Vec<u8>> {
+        lock(&self.exec_inputs).clone()
     }
 
     /// Makes builds fail with `message`, or succeed again with `None`.
@@ -243,7 +251,7 @@ impl ContainerRuntime for MemoryRuntime {
         Box::pin(written.chain(new))
     }
 
-    fn exec(&self, container_id: &str, command: Vec<String>) -> ExecStream {
+    fn exec(&self, container_id: &str, command: Vec<String>, input: Option<ExecInput>) -> ExecStream {
         if let Err(error) = self.check() {
             return Box::pin(tokio_stream::once(Err(error)));
         }
@@ -251,7 +259,24 @@ impl ContainerRuntime for MemoryRuntime {
             return Box::pin(tokio_stream::once(Err(RuntimeError::NotFound)));
         }
         lock(&self.execs).push((container_id.to_string(), command));
-        Box::pin(tokio_stream::iter(lock(&self.exec_output).clone().into_iter().map(Ok)))
+        let output = lock(&self.exec_output).clone();
+        let Some(mut input) = input else {
+            return Box::pin(tokio_stream::iter(output.into_iter().map(Ok)));
+        };
+        // Reads all of stdin, like a command that loads it, before writing its output.
+        let inputs = self.exec_inputs.clone();
+        let (sender, receiver) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            let mut read = Vec::new();
+            while let Some(chunk) = input.next().await {
+                read.extend_from_slice(&chunk);
+            }
+            lock(&inputs).push(read);
+            for item in output {
+                let _ = sender.send(Ok(item)).await;
+            }
+        });
+        Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
     }
 
     fn events(&self) -> ContainerEvents {

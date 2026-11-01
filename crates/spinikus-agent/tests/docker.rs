@@ -296,8 +296,9 @@ async fn runs_a_command_in_a_container_with_its_environment() {
     // More than one frame of output, to check that nothing is lost between them.
     let script = r#"head -c 300000 /dev/zero; echo "$GREETING" >&2; exit 3"#;
     let command = vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
-    let output: Vec<_> = timeout(within, runtime.exec(&id, command).collect::<Vec<_>>()).await.unwrap();
-    let missing = timeout(within, runtime.exec("no-such-container", vec!["true".to_string()]).collect::<Vec<_>>()).await.unwrap();
+    let output: Vec<_> = timeout(within, runtime.exec(&id, command, None).collect::<Vec<_>>()).await.unwrap();
+    let missing =
+        timeout(within, runtime.exec("no-such-container", vec!["true".to_string()], None).collect::<Vec<_>>()).await.unwrap();
 
     let output: Vec<_> = output.into_iter().map(Result::unwrap).collect();
     let stdout: usize = output.iter().map(|item| if let ExecOutput::Stdout(bytes) = item { bytes.len() } else { 0 }).sum();
@@ -310,6 +311,20 @@ async fn runs_a_command_in_a_container_with_its_environment() {
     assert_eq!(stderr, b"hello\n");
     assert_eq!(output.last(), Some(&ExecOutput::Exited(3)));
     assert!(matches!(missing.as_slice(), [Err(RuntimeError::NotFound)]), "{missing:?}");
+
+    // Stdin, in chunks, then closed: `wc` only answers once it reads the end.
+    let chunks = (0..30).map(|_| bytes::Bytes::from(vec![b'x'; 10_000]));
+    let input: spinikus_agent::runtime::ExecInput = Box::pin(tokio_stream::iter(chunks));
+    let count = vec!["wc".to_string(), "-c".to_string()];
+    let counted: Vec<_> = timeout(within, runtime.exec(&id, count, Some(input)).collect::<Vec<_>>()).await.unwrap();
+    let counted: Vec<_> = counted.into_iter().map(Result::unwrap).collect();
+    let text: Vec<u8> = counted
+        .iter()
+        .filter_map(|item| if let ExecOutput::Stdout(bytes) = item { Some(bytes.to_vec()) } else { None })
+        .flatten()
+        .collect();
+    assert_eq!(String::from_utf8_lossy(&text).trim(), "300000");
+    assert_eq!(counted.last(), Some(&ExecOutput::Exited(0)));
 }
 
 /// Removes a network even when an assertion fails. Declare it before the containers'

@@ -604,4 +604,12 @@ async fn manages_destinations_schedules_and_backups_of_a_database() {
     assert!(backup.body["object_key"].as_str().unwrap().ends_with(".pgdump"));
     assert_eq!(listed.body["items"][0]["id"], backup.body["id"]);
     assert_eq!((running.status, &running.body["code"]), (StatusCode::CONFLICT, &json!("rejected")));
+
+    // Only a backup that succeeded can be restored, and the database must be live.
+    let restore = api.send(Method::POST, &format!("{}/restore", backup.header(header::LOCATION)), token, &[], None).await;
+    let restores = api.send(Method::GET, &format!("{service}/restores"), token, &[], None).await;
+    let unknown = api.send(Method::GET, "/api/v1/restores/rst_01JZ0000000000000000000000", token, &[], None).await;
+    assert_eq!((restore.status, &restore.body["code"]), (StatusCode::CONFLICT, &json!("rejected")));
+    assert_eq!(restores.body["items"], json!([]));
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }

@@ -6,10 +6,14 @@
 //! container and uploads the dump straight to the destination (`runner.rs`); the control
 //! plane only sends the command, with the destination's credentials, and records the result.
 //!
+//! Admins of a database's environment restore its backups (`restores.rs`), after a safety
+//! backup of the data the restore replaces.
+//!
 //! Admins of a database's environment manage its schedules (a cron expression in UTC, and
 //! how many of its own successful backups to keep); developers make a backup by hand, viewers
 //! list them, and admins delete them, the object included.
 
+mod restores;
 mod runner;
 pub(crate) mod storage;
 
@@ -22,7 +26,7 @@ pub use runner::BackupTimings;
 pub(crate) use runner::Backups;
 use serde_json::json;
 
-/// Whether a command ID is a backup's.
+/// Whether a command ID is a backup's or a restore's.
 pub(crate) fn is_backup_command(id: &str) -> bool {
     runner::parse_command_id(id).is_some()
 }
@@ -38,7 +42,7 @@ use spinikus_core::{
     secret::Secret,
     service::Service,
 };
-use spinikus_store::{BackupRepository, BackupScheduleRepository, StorageDestinationRepository};
+use spinikus_store::{BackupRepository, BackupScheduleRepository, RestoreRepository, StorageDestinationRepository};
 
 use crate::{
     Control, ControlError, Principal,
@@ -380,6 +384,14 @@ impl Control {
                 problem: "it has not finished yet".to_string(),
             });
         }
+        let restoring = self.store().list_active_restores().await?;
+        if restoring.iter().any(|restore| restore.backup_id == id) {
+            return Err(ControlError::Rejected {
+                entity: "backup",
+                id: id.to_string(),
+                problem: "it is being restored".to_string(),
+            });
+        }
         self.remove_backup(&backup).await?;
         let details = json!({ "service_id": backup.service_id.to_string(), "object_key": backup.object_key });
         self.audit_by(principal, "backup.delete", id, Some(environment.project_id), details).await
@@ -407,7 +419,7 @@ impl Control {
         Ok(self.store().mark_backup_deleted(backup.id).await?)
     }
 
-    async fn backup_with_access(
+    pub(crate) async fn backup_with_access(
         &self,
         principal: &Principal,
         id: BackupId,
@@ -427,7 +439,7 @@ fn require_instance_admin(principal: &Principal) -> Result<(), ControlError> {
 }
 
 /// The engine of a database service; other services have no backups.
-fn database_engine(service: &Service) -> Result<Engine, ControlError> {
+pub(crate) fn database_engine(service: &Service) -> Result<Engine, ControlError> {
     Engine::of(&service.config).ok_or_else(|| ControlError::Rejected {
         entity: "service",
         id: service.id.to_string(),
