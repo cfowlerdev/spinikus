@@ -1,5 +1,6 @@
 //! Static assets, embedded in the binary: the stylesheet built by `cargo xtask css` and the
-//! vendored HTMX (2.0.11, `htmx.org` on npm, checked against the registry's integrity hash).
+//! vendored HTMX (2.0.11, `htmx.org` on npm) and its SSE extension (2.2.4, `htmx-ext-sse`),
+//! each checked against the registry's integrity hash.
 //! Pages link them with their content's hash as `?v=`, so a response for the current version
 //! can be cached for good.
 
@@ -23,9 +24,10 @@ struct Asset {
 }
 
 static ASSETS: LazyLock<HashMap<&'static str, Asset>> = LazyLock::new(|| {
-    let assets: [(&str, &str, &[u8]); 2] = [
+    let assets: [(&str, &str, &[u8]); 3] = [
         ("app.css", "text/css; charset=utf-8", include_bytes!("../assets/app.css")),
         ("htmx.min.js", "text/javascript; charset=utf-8", include_bytes!("../assets/htmx.min.js")),
+        ("htmx-ext-sse.min.js", "text/javascript; charset=utf-8", include_bytes!("../assets/htmx-ext-sse.min.js")),
     ];
     assets
         .into_iter()

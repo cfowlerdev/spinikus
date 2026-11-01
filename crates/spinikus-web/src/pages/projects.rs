@@ -1,11 +1,11 @@
-//! A project with its environments, an environment with its services, and a service.
+//! A project with its environments, and an environment with its services.
 
 use axum::extract::{Path, State};
 use maud::{Markup, html};
 use spinikus_control::Control;
-use spinikus_core::{environment::Environment, project::Project, service::Service};
+use spinikus_core::service::Service;
 
-use super::parse_id;
+use super::{crumbs, parse_id};
 use crate::{
     auth::Signed,
     error::WebError,
@@ -61,45 +61,6 @@ pub async fn environment(State(control): State<Control>, signed: Signed, Path(id
     };
     let title = format!("{} · {}", environment.name, project.name);
     Ok(layout::page(&signed, &title, &crumbs(&project, None), content))
-}
-
-pub async fn service(State(control): State<Control>, signed: Signed, Path(id): Path<String>) -> Result<Markup, WebError> {
-    let service = control.get_service(&signed.principal, parse_id(&id)?).await?;
-    let environment = control.get_environment(&signed.principal, service.environment_id).await?;
-    let project = control.get_project(&signed.principal, environment.project_id).await?;
-    let placement = match service.server_id {
-        Some(server) => html! { span class="font-mono" { (server) } },
-        None => html! { "This machine (the embedded server)" },
-    };
-    let details: [(&str, Markup); 5] = [
-        ("Kind", service_badge(service.kind)),
-        ("Slug", html! { span class="font-mono" { (service.slug) } }),
-        ("Runs on", placement),
-        ("Created", layout::time(service.created_at)),
-        ("Updated", layout::time(service.updated_at)),
-    ];
-    let content = html! {
-        (layout::heading(&service.name, None))
-        dl class={ (CARD) " divide-y divide-zinc-200 dark:divide-zinc-800" } {
-            @for (term, value) in details {
-                div class="grid grid-cols-3 gap-4 px-5 py-3 text-sm" {
-                    dt class="text-zinc-500 dark:text-zinc-400" { (term) }
-                    dd class="col-span-2" { (value) }
-                }
-            }
-        }
-    };
-    let title = format!("{} · {}", service.name, environment.name);
-    Ok(layout::page(&signed, &title, &crumbs(&project, Some(&environment)), content))
-}
-
-/// Projects, then the project, then the environment if given.
-fn crumbs<'a>(project: &'a Project, environment: Option<&'a Environment>) -> Vec<(&'a str, String)> {
-    let mut crumbs = vec![("Projects", "/".to_string()), (project.name.as_str(), format!("/projects/{}", project.id))];
-    if let Some(environment) = environment {
-        crumbs.push((environment.name.as_str(), format!("/environments/{}", environment.id)));
-    }
-    crumbs
 }
 
 fn service_list(services: &[Service], empty: &str) -> Markup {

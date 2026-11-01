@@ -6,15 +6,18 @@ use axum::{
     http::{HeaderMap, Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use spinikus_control::{Control, NewEnvironment, NewProject, NewService, password};
+use spinikus_control::{Control, NewEnvironment, NewProject, NewServer, NewService, password};
 use spinikus_core::{
+    actor::Actor,
+    deployment::DeploymentStatus,
     environment::EnvironmentKind,
     membership::{MembershipScope, Role},
     secret::Secret,
     service::{ServiceConfig, ServiceKind},
+    source::{ImageSource, SourceSpec},
     user::UserFields,
 };
-use spinikus_store::{MasterKey, MembershipRepository, SqliteStore, UserRepository, connect, migrate};
+use spinikus_store::{DeploymentRepository, MasterKey, MembershipRepository, SqliteStore, UserRepository, connect, migrate};
 use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery staple";
@@ -56,7 +59,7 @@ impl Web {
         let pool = connect(&dir.path().join("spinikus.db")).await.unwrap();
         migrate(&pool).await.unwrap();
         let store = SqliteStore::open(pool, &MasterKey::generate()).await.unwrap();
-        let control = Control::new(store);
+        let control = Control::new(store).with_log_dir(dir.path().join("logs"));
         let router = spinikus_web::router(control.clone());
         Self { _dir: dir, control, router }
     }
@@ -79,6 +82,24 @@ impl Web {
         let (parts, body) = response.into_parts();
         let body = String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap();
         Reply { status: parts.status, headers: parts.headers, body }
+    }
+
+    /// The events of a server-sent event stream until it ends, or until `until` shows up.
+    async fn events(&self, uri: &str, cookie: &str, until: &str) -> String {
+        let request = Request::builder().uri(uri).header(header::HOST, "spinikus.test");
+        let request = request.header(header::COOKIE, format!("spinikus_session={cookie}")).body(Body::empty()).unwrap();
+        let response = self.router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/event-stream");
+        let mut body = response.into_body();
+        let mut text = String::new();
+        while !text.contains(until) {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame()).await.expect("an event in time");
+            match frame {
+                Some(frame) => text.push_str(std::str::from_utf8(&frame.unwrap().into_data().unwrap_or_default()).unwrap()),
+                None => break,
+            }
+        }
+        text
     }
 
     async fn get(&self, uri: &str, cookie: Option<&str>) -> Reply {
@@ -292,4 +313,108 @@ async fn serves_assets_for_good_and_pages_never_cached() {
     assert_eq!(unchanged.status, StatusCode::NOT_MODIFIED);
     assert!(htmx.body.starts_with("var htmx="));
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+/// Drives a deployment live without an agent, as the runner would after the agent's reports.
+async fn go_live(control: &Control, id: spinikus_core::id::DeploymentId, image: &str) {
+    let store = control.store();
+    store.transition_deployment(id, DeploymentStatus::Preparing, None, None, Actor::System).await.unwrap();
+    store.record_build(id, None, Some(image.to_string()), None).await.unwrap();
+    for status in [DeploymentStatus::Starting, DeploymentStatus::Verifying, DeploymentStatus::Live] {
+        store.transition_deployment(id, status, None, None, Actor::System).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn deploys_follows_cancels_and_rolls_back() {
+    let web = Web::new().await;
+    let control = &web.control;
+    control.create_first_admin("ada@example.com", "Ada", Secret::new(PASSWORD)).await.unwrap();
+    let (_, secret) = control.sign_in("ada@example.com", Secret::new(PASSWORD), Default::default()).await.unwrap();
+    let admin = control.authenticate_session(secret.expose()).await.unwrap();
+    let shop = control.create_project(&admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
+    let production = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
+    let production = control.create_environment(&admin, shop.id, production).await.unwrap();
+    let server = control.create_server(&admin, NewServer { name: "web-1".to_string() }).await.unwrap();
+    let service = |name: &str| NewService {
+        name: name.to_string(),
+        slug: None,
+        kind: ServiceKind::App,
+        config: ServiceConfig::default(),
+        server_id: Some(server.id),
+    };
+    let web_app = control.create_service(&admin, production.id, service("Storefront")).await.unwrap();
+    let sourceless = control.create_service(&admin, production.id, service("Unfinished")).await.unwrap();
+    let image = SourceSpec::Image(ImageSource { image: "nginx:1".to_string() });
+    control.create_source(&admin, web_app.id, image).await.unwrap();
+    web.user("grace@example.com").await;
+    let grace = control.store().find_user_by_email(&"grace@example.com".parse().unwrap()).await.unwrap().unwrap();
+    control.store().create_membership(grace.id, MembershipScope::Environment(production.id), Role::Viewer).await.unwrap();
+    let session = web.sign_in("ada%40example.com").await;
+    let viewer = web.sign_in("grace%40example.com").await;
+    let service_url = format!("/services/{}", web_app.id);
+    let token = web.get(&service_url, Some(&session)).await.csrf();
+    let form = format!("_csrf={token}");
+    let viewer_token = web.get(&service_url, Some(&viewer)).await.csrf();
+
+    // Deploying, and following the deployment while it is queued.
+    let nothing_to_deploy = web.post(&format!("/services/{}/deploy", sourceless.id), Some(&session), &form).await;
+    let by_viewer = web.post(&format!("{service_url}/deploy"), Some(&viewer), &format!("_csrf={viewer_token}")).await;
+    let deployed = web.post(&format!("{service_url}/deploy"), Some(&session), &form).await;
+    let deployment_url = deployed.header("location").unwrap().to_string();
+    let following = web.get(&deployment_url, Some(&session)).await;
+    let busy_service = web.get(&service_url, Some(&session)).await;
+    let viewer_service = web.get(&service_url, Some(&viewer)).await;
+    let queued_events = web.events(&format!("{deployment_url}/stream"), &session, "event: status").await;
+    let summary = web.get(&format!("{deployment_url}/summary"), Some(&session)).await;
+
+    assert_eq!(nothing_to_deploy.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(nothing_to_deploy.body.contains("The service has no source to deploy."), "{}", nothing_to_deploy.body);
+    assert_eq!(by_viewer.status, StatusCode::FORBIDDEN);
+    assert_eq!(deployed.status, StatusCode::SEE_OTHER);
+    assert!(deployment_url.starts_with("/deployments/dep_"), "{deployment_url}");
+    assert!(following.body.contains(&format!(r#"sse-connect="{deployment_url}/stream""#)), "{}", following.body);
+    assert!(following.body.contains(r#"sse-swap="log""#) && following.body.contains("queued"));
+    assert!(following.body.contains("/cancel"), "developers can cancel");
+    assert!(busy_service.body.contains(r#"hx-trigger="every 2s""#), "the history refreshes while one is in progress");
+    assert!(busy_service.body.contains(r#"/deploy""#));
+    assert!(!viewer_service.body.contains(r#"/deploy""#), "viewers can't deploy");
+    assert!(queued_events.contains("event: status\ndata: queued"), "{queued_events}");
+    assert!(summary.body.starts_with(r#"<section id="summary""#) && summary.body.contains(r#"hx-trigger="sse:status""#));
+
+    // Canceling ends it; the finished page shows its log and follows nothing.
+    let canceled = web.post(&format!("{deployment_url}/cancel"), Some(&session), &form).await;
+    let again = web.post(&format!("{deployment_url}/cancel"), Some(&session), &form).await;
+    let finished = web.get(&deployment_url, Some(&session)).await;
+    let ended_events = web.events(&format!("{deployment_url}/stream"), &session, "event: end").await;
+    let resumed =
+        web.send(Method::GET, &format!("{deployment_url}/stream"), Some(&session), &[("last-event-id", "100000")], None).await;
+
+    assert_eq!((canceled.status, canceled.header("location")), (StatusCode::SEE_OTHER, Some(deployment_url.as_str())));
+    assert_eq!(again.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(again.body.contains("cannot move from"), "{}", again.body);
+    assert!(finished.body.contains("canceled_by_user") && !finished.body.contains("sse-connect"), "{}", finished.body);
+    assert!(finished.body.contains("==&gt; canceled"), "the log is in the page: {}", finished.body);
+    assert!(ended_events.contains("event: log") && ended_events.contains("==&gt; canceled"), "{ended_events}");
+    assert!(ended_events.contains("event: end\ndata: canceled"), "{ended_events}");
+    assert!(!resumed.body.contains("event: log"), "nothing after the offset: {}", resumed.body);
+
+    // Rolling back to a replaced deployment.
+    let first = control.create_deployment(&admin, web_app.id).await.unwrap();
+    go_live(control, first.id, "nginx@sha256:1").await;
+    let second = control.create_deployment(&admin, web_app.id).await.unwrap();
+    go_live(control, second.id, "nginx@sha256:2").await;
+    control.store().transition_deployment(first.id, DeploymentStatus::Superseded, None, None, Actor::System).await.unwrap();
+    let history = web.get(&service_url, Some(&session)).await;
+    let rollback_form = format!("_csrf={token}&deployment_id={}", first.id);
+    let rolled_back = web.post(&format!("{service_url}/rollback"), Some(&session), &rollback_form).await;
+    let rollback = web.get(rolled_back.header("location").unwrap(), Some(&session)).await;
+    let no_target = web.post(&format!("/services/{}/rollback", sourceless.id), Some(&session), &form).await;
+
+    assert!(history.body.contains("nginx@sha256:2") && history.body.contains("Running now"), "{}", history.body);
+    assert_eq!(history.body.matches(r#"name="deployment_id""#).count(), 1, "only the replaced one can be rolled back to");
+    assert_eq!(rolled_back.status, StatusCode::SEE_OTHER);
+    assert!(rollback.body.contains("Rolls back to") && rollback.body.contains(&first.id.to_string()), "{}", rollback.body);
+    assert_eq!(no_target.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(no_target.body.contains("The service has no earlier deployment to roll back to."), "{}", no_target.body);
 }

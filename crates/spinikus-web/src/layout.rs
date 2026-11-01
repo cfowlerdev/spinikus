@@ -4,7 +4,7 @@
 use jiff::Timestamp;
 use maud::{DOCTYPE, Markup, html};
 use serde_json::json;
-use spinikus_core::{environment::EnvironmentKind, service::ServiceKind};
+use spinikus_core::{deployment::DeploymentStatus, environment::EnvironmentKind, service::ServiceKind};
 
 use crate::{
     assets,
@@ -53,6 +53,7 @@ fn document(title: &str, body: Markup) -> Markup {
                 title { (title) " · Spinikus" }
                 link rel="stylesheet" href=(assets::url("app.css"));
                 script src=(assets::url("htmx.min.js")) defer {}
+                script src=(assets::url("htmx-ext-sse.min.js")) defer {}
             }
             body class="h-full bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100" hx-boost="true" {
                 (body)
@@ -179,6 +180,38 @@ pub fn service_badge(kind: ServiceKind) -> Markup {
         }
     };
     html! { span class={ (BADGE) " " (colors) } { (kind.as_str()) } }
+}
+
+/// A deployment's status; in-progress ones get a pulsing dot.
+pub fn status_badge(status: DeploymentStatus) -> Markup {
+    use DeploymentStatus::*;
+    let colors = match status {
+        Live => {
+            "bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-500/10 dark:text-emerald-400 dark:ring-emerald-500/20"
+        }
+        Failed => "bg-red-50 text-red-700 ring-red-600/20 dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20",
+        Queued | Preparing | Releasing | Starting | Verifying => {
+            "bg-sky-50 text-sky-700 ring-sky-600/20 dark:bg-sky-500/10 dark:text-sky-400 dark:ring-sky-500/20"
+        }
+        Draining | Superseded | Canceled => {
+            "bg-zinc-50 text-zinc-600 ring-zinc-500/20 dark:bg-zinc-500/10 dark:text-zinc-400 dark:ring-zinc-500/20"
+        }
+    };
+    html! {
+        span class={ (BADGE) " gap-1.5 " (colors) } {
+            @if status.is_in_progress() { span class="size-1.5 animate-pulse rounded-full bg-current" {} }
+            (status.as_str())
+        }
+    }
+}
+
+/// A message above a page's content, such as why an action was refused.
+pub fn alert(message: &str) -> Markup {
+    html! {
+        div role="alert" class="mb-6 rounded-md bg-red-50 px-4 py-3 text-sm text-red-700 ring-1 ring-red-600/10 ring-inset dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20" {
+            (message)
+        }
+    }
 }
 
 /// A link to the next page of a list, if there is one.

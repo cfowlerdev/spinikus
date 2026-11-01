@@ -3572,6 +3572,7 @@ dependencies = [
  "spinikus-store",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http 0.7.1",
  "tracing",

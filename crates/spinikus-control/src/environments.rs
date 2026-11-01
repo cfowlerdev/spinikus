@@ -89,6 +89,13 @@ impl Control {
         Ok(environment)
     }
 
+    /// The principal's role in the environment, so a client can offer only what they may do
+    /// (each operation still checks). `NotFound` like `get_environment` if they have none.
+    pub async fn environment_role(&self, principal: &Principal, environment: &Environment) -> Result<Role, ControlError> {
+        let access = self.access(principal).await?;
+        access.role_in(environment.project_id, Some(environment.id)).ok_or_else(|| not_found("environment", environment.id))
+    }
+
     /// Applies `changes` if the environment is still at `revision`. Needs the admin role in it.
     pub async fn update_environment(
         &self,
@@ -161,6 +168,27 @@ mod tests {
         assert_eq!(production.unwrap().slug.as_str(), "production");
         assert!(matches!(by_developer, Err(ControlError::Forbidden)), "{by_developer:?}");
         assert_eq!(preview.unwrap().slug.as_str(), "pr-7");
+    }
+
+    #[tokio::test]
+    async fn tells_the_role_a_principal_has_in_an_environment() {
+        let (_dir, control) = control().await;
+        let admin = user(&control, "admin@example.com", true).await;
+        let developer = user(&control, "ada@example.com", false).await;
+        let viewer = user(&control, "grace@example.com", false).await;
+        let project = project(&control, &admin).await;
+        let production =
+            control.create_environment(&admin, project.id, new("Production", EnvironmentKind::Production)).await.unwrap();
+        let staging = control.create_environment(&admin, project.id, new("Staging", EnvironmentKind::Staging)).await.unwrap();
+        grant(&control, &developer, MembershipScope::Project(project.id), Role::Viewer).await;
+        grant(&control, &developer, MembershipScope::Environment(staging.id), Role::Developer).await;
+        grant(&control, &viewer, MembershipScope::Environment(staging.id), Role::Viewer).await;
+
+        assert_eq!(control.environment_role(&admin, &production).await.unwrap(), Role::Admin);
+        assert_eq!(control.environment_role(&developer, &production).await.unwrap(), Role::Viewer);
+        assert_eq!(control.environment_role(&developer, &staging).await.unwrap(), Role::Developer);
+        let hidden = control.environment_role(&viewer, &production).await;
+        assert!(matches!(hidden, Err(ControlError::NotFound { .. })), "{hidden:?}");
     }
 
     #[tokio::test]
