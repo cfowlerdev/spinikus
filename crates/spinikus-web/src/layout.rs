@@ -125,10 +125,18 @@ pub fn csrf_field(signed: &Signed) -> Markup {
 }
 
 pub fn heading(title: &str, subtitle: Option<Markup>) -> Markup {
+    header(title, subtitle, html! {})
+}
+
+/// A page's title, with buttons or links for what can be done there on the right.
+pub fn header(title: &str, subtitle: Option<Markup>, actions: Markup) -> Markup {
     html! {
-        div class="mb-6" {
-            h1 class="text-2xl font-semibold tracking-tight" { (title) }
-            @if let Some(subtitle) = subtitle { p class={ "mt-1 " (MUTED) } { (subtitle) } }
+        div class="mb-6 flex flex-wrap items-start gap-4" {
+            div {
+                h1 class="text-2xl font-semibold tracking-tight" { (title) }
+                @if let Some(subtitle) = subtitle { p class={ "mt-1 " (MUTED) } { (subtitle) } }
+            }
+            div class="ml-auto flex flex-wrap items-center gap-2" { (actions) }
         }
     }
 }

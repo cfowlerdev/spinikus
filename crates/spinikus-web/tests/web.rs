@@ -14,7 +14,7 @@ use spinikus_core::{
     membership::{MembershipScope, Role},
     secret::Secret,
     service::{ServiceConfig, ServiceKind},
-    source::{ImageSource, SourceSpec},
+    source::{GitSource, ImageSource, SourceSpec},
     user::UserFields,
 };
 use spinikus_store::{DeploymentRepository, MasterKey, MembershipRepository, SqliteStore, UserRepository, connect, migrate};
@@ -417,4 +417,276 @@ async fn deploys_follows_cancels_and_rolls_back() {
     assert!(rollback.body.contains("Rolls back to") && rollback.body.contains(&first.id.to_string()), "{}", rollback.body);
     assert_eq!(no_target.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(no_target.body.contains("The service has no earlier deployment to roll back to."), "{}", no_target.body);
+}
+
+/// A form body from its fields.
+fn form(fields: &[(&str, &str)]) -> String {
+    let encode = |text: &str| {
+        text.bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (byte as char).to_string(),
+                _ => format!("%{byte:02X}"),
+            })
+            .collect::<String>()
+    };
+    fields.iter().map(|(name, value)| format!("{name}={}", encode(value))).collect::<Vec<_>>().join("&")
+}
+
+/// The ID in a 303's `Location` after `prefix`, such as `/projects/`.
+fn created(reply: &Reply, prefix: &str) -> String {
+    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+    let location = reply.header("location").unwrap();
+    location.strip_prefix(prefix).unwrap_or_else(|| panic!("{location} under {prefix}")).to_string()
+}
+
+#[tokio::test]
+async fn creates_edits_and_deletes_projects_environments_and_services() {
+    let web = Web::new().await;
+    let control = &web.control;
+    control.create_first_admin("ada@example.com", "Ada", Secret::new(PASSWORD)).await.unwrap();
+    let (_, secret) = control.sign_in("ada@example.com", Secret::new(PASSWORD), Default::default()).await.unwrap();
+    let admin = control.authenticate_session(secret.expose()).await.unwrap();
+    let session = web.sign_in("ada%40example.com").await;
+    let token = web.get("/", Some(&session)).await.csrf();
+    let post = |uri: String, fields: Vec<(&'static str, String)>| {
+        let mut all = vec![("_csrf", token.clone())];
+        all.extend(fields);
+        let body = form(&all.iter().map(|(name, value)| (*name, value.as_str())).collect::<Vec<_>>());
+        let session = session.clone();
+        let web = &web;
+        async move { web.post(&uri, Some(&session), &body).await }
+    };
+    let field = |name: &'static str, value: &str| (name, value.to_string());
+
+    // A project, an environment in it, and a service with an image and a port.
+    assert!(web.get("/", Some(&session)).await.body.contains(r#"href="/projects/new""#));
+    assert_eq!(web.get("/projects/new", Some(&session)).await.status, StatusCode::OK);
+    let refused = post("/projects".into(), vec![field("name", ""), field("slug", "")]).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", refused.body);
+    let project_id = created(&post("/projects".into(), vec![field("name", "Shop"), field("slug", "")]).await, "/projects/");
+    let project_page = web.get(&format!("/projects/{project_id}"), Some(&session)).await;
+    assert!(project_page.body.contains("Shop") && project_page.body.contains("New environment"), "{}", project_page.body);
+    let environments = format!("/projects/{project_id}/environments");
+    let fields = vec![field("name", "Production"), field("slug", ""), field("kind", "production")];
+    let environment_id = created(&post(environments, fields).await, "/environments/");
+    let environment_page = web.get(&format!("/environments/{environment_id}"), Some(&session)).await;
+    assert!(environment_page.body.contains("New service"), "{}", environment_page.body);
+    assert_eq!(web.get(&format!("/environments/{environment_id}/services/new"), Some(&session)).await.status, StatusCode::OK);
+    let services = format!("/environments/{environment_id}/services");
+    let new_service = |port: &str| {
+        vec![
+            field("name", "Storefront"),
+            field("slug", ""),
+            field("source_type", "image"),
+            field("image", "nginx:1.27"),
+            field("repo_url", ""),
+            field("branch", "main"),
+            field("root_directory", ""),
+            field("port", port),
+        ]
+    };
+    let bad_port = post(services.clone(), new_service("http")).await;
+    assert_eq!(bad_port.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(bad_port.body.contains("The port must be a number") && bad_port.body.contains("nginx:1.27"), "{}", bad_port.body);
+    assert_eq!(bad_port.header("hx-push-url"), None, "only for HTMX");
+    let boosted = [("sec-fetch-site", "same-origin"), ("hx-request", "true"), ("x-csrf-token", token.as_str())];
+    let body = form(&[("name", ""), ("slug", "")]);
+    let refused = web.send(Method::POST, "/projects", Some(&session), &boosted, Some(&body)).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.header("hx-push-url"), Some("false"), "the address bar keeps the form's page");
+    let service_id = created(&post(services.clone(), new_service("8080")).await, "/services/");
+    let id: spinikus_core::id::ServiceId = service_id.parse().unwrap();
+    let service = control.get_service(&admin, id).await.unwrap();
+    assert_eq!(service.slug.to_string(), "storefront");
+    assert_eq!(service.config.get("runtime"), Some(&serde_json::json!({ "port": 8080 })));
+    let source = control.get_source(&admin, id).await.unwrap();
+    assert_eq!(source.spec, SourceSpec::Image(ImageSource { image: "nginx:1.27".to_string() }));
+    // A source that doesn't check out leaves no service behind.
+    let mut no_image = new_service("");
+    no_image[0] = field("name", "Broken");
+    no_image[3] = field("image", "");
+    assert_eq!(post(services, no_image).await.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let listed = control.list_services(&admin, environment_id.parse().unwrap(), None, 10).await.unwrap();
+    assert_eq!(listed.items.len(), 1);
+
+    // The settings: renaming, a Git source over SSH with its deploy key, and runtime settings
+    // that keep what the form doesn't edit.
+    let settings = format!("/services/{service_id}/settings");
+    assert!(web.get(&format!("/services/{service_id}"), Some(&session)).await.body.contains(&format!(r#"href="{settings}""#)));
+    let page = web.get(&settings, Some(&session)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("Delete service") && !page.body.contains("Deploy key"), "{}", page.body);
+    let revision = service.revision.to_string();
+    let renamed = post(
+        format!("{settings}/general"),
+        vec![field("name", "Shopfront"), field("slug", "shop"), field("revision", &revision)],
+    )
+    .await;
+    assert_eq!(renamed.header("location"), Some(format!("{settings}?saved=general").as_str()));
+    let stale =
+        post(format!("{settings}/general"), vec![field("name", "Again"), field("slug", ""), field("revision", &revision)]).await;
+    assert_eq!(stale.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(stale.body.contains("Someone changed this while you were editing"), "{}", stale.body);
+    let git = vec![
+        field("source_type", "git"),
+        field("image", ""),
+        field("repo_url", "git@github.com:acme/shop.git"),
+        field("branch", "release"),
+        field("root_directory", "apps/web"),
+        field("source_revision", &source.revision.to_string()),
+    ];
+    assert_eq!(post(format!("{settings}/source"), git).await.status, StatusCode::SEE_OTHER);
+    let page = web.get(&format!("{settings}?saved=source"), Some(&session)).await;
+    assert!(
+        page.body.contains("Saved.") && page.body.contains("Deploy key") && page.body.contains("ssh-ed25519 "),
+        "{}",
+        page.body
+    );
+    assert!(page.body.contains(r#"value="git" checked"#) && page.body.contains("apps/web"), "{}", page.body);
+
+    let mut config = control.get_service(&admin, id).await.unwrap().config;
+    config.insert("runtime".to_string(), serde_json::json!({ "port": 8080, "healthcheck": { "path": "/up", "timeout": "5s" } }));
+    let service = control
+        .update_service(
+            &admin,
+            id,
+            service.revision + 1,
+            spinikus_control::ServiceChanges { config: Some(config), ..Default::default() },
+        )
+        .await
+        .unwrap();
+    let runtime = |port: &str, revision: i64| {
+        vec![
+            field("port", port),
+            field("start", "./server --listen 0.0.0.0"),
+            field("health_path", "/healthz"),
+            field("start_period", ""),
+            field("shutdown_timeout", "20s"),
+            field("revision", &revision.to_string()),
+        ]
+    };
+    let refused = post(format!("{settings}/runtime"), runtime("70000", service.revision)).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.body.contains("./server --listen"), "keeps what was typed");
+    let invalid = post(format!("{settings}/runtime"), {
+        let mut fields = runtime("3000", service.revision);
+        fields[4] = field("shutdown_timeout", "soon");
+        fields
+    })
+    .await;
+    assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY, "the control layer checks durations: {}", invalid.body);
+    assert_eq!(post(format!("{settings}/runtime"), runtime("3000", service.revision)).await.status, StatusCode::SEE_OTHER);
+    let service = control.get_service(&admin, id).await.unwrap();
+    assert_eq!(
+        service.config.get("runtime"),
+        Some(&serde_json::json!({
+            "port": 3000,
+            "start": "./server --listen 0.0.0.0",
+            "shutdown_timeout": "20s",
+            "healthcheck": { "path": "/healthz", "timeout": "5s" },
+        }))
+    );
+
+    // A viewer gets no buttons and no settings.
+    web.user("grace@example.com").await;
+    let grace = control.store().find_user_by_email(&"grace@example.com".parse().unwrap()).await.unwrap().unwrap();
+    let environment: spinikus_core::id::EnvironmentId = environment_id.parse().unwrap();
+    control.store().create_membership(grace.id, MembershipScope::Environment(environment), Role::Viewer).await.unwrap();
+    let viewer = web.sign_in("grace%40example.com").await;
+    assert!(!web.get("/", Some(&viewer)).await.body.contains("New project"));
+    assert!(!web.get(&format!("/environments/{environment_id}"), Some(&viewer)).await.body.contains("New service"));
+    assert!(!web.get(&format!("/services/{service_id}"), Some(&viewer)).await.body.contains("Settings"));
+    assert_eq!(web.get(&settings, Some(&viewer)).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(web.get(&format!("/projects/{project_id}/settings"), Some(&viewer)).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(web.get("/projects/new", Some(&viewer)).await.status, StatusCode::FORBIDDEN);
+    let viewer_token = web.get("/", Some(&viewer)).await.csrf();
+    let delete = web.post(&format!("/services/{service_id}/delete"), Some(&viewer), &format!("_csrf={viewer_token}")).await;
+    assert_eq!(delete.status, StatusCode::FORBIDDEN);
+
+    // Renaming the project and the environment; deleting refuses parents with children.
+    let project = control.get_project(&admin, project_id.parse().unwrap()).await.unwrap();
+    let renamed = post(
+        format!("/projects/{project_id}/settings"),
+        vec![field("name", "Shop 2"), field("slug", ""), field("revision", &project.revision.to_string())],
+    )
+    .await;
+    assert_eq!(renamed.status, StatusCode::SEE_OTHER);
+    assert_eq!(control.get_project(&admin, project.id).await.unwrap().slug.to_string(), "shop", "kept when empty");
+    let staging = post(
+        format!("/environments/{environment_id}/settings"),
+        vec![field("name", "Live"), field("slug", "live"), field("revision", "1")],
+    )
+    .await;
+    assert_eq!(staging.status, StatusCode::SEE_OTHER, "{}", staging.body);
+    let refused = post(format!("/projects/{project_id}/delete"), vec![]).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.body.contains("Delete the project's environments first."));
+    let refused = post(format!("/environments/{environment_id}/delete"), vec![]).await;
+    assert!(refused.body.contains("Delete the environment's services first."), "{}", refused.body);
+    let deleted = post(format!("/services/{service_id}/delete"), vec![]).await;
+    assert_eq!(deleted.header("location"), Some(format!("/environments/{environment_id}").as_str()));
+    let deleted = post(format!("/environments/{environment_id}/delete"), vec![]).await;
+    assert_eq!(deleted.header("location"), Some(format!("/projects/{project_id}").as_str()));
+    let deleted = post(format!("/projects/{project_id}/delete"), vec![]).await;
+    assert_eq!(deleted.header("location"), Some("/"));
+    assert_eq!(web.get(&format!("/projects/{project_id}"), Some(&session)).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn runtime_settings_from_the_repository_are_read_only() {
+    let web = Web::new().await;
+    let control = &web.control;
+    control.create_first_admin("ada@example.com", "Ada", Secret::new(PASSWORD)).await.unwrap();
+    let (_, secret) = control.sign_in("ada@example.com", Secret::new(PASSWORD), Default::default()).await.unwrap();
+    let admin = control.authenticate_session(secret.expose()).await.unwrap();
+    let shop = control.create_project(&admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
+    let production = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
+    let production = control.create_environment(&admin, shop.id, production).await.unwrap();
+    let server = control.create_server(&admin, NewServer { name: "web-1".to_string() }).await.unwrap();
+    let mut config = ServiceConfig::new();
+    config.insert("runtime".to_string(), serde_json::json!({ "port": 3000, "start": "./old" }));
+    let new = NewService { name: "Web".to_string(), slug: None, kind: ServiceKind::App, config, server_id: Some(server.id) };
+    let git =
+        GitSource { repo_url: "https://github.com/acme/web.git".to_string(), branch: "main".to_string(), root_directory: None };
+    let service = control.create_service_with_source(&admin, production.id, new, SourceSpec::Git(git)).await.unwrap();
+    let session = web.sign_in("ada%40example.com").await;
+    let settings = format!("/services/{}/settings", service.id);
+    let page = web.get(&settings, Some(&session)).await;
+    assert!(!page.body.contains("Set by spinikus.json"), "nothing built yet: {}", page.body);
+
+    // The build read a spinikus.json that sets the port.
+    let deployment = control.create_deployment(&admin, service.id).await.unwrap();
+    let mut snapshot = deployment.snapshot.clone();
+    snapshot.config.insert("runtime".to_string(), serde_json::json!({ "port": 4000, "start": "./old" }));
+    snapshot.from_file = vec!["runtime.port".to_string()];
+    let store = control.store();
+    store.transition_deployment(deployment.id, DeploymentStatus::Preparing, None, None, Actor::System).await.unwrap();
+    store.record_build(deployment.id, Some("a".repeat(40)), Some("sha256:abc".to_string()), Some(snapshot)).await.unwrap();
+
+    let page = web.get(&settings, Some(&session)).await;
+    assert!(page.body.contains("Set by spinikus.json"), "{}", page.body);
+    let port = page.body.find(r#"id="runtime-port""#).unwrap();
+    let input = &page.body[page.body[..port].rfind('<').unwrap()..port + page.body[port..].find('>').unwrap()];
+    assert!(input.contains(r#"value="4000""#) && input.contains("readonly"), "{input}");
+    let start = page.body.find(r#"id="runtime-start""#).unwrap();
+    assert!(!page.body[start..start + page.body[start..].find('>').unwrap()].contains("readonly"));
+
+    let token = page.csrf();
+    let fields = [
+        ("_csrf", token.as_str()),
+        ("port", "9999"),
+        ("start", "./new"),
+        ("health_path", ""),
+        ("start_period", ""),
+        ("shutdown_timeout", ""),
+        ("revision", &service.revision.to_string()),
+    ];
+    let saved = web.post(&format!("{settings}/runtime"), Some(&session), &form(&fields)).await;
+    assert_eq!(saved.status, StatusCode::SEE_OTHER, "{}", saved.body);
+    let service = control.get_service(&admin, service.id).await.unwrap();
+    assert_eq!(
+        service.config.get("runtime"),
+        Some(&serde_json::json!({ "port": 3000, "start": "./new" })),
+        "the stored port is kept"
+    );
 }

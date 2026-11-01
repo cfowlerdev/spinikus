@@ -77,6 +77,17 @@ impl Control {
         Ok(project)
     }
 
+    /// The principal's role in the project itself, so a client can offer only what they may
+    /// do (each operation still checks): `None` for someone who sees the project only
+    /// through a role in one of its environments.
+    pub async fn project_role(&self, principal: &Principal, project: &Project) -> Result<Option<Role>, ControlError> {
+        let access = self.access(principal).await?;
+        if !access.can_see_project(project.id) {
+            return Err(not_found("project", project.id));
+        }
+        Ok(access.role_in(project.id, None))
+    }
+
     /// Applies `changes` if the project is still at `revision`. Needs the admin role in the project.
     pub async fn update_project(
         &self,

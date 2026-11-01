@@ -1,8 +1,10 @@
 //! Page handlers, by area.
 
 pub mod deployments;
+pub mod manage;
 pub mod overview;
 pub mod projects;
+pub mod service_settings;
 pub mod services;
 pub mod session;
 
@@ -10,6 +12,7 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Redirect, Response},
 };
+use maud::Markup;
 
 use spinikus_control::ControlError;
 use spinikus_core::{environment::Environment, project::Project};
@@ -56,4 +59,20 @@ fn refused(error: &ControlError) -> Option<String> {
     let mut chars = message.chars();
     let first = chars.next().map(|first| first.to_uppercase().collect::<String>()).unwrap_or_default();
     Some(format!("{first}{}.", chars.as_str().trim_end_matches('.')))
+}
+
+/// A form's page again, with the problem and status 422, for problems the user can fix;
+/// other errors become error pages.
+fn problem(error: ControlError, render: impl FnOnce(&str) -> Markup) -> Result<Response, WebError> {
+    let message = match &error {
+        ControlError::RevisionMismatch { .. } => Some(
+            "Someone changed this while you were editing. Reload the page to see their changes, then make yours again."
+                .to_string(),
+        ),
+        error => refused(error),
+    };
+    match message {
+        Some(message) => Ok((StatusCode::UNPROCESSABLE_ENTITY, render(&message)).into_response()),
+        None => Err(error.into()),
+    }
 }

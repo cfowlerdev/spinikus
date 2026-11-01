@@ -96,7 +96,7 @@ impl Control {
     }
 }
 
-fn check(spec: &SourceSpec) -> Result<(), ControlError> {
+pub(crate) fn check(spec: &SourceSpec) -> Result<(), ControlError> {
     spec.validate().map_err(|error| ControlError::Invalid { field: error.field, problem: error.to_string() })
 }
 

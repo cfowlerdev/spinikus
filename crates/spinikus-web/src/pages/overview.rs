@@ -10,7 +10,7 @@ use super::parse_id;
 use crate::{
     auth::Signed,
     error::WebError,
-    layout::{self, CARD, environment_badge},
+    layout::{self, BUTTON_PRIMARY, CARD, environment_badge},
 };
 
 /// How many projects a page shows, and how many environments each.
@@ -35,11 +35,13 @@ pub async fn overview(
         rows.push((project, environments.items));
     }
     let empty = match signed.principal.is_instance_admin() {
-        true => "No projects yet. Create one through the API (POST /api/v1/projects); the dashboard will create them soon.",
+        true => "No projects yet. Create one to start deploying.",
         false => "You don't have access to any projects yet. An admin can add you to one.",
     };
     let content = html! {
-        (layout::heading("Projects", None))
+        (layout::header("Projects", None, html! {
+            @if signed.principal.is_instance_admin() { a href="/projects/new" class=(BUTTON_PRIMARY) { "New project" } }
+        }))
         @if rows.is_empty() {
             (layout::empty(empty))
         } @else {

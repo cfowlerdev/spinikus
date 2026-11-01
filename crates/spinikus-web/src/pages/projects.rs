@@ -3,13 +3,13 @@
 use axum::extract::{Path, State};
 use maud::{Markup, html};
 use spinikus_control::Control;
-use spinikus_core::service::Service;
+use spinikus_core::{membership::Role, service::Service};
 
 use super::{crumbs, parse_id};
 use crate::{
     auth::Signed,
     error::WebError,
-    layout::{self, CARD, LINK, environment_badge, service_badge},
+    layout::{self, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, LINK, environment_badge, service_badge},
 };
 
 /// How many services an environment shows; more are on the environment's page.
@@ -24,8 +24,15 @@ pub async fn project(State(control): State<Control>, signed: Signed, Path(id): P
         let services = control.list_services(&signed.principal, environment.id, None, SERVICES_SHOWN).await?;
         sections.push((environment, services.items, services.has_more));
     }
+    let admin = control.project_role(&signed.principal, &project).await? == Some(Role::Admin);
+    let actions = html! {
+        @if admin {
+            a href={ "/projects/" (project.id) "/settings" } class=(BUTTON_SECONDARY) { "Settings" }
+            a href={ "/projects/" (project.id) "/environments/new" } class=(BUTTON_PRIMARY) { "New environment" }
+        }
+    };
     let content = html! {
-        (layout::heading(&project.name, Some(html! { span class="font-mono" { (project.slug) } })))
+        (layout::header(&project.name, Some(html! { span class="font-mono" { (project.slug) } }), actions))
         @if sections.is_empty() {
             (layout::empty("This project has no environments yet."))
         }
@@ -54,8 +61,13 @@ pub async fn environment(State(control): State<Control>, signed: Signed, Path(id
     let project = control.get_project(&signed.principal, environment.project_id).await?;
     let services = control.list_services(&signed.principal, environment.id, None, SERVICES_SHOWN).await?;
     let subtitle = html! { span class="inline-flex items-center gap-2" { span class="font-mono" { (environment.slug) } (environment_badge(environment.kind)) } };
+    let role = control.environment_role(&signed.principal, &environment).await?;
+    let actions = html! {
+        @if role >= Role::Admin { a href={ "/environments/" (environment.id) "/settings" } class=(BUTTON_SECONDARY) { "Settings" } }
+        @if role >= Role::Developer { a href={ "/environments/" (environment.id) "/services/new" } class=(BUTTON_PRIMARY) { "New service" } }
+    };
     let content = html! {
-        (layout::heading(&environment.name, Some(subtitle)))
+        (layout::header(&environment.name, Some(subtitle), actions))
         (service_list(&services.items, "No services in this environment yet."))
         (layout::next_page(services.has_more, services.items.last().map(|service| service.id.to_string())))
     };

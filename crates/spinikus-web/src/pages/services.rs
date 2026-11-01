@@ -137,9 +137,12 @@ async fn service_page(
                 p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400" { (source_summary(source.as_ref())) }
             }
             @if can_deploy {
-                form method="post" action={ "/services/" (service.id) "/deploy" } class="ml-auto" {
-                    (csrf_field(signed))
-                    button type="submit" class=(BUTTON_PRIMARY) disabled[source.is_none()] { "Deploy" }
+                div class="ml-auto flex items-center gap-2" {
+                    a href={ "/services/" (service.id) "/settings" } class=(BUTTON_SECONDARY) { "Settings" }
+                    form method="post" action={ "/services/" (service.id) "/deploy" } {
+                        (csrf_field(signed))
+                        button type="submit" class=(BUTTON_PRIMARY) disabled[source.is_none()] { "Deploy" }
+                    }
                 }
             }
         }

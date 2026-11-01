@@ -8,6 +8,7 @@ use spinikus_core::{
     membership::Role,
     runtime::RuntimeSettings,
     service::{Service, ServiceConfig, ServiceFields, ServiceKind},
+    source::SourceSpec,
 };
 use spinikus_store::{EnvironmentRepository, ServerRepository, ServiceRepository, StoreError};
 
@@ -57,6 +58,27 @@ impl Control {
         let service = self.store().create_service(environment_id, new.kind, fields).await?;
         let details = json!({ "slug": service.slug, "kind": service.kind, "environment_id": environment_id.to_string() });
         self.audit_by(principal, "service.create", service.id, Some(environment.project_id), details).await?;
+        Ok(service)
+    }
+
+    /// Creates a service with its source, as one step: the source is checked first, and
+    /// if it can't be created after all, neither is the service. Needs the developer role.
+    pub async fn create_service_with_source(
+        &self,
+        principal: &Principal,
+        environment_id: EnvironmentId,
+        new: NewService,
+        source: SourceSpec,
+    ) -> Result<Service, ControlError> {
+        crate::sources::check(&source)?;
+        let service = self.create_service(principal, environment_id, new).await?;
+        if let Err(error) = self.create_source(principal, service.id, source).await {
+            // The service was created moments ago, by this call; nothing else refers to it.
+            if let Err(cleanup) = self.store().delete_service(service.id).await {
+                tracing::warn!(service = %service.id, error = %cleanup, "could not remove a service whose source failed");
+            }
+            return Err(error);
+        }
         Ok(service)
     }
 
@@ -184,6 +206,24 @@ mod tests {
         }
         let staging = created.pop().unwrap();
         (created.pop().unwrap(), staging)
+    }
+
+    #[tokio::test]
+    async fn creates_a_service_with_its_source_or_neither() {
+        let (_dir, control) = control().await;
+        let admin = user(&control, "admin@example.com", true).await;
+        let (production, _) = environments(&control, &admin).await;
+        let image = |image: &str| SourceSpec::Image(spinikus_core::source::ImageSource { image: image.to_string() });
+
+        let created = control.create_service_with_source(&admin, production.id, new("Web"), image("nginx:1")).await.unwrap();
+        let bad_source = control.create_service_with_source(&admin, production.id, new("Api"), image(" ")).await;
+        let taken = control.create_service_with_source(&admin, production.id, new("Web"), image("nginx:1")).await;
+
+        assert_eq!(control.get_source(&admin, created.id).await.unwrap().spec, image("nginx:1"));
+        assert!(matches!(bad_source, Err(ControlError::Invalid { .. })), "{bad_source:?}");
+        assert!(matches!(taken, Err(ControlError::Conflict { .. })), "{taken:?}");
+        let services = control.list_services(&admin, production.id, None, 50).await.unwrap().items;
+        assert_eq!(services.iter().map(|service| service.name.as_str()).collect::<Vec<_>>(), ["Web"]);
     }
 
     #[tokio::test]

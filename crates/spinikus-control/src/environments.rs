@@ -185,6 +185,9 @@ mod tests {
         grant(&control, &viewer, MembershipScope::Environment(staging.id), Role::Viewer).await;
 
         assert_eq!(control.environment_role(&admin, &production).await.unwrap(), Role::Admin);
+        assert_eq!(control.project_role(&admin, &project).await.unwrap(), Some(Role::Admin));
+        assert_eq!(control.project_role(&developer, &project).await.unwrap(), Some(Role::Viewer));
+        assert_eq!(control.project_role(&viewer, &project).await.unwrap(), None, "sees it only through staging");
         assert_eq!(control.environment_role(&developer, &production).await.unwrap(), Role::Viewer);
         assert_eq!(control.environment_role(&developer, &staging).await.unwrap(), Role::Developer);
         let hidden = control.environment_role(&viewer, &production).await;
