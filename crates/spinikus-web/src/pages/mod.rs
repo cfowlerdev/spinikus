@@ -1,12 +1,14 @@
 //! Page handlers, by area.
 
 pub mod deployments;
+pub mod domains;
 pub mod manage;
 pub mod overview;
 pub mod projects;
 pub mod service_settings;
 pub mod services;
 pub mod session;
+pub mod variables;
 
 use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
@@ -15,9 +17,65 @@ use axum::{
 use maud::Markup;
 
 use spinikus_control::ControlError;
-use spinikus_core::{environment::Environment, project::Project};
+use spinikus_core::{
+    environment::Environment,
+    membership::Role,
+    project::Project,
+    service::{Service, ServiceKind},
+};
 
-use crate::{auth::is_htmx, error::WebError};
+use crate::{auth::is_htmx, error::WebError, layout};
+
+/// The pages of a project, an environment or a service, for their tabs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    /// The project's environments, the environment's services, the service's deployments.
+    Main,
+    Variables,
+    Domains,
+    Settings,
+}
+
+/// A project's tabs. Its variables need a role in the project itself, its settings the admin role.
+fn project_tabs(project: &Project, role: Option<Role>, current: Tab) -> Markup {
+    let base = format!("/projects/{}", project.id);
+    let mut tabs = vec![("Environments", base.clone(), current == Tab::Main)];
+    if role.is_some() {
+        tabs.push(("Variables", format!("{base}/variables"), current == Tab::Variables));
+    }
+    if role == Some(Role::Admin) {
+        tabs.push(("Settings", format!("{base}/settings"), current == Tab::Settings));
+    }
+    layout::tabs(&tabs)
+}
+
+fn environment_tabs(environment: &Environment, role: Role, current: Tab) -> Markup {
+    let base = format!("/environments/{}", environment.id);
+    let mut tabs = vec![
+        ("Services", base.clone(), current == Tab::Main),
+        ("Variables", format!("{base}/variables"), current == Tab::Variables),
+    ];
+    if role >= Role::Admin {
+        tabs.push(("Settings", format!("{base}/settings"), current == Tab::Settings));
+    }
+    layout::tabs(&tabs)
+}
+
+/// A service's tabs; only apps have domains.
+fn service_tabs(service: &Service, role: Role, current: Tab) -> Markup {
+    let base = format!("/services/{}", service.id);
+    let mut tabs = vec![
+        ("Deployments", base.clone(), current == Tab::Main),
+        ("Variables", format!("{base}/variables"), current == Tab::Variables),
+    ];
+    if service.kind == ServiceKind::App {
+        tabs.push(("Domains", format!("{base}/domains"), current == Tab::Domains));
+    }
+    if role >= Role::Developer {
+        tabs.push(("Settings", format!("{base}/settings"), current == Tab::Settings));
+    }
+    layout::tabs(&tabs)
+}
 
 /// A redirect after a form or to another page. HTMX would follow a plain redirect without
 /// changing the address bar, so it gets `HX-Location`: it loads `to` and pushes its URL.
@@ -64,6 +122,13 @@ fn refused(error: &ControlError) -> Option<String> {
 /// A form's page again, with the problem and status 422, for problems the user can fix;
 /// other errors become error pages.
 fn problem(error: ControlError, render: impl FnOnce(&str) -> Markup) -> Result<Response, WebError> {
+    let message = problem_message(error)?;
+    Ok((StatusCode::UNPROCESSABLE_ENTITY, render(&message)).into_response())
+}
+
+/// What [`problem`] says about `error`, for pages that render it themselves; other errors
+/// are error pages.
+fn problem_message(error: ControlError) -> Result<String, WebError> {
     let message = match &error {
         ControlError::RevisionMismatch { .. } => Some(
             "Someone changed this while you were editing. Reload the page to see their changes, then make yours again."
@@ -71,8 +136,5 @@ fn problem(error: ControlError, render: impl FnOnce(&str) -> Markup) -> Result<R
         ),
         error => refused(error),
     };
-    match message {
-        Some(message) => Ok((StatusCode::UNPROCESSABLE_ENTITY, render(&message)).into_response()),
-        None => Err(error.into()),
-    }
+    message.ok_or_else(|| error.into())
 }

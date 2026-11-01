@@ -42,11 +42,19 @@ pub fn router(control: Control) -> Router {
         .route("/projects/{id}", get(pages::projects::project))
         .route("/projects/{id}/settings", get(pages::manage::project_settings).post(pages::manage::update_project))
         .route("/projects/{id}/delete", post(pages::manage::delete_project))
+        .route(
+            "/projects/{id}/variables",
+            get(pages::variables::project_variables).post(pages::variables::create_project_variable),
+        )
         .route("/projects/{id}/environments", post(pages::manage::create_environment))
         .route("/projects/{id}/environments/new", get(pages::manage::new_environment))
         .route("/environments/{id}", get(pages::projects::environment))
         .route("/environments/{id}/settings", get(pages::manage::environment_settings).post(pages::manage::update_environment))
         .route("/environments/{id}/delete", post(pages::manage::delete_environment))
+        .route(
+            "/environments/{id}/variables",
+            get(pages::variables::environment_variables).post(pages::variables::create_environment_variable),
+        )
         .route("/environments/{id}/services", post(pages::service_settings::create_service))
         .route("/environments/{id}/services/new", get(pages::service_settings::new_service))
         .route("/services/{id}", get(pages::services::service))
@@ -55,6 +63,16 @@ pub fn router(control: Control) -> Router {
         .route("/services/{id}/settings/source", post(pages::service_settings::update_source))
         .route("/services/{id}/settings/runtime", post(pages::service_settings::update_runtime))
         .route("/services/{id}/delete", post(pages::service_settings::delete))
+        .route(
+            "/services/{id}/variables",
+            get(pages::variables::service_variables).post(pages::variables::create_service_variable),
+        )
+        .route("/services/{id}/domains", get(pages::domains::domains).post(pages::domains::create))
+        .route("/variables/{id}/edit", get(pages::variables::edit).post(pages::variables::update))
+        .route("/variables/{id}/delete", post(pages::variables::delete))
+        .route("/variables/{id}/reveal", post(pages::variables::reveal))
+        .route("/domains/{id}", post(pages::domains::update))
+        .route("/domains/{id}/delete", post(pages::domains::delete))
         .route("/services/{id}/deployments", get(pages::services::deployments))
         .route("/services/{id}/deploy", post(pages::services::deploy))
         .route("/services/{id}/rollback", post(pages::services::rollback))

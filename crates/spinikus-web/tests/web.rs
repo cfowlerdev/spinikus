@@ -690,3 +690,208 @@ async fn runtime_settings_from_the_repository_are_read_only() {
         "the stored port is kept"
     );
 }
+
+/// An instance admin, a project with a production environment and an app service in it, and
+/// two more users: `dev@example.com`, a developer of the environment, and `viewer@example.com`,
+/// a viewer of it. Returns the admin's principal and the IDs.
+async fn shop_with_team(
+    web: &Web,
+) -> (
+    spinikus_control::Principal,
+    spinikus_core::project::Project,
+    spinikus_core::environment::Environment,
+    spinikus_core::service::Service,
+) {
+    let control = &web.control;
+    control.create_first_admin("ada@example.com", "Ada", Secret::new(PASSWORD)).await.unwrap();
+    let (_, secret) = control.sign_in("ada@example.com", Secret::new(PASSWORD), Default::default()).await.unwrap();
+    let admin = control.authenticate_session(secret.expose()).await.unwrap();
+    let shop = control.create_project(&admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
+    let production = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
+    let production = control.create_environment(&admin, shop.id, production).await.unwrap();
+    let new =
+        NewService { name: "Web".to_string(), slug: None, kind: ServiceKind::App, config: ServiceConfig::new(), server_id: None };
+    let service = control.create_service(&admin, production.id, new).await.unwrap();
+    for (email, role) in [("dev@example.com", Role::Developer), ("viewer@example.com", Role::Viewer)] {
+        web.user(email).await;
+        let user = control.store().find_user_by_email(&email.parse().unwrap()).await.unwrap().unwrap();
+        control.store().create_membership(user.id, MembershipScope::Environment(production.id), role).await.unwrap();
+    }
+    (admin, shop, production, service)
+}
+
+#[tokio::test]
+async fn manages_variables_on_every_scope_and_reveals_secrets_only_to_admins() {
+    use spinikus_control::NewVariable;
+    use spinikus_core::variable::{VariableAvailability, VariableScope};
+
+    let web = Web::new().await;
+    let control = &web.control;
+    let (admin, shop, production, service) = shop_with_team(&web).await;
+    let variable = |name: &str, value: &str| NewVariable {
+        name: name.to_string(),
+        value: Secret::new(value),
+        availability: VariableAvailability::Runtime,
+        secret: false,
+    };
+    control.create_variable(&admin, VariableScope::Project(shop.id), variable("REGION", "eu-west")).await.unwrap();
+    control.create_variable(&admin, VariableScope::Environment(production.id), variable("API_URL", "https://old")).await.unwrap();
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+    let viewer = web.sign_in("viewer%40example.com").await;
+    let page = format!("/services/{}/variables", service.id);
+    let token = web.get(&page, Some(&dev)).await.csrf();
+    let add = |name: &str, value: &str, secret: bool| {
+        let mut fields = vec![("_csrf", token.as_str()), ("name", name), ("value", value), ("availability", "runtime")];
+        if secret {
+            fields.push(("secret", "on"));
+        }
+        form(&fields)
+    };
+
+    // A developer adds variables; the browser's CRLF line breaks are stored as LF.
+    let added = web.post(&page, Some(&dev), &add("API_URL", "https://new\r\nsecond line", false)).await;
+    assert_eq!(added.header("location"), Some(page.as_str()), "{}", added.body);
+    let added = web.post(&page, Some(&dev), &add("TOKEN", "hunter2-very-secret", true)).await;
+    assert_eq!(added.status, StatusCode::SEE_OTHER);
+    let refused = web.post(&page, Some(&dev), &add("1BAD", "kept-value", false)).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.body.contains("cannot start with a digit") && refused.body.contains("kept-value"), "{}", refused.body);
+    let variables = control.list_variables(&admin, VariableScope::Service(service.id)).await.unwrap();
+    let api_url = variables.iter().find(|variable| variable.name.as_str() == "API_URL").unwrap();
+    let token_variable = variables.iter().find(|variable| variable.name.as_str() == "TOKEN").unwrap();
+    assert_eq!(api_url.value.as_deref(), Some("https://new\nsecond line"));
+    assert!(token_variable.secret);
+
+    // The page: its own variables, the environment's (one overridden here), and the project's
+    // only for those with a role in the project. Secret values never show.
+    let for_dev = web.get(&page, Some(&dev)).await;
+    let for_admin = web.get(&page, Some(&ada)).await;
+    let for_viewer = web.get(&page, Some(&viewer)).await;
+    for reply in [&for_dev, &for_admin, &for_viewer] {
+        assert_eq!(reply.status, StatusCode::OK);
+        assert!(!reply.body.contains("hunter2"), "{}", reply.body);
+        assert!(reply.body.contains("https://new") && reply.body.contains("overridden here"), "{}", reply.body);
+    }
+    assert!(for_admin.body.contains("eu-west") && !for_dev.body.contains("eu-west"));
+    let reveal = format!("/variables/{}/reveal", token_variable.id);
+    assert!(for_admin.body.contains(&reveal) && !for_dev.body.contains(&reveal));
+    assert!(for_dev.body.contains("Add a variable") && !for_viewer.body.contains("Add a variable"));
+    assert!(!for_viewer.body.contains("/edit"));
+
+    // Revealing: an admin's HTMX request gets the value alone, a plain one the page with it.
+    let admin_token = for_admin.csrf();
+    let htmx = [("sec-fetch-site", "same-origin"), ("hx-request", "true"), ("x-csrf-token", admin_token.as_str())];
+    let revealed = web.send(Method::POST, &reveal, Some(&ada), &htmx, Some("")).await;
+    assert_eq!(revealed.status, StatusCode::OK);
+    assert!(revealed.body.contains("hunter2-very-secret") && !revealed.body.contains("<html"), "{}", revealed.body);
+    let revealed = web.post(&reveal, Some(&ada), &format!("_csrf={admin_token}")).await;
+    assert!(revealed.body.contains("hunter2-very-secret") && revealed.body.contains("<html"));
+    assert_eq!(web.post(&reveal, Some(&dev), &format!("_csrf={token}")).await.status, StatusCode::FORBIDDEN);
+
+    // Editing a secret: its value isn't on the form, and an empty one keeps it.
+    let edit = format!("/variables/{}/edit", token_variable.id);
+    let edit_page = web.get(&edit, Some(&dev)).await;
+    assert_eq!(edit_page.status, StatusCode::OK);
+    assert!(!edit_page.body.contains("hunter2") && edit_page.body.contains("disabled"), "{}", edit_page.body);
+    let revision = token_variable.revision.to_string();
+    let fields =
+        [("_csrf", token.as_str()), ("name", "API_TOKEN"), ("value", ""), ("availability", "both"), ("revision", &revision)];
+    let saved = web.post(&edit, Some(&dev), &form(&fields)).await;
+    assert_eq!(saved.header("location"), Some(page.as_str()), "{}", saved.body);
+    let stale = web.post(&edit, Some(&dev), &form(&fields)).await;
+    assert_eq!(stale.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(stale.body.contains("Someone changed this"));
+    let updated = control.get_variable(&admin, token_variable.id).await.unwrap();
+    assert_eq!((updated.name.as_str(), updated.availability, updated.secret), ("API_TOKEN", VariableAvailability::Both, true));
+    assert_eq!(control.reveal_variable(&admin, updated.id).await.unwrap().expose(), "hunter2-very-secret");
+
+    // Deleting; viewers can do neither.
+    let delete = format!("/variables/{}/delete", api_url.id);
+    let viewer_token = for_viewer.csrf();
+    assert_eq!(web.post(&delete, Some(&viewer), &format!("_csrf={viewer_token}")).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        web.post(&page, Some(&viewer), &add("NOPE", "x", false).replace(&token, &viewer_token)).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(web.post(&delete, Some(&dev), &format!("_csrf={token}")).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(control.list_variables(&admin, VariableScope::Service(service.id)).await.unwrap().len(), 1);
+
+    // The environment's and the project's pages; the project's needs a role in the project.
+    let environment_page = web.get(&format!("/environments/{}/variables", production.id), Some(&dev)).await;
+    assert!(environment_page.body.contains("https://old") && environment_page.body.contains("Add a variable"));
+    assert!(environment_page.body.contains(&format!(r#"href="/environments/{}/variables""#, production.id)), "a tab");
+    assert_eq!(web.get(&format!("/projects/{}/variables", shop.id), Some(&dev)).await.status, StatusCode::FORBIDDEN);
+    let project_page = web.get(&format!("/projects/{}/variables", shop.id), Some(&ada)).await;
+    assert!(project_page.body.contains("eu-west"), "{}", project_page.body);
+}
+
+#[tokio::test]
+async fn adds_redirects_and_removes_domains() {
+    let web = Web::new().await;
+    let control = &web.control;
+    let (admin, _, production, service) = shop_with_team(&web).await;
+    let ada = web.sign_in("ada%40example.com").await;
+    let viewer = web.sign_in("viewer%40example.com").await;
+    let page = format!("/services/{}/domains", service.id);
+    let reply = web.get(&page, Some(&ada)).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(reply.body.contains("web-production-shop.localhost") && reply.body.contains("HTTP only"), "{}", reply.body);
+    let token = reply.csrf();
+
+    let add =
+        |hostname: &str, redirect_to: &str| form(&[("_csrf", &token), ("hostname", hostname), ("redirect_to", redirect_to)]);
+    assert_eq!(web.post(&page, Some(&ada), &add("Example.com", "")).await.status, StatusCode::SEE_OTHER);
+    let apex = control.list_domains(&admin, service.id).await.unwrap().domains.remove(0);
+    assert_eq!(apex.hostname.to_string(), "example.com");
+    assert_eq!(web.post(&page, Some(&ada), &add("www.example.com", &apex.id.to_string())).await.status, StatusCode::SEE_OTHER);
+    let refused = web.post(&page, Some(&ada), &add("not a host", "")).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.body.contains("not a host") && refused.body.contains(r#"role="alert""#), "{}", refused.body);
+    let reserved = web.post(&page, Some(&ada), &add("mine.localhost", "")).await;
+    assert_eq!(reserved.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let reply = web.get(&page, Some(&ada)).await;
+    assert!(reply.body.contains("redirects to") && reply.body.contains("No certificate yet"), "{}", reply.body);
+    let www = control
+        .list_domains(&admin, service.id)
+        .await
+        .unwrap()
+        .domains
+        .into_iter()
+        .find(|domain| domain.redirect_to.is_some())
+        .unwrap();
+    assert_eq!(www.redirect_to, Some(apex.id));
+
+    // Serving the app again, then a stale form.
+    let serve = form(&[("_csrf", &token), ("redirect_to", ""), ("revision", &www.revision.to_string())]);
+    assert_eq!(web.post(&format!("/domains/{}", www.id), Some(&ada), &serve).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(control.get_domain(&admin, www.id).await.unwrap().redirect_to, None);
+    let stale = web.post(&format!("/domains/{}", www.id), Some(&ada), &serve).await;
+    assert_eq!(stale.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(stale.body.contains("Someone changed this"), "{}", stale.body);
+
+    // A service with domains can't be deleted; viewers see the domains but can't change them.
+    let refused = web.post(&format!("/services/{}/delete", service.id), Some(&ada), &format!("_csrf={token}")).await;
+    assert!(refused.body.contains("Remove the service's domains first."), "{}", refused.body);
+    let for_viewer = web.get(&page, Some(&viewer)).await;
+    assert!(for_viewer.body.contains("www.example.com") && !for_viewer.body.contains("Add a domain"));
+    let viewer_token = for_viewer.csrf();
+    let remove = format!("/domains/{}/delete", www.id);
+    assert_eq!(web.post(&remove, Some(&viewer), &format!("_csrf={viewer_token}")).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(web.post(&remove, Some(&ada), &format!("_csrf={token}")).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(control.list_domains(&admin, service.id).await.unwrap().domains.len(), 1);
+
+    // Databases have no domains, so no tab.
+    let new = NewService {
+        name: "Cache".to_string(),
+        slug: None,
+        kind: ServiceKind::Database,
+        config: ServiceConfig::new(),
+        server_id: None,
+    };
+    let cache = control.create_service(&admin, production.id, new).await.unwrap();
+    let cache_page = web.get(&format!("/services/{}", cache.id), Some(&ada)).await;
+    assert!(!cache_page.body.contains("/domains") && cache_page.body.contains("/variables"), "{}", cache_page.body);
+    assert!(web.get(&format!("/services/{}/domains", cache.id), Some(&ada)).await.body.contains("Only apps have domains"));
+}

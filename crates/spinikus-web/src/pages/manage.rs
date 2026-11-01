@@ -18,7 +18,7 @@ use spinikus_core::{
     project::Project,
 };
 
-use super::{crumbs, parse_id, problem, redirect};
+use super::{Tab, crumbs, environment_tabs, parse_id, problem, project_tabs, redirect};
 use crate::{
     auth::Signed,
     error::WebError,
@@ -141,15 +141,15 @@ async fn project_as_admin(control: &Control, signed: &Signed, id: ProjectId) -> 
 fn project_settings_page(signed: &Signed, project: &Project, form: &Naming, notice: Notice<'_>) -> Markup {
     let action = format!("/projects/{}/settings", project.id);
     let content = html! {
-        (layout::heading("Project settings", None))
+        (layout::heading(&project.name, Some(html! { span class="font-mono" { (project.slug) } })))
+        (project_tabs(project, Some(Role::Admin), Tab::Settings))
         div class="max-w-xl space-y-6" {
             (forms::card(signed, "General", None, &action, notice, form.fields("project"), "Save"))
             (forms::danger(signed, "Delete project", "Only a project without environments can be deleted.",
                 &format!("/projects/{}/delete", project.id), "Delete project", "Delete this project?"))
         }
     };
-    let crumbs = [("Projects", "/".to_string()), (project.name.as_str(), format!("/projects/{}", project.id))];
-    layout::page(signed, &format!("Settings · {}", project.name), &crumbs, content)
+    layout::page(signed, &format!("Settings · {}", project.name), &[("Projects", "/".to_string())], content)
 }
 
 // Environments.
@@ -281,7 +281,8 @@ fn environment_settings_page(
 ) -> Markup {
     let action = format!("/environments/{}/settings", environment.id);
     let content = html! {
-        (layout::heading("Environment settings", None))
+        (layout::heading(&environment.name, Some(html! { span class="font-mono" { (environment.slug) } })))
+        (environment_tabs(environment, Role::Admin, Tab::Settings))
         div class="max-w-xl space-y-6" {
             (forms::card(signed, "General", None, &action, notice, form.fields("environment"), "Save"))
             @if project_admin {
@@ -290,5 +291,5 @@ fn environment_settings_page(
             }
         }
     };
-    layout::page(signed, &format!("Settings · {}", environment.name), &crumbs(project, Some(environment)), content)
+    layout::page(signed, &format!("Settings · {}", environment.name), &crumbs(project, None), content)
 }

@@ -81,6 +81,37 @@ impl<'a> Input<'a> {
     }
 }
 
+/// A multi-line text field. Browsers send its line breaks as CRLF; [`lines`] undoes that.
+pub fn textarea(id: &str, name: &str, label: &str, value: &str, hint: Option<&str>, placeholder: Option<&str>) -> Markup {
+    html! {
+        div class="space-y-1.5" {
+            label for=(id) class=(LABEL) { (label) }
+            textarea id=(id) name=(name) rows="3" autocomplete="off" spellcheck="false" placeholder=[placeholder]
+                class={ (INPUT) " font-mono" } { (value) }
+            @if let Some(hint) = hint { p class="text-xs text-zinc-500 dark:text-zinc-400" { (hint) } }
+        }
+    }
+}
+
+/// A textarea's value with the browser's CRLF line breaks made LF.
+pub fn lines(value: &str) -> String {
+    value.replace("\r\n", "\n")
+}
+
+/// A checkbox that posts `on` when checked. A disabled one posts nothing.
+pub fn checkbox(id: &str, name: &str, label: &str, checked: bool, disabled: bool, hint: Option<&str>) -> Markup {
+    html! {
+        div class="flex gap-3" {
+            input id=(id) name=(name) type="checkbox" checked[checked] disabled[disabled]
+                class="mt-0.5 size-4 rounded border-zinc-300 text-indigo-600 disabled:opacity-60 dark:border-zinc-700";
+            div {
+                label for=(id) class=(LABEL) { (label) }
+                @if let Some(hint) = hint { p class="text-xs text-zinc-500 dark:text-zinc-400" { (hint) } }
+            }
+        }
+    }
+}
+
 /// A select of `(value, label)` options.
 pub fn select(id: &str, name: &str, label: &str, options: &[(&str, &str)], selected: &str) -> Markup {
     html! {

@@ -141,6 +141,22 @@ pub fn header(title: &str, subtitle: Option<Markup>, actions: Markup) -> Markup 
     }
 }
 
+/// Links to the pages of one thing (a service's deployments, variables, …), the current one
+/// marked. Each is `(label, href, current)`.
+pub fn tabs(tabs: &[(&str, String, bool)]) -> Markup {
+    html! {
+        nav aria-label="Sections" class="mb-6 flex gap-6 overflow-x-auto border-b border-zinc-200 text-sm dark:border-zinc-800" {
+            @for (label, href, current) in tabs {
+                @if *current {
+                    a href=(href) aria-current="page" class="-mb-px border-b-2 border-indigo-500 pb-3 font-medium text-zinc-900 dark:text-zinc-100" { (label) }
+                } @else {
+                    a href=(href) class="-mb-px border-b-2 border-transparent pb-3 text-zinc-500 hover:border-zinc-300 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { (label) }
+                }
+            }
+        }
+    }
+}
+
 pub fn empty(message: &str) -> Markup {
     html! {
         div class="rounded-lg border border-dashed border-zinc-300 px-6 py-10 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-400" {
@@ -153,7 +169,7 @@ pub fn time(at: Timestamp) -> Markup {
     html! { time datetime=(at) { (at.strftime("%Y-%m-%d %H:%M UTC")) } }
 }
 
-const BADGE: &str = "inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset";
+pub const BADGE: &str = "inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset";
 
 pub fn environment_badge(kind: EnvironmentKind) -> Markup {
     let colors = match kind {

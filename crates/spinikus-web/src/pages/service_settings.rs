@@ -21,7 +21,7 @@ use spinikus_core::{
     source::{DeployKey, GitSource, ImageSource, Source, SourceSpec},
 };
 
-use super::{crumbs, manage::Naming, parse_id, problem, redirect};
+use super::{Tab, crumbs, manage::Naming, parse_id, problem, redirect, service_tabs};
 use crate::{
     auth::Signed,
     error::WebError,
@@ -517,7 +517,9 @@ fn settings_page(signed: &Signed, context: &Context, sections: Sections<'_>) -> 
     let base = format!("/services/{}/settings", service.id);
     let content = html! {
         @if let Some(alert) = sections.alert { (layout::alert(alert)) }
-        (layout::heading("Service settings", Some(html! { "Changes apply at the next deployment." })))
+        (layout::heading(&service.name, Some(html! { span class="font-mono" { (service.slug) } })))
+        (service_tabs(service, context.role, Tab::Settings))
+        p class="mb-6 text-sm text-zinc-500 dark:text-zinc-400" { "Changes apply at the next deployment." }
         div class="max-w-2xl space-y-6" {
             (forms::card(signed, "General", None, &format!("{base}/general"), sections.general.1, sections.general.0.fields("service"), "Save"))
             (forms::card(signed, "Source", Some("Where deployments get the app from."), &format!("{base}/source"), sections.source.1, sections.source.0.fields(), "Save source"))
@@ -531,12 +533,10 @@ fn settings_page(signed: &Signed, context: &Context, sections: Sections<'_>) -> 
             }
             (forms::card(signed, "Runtime", Some("How the app runs. Settings that the repository's spinikus.json sets can only be changed there."), &format!("{base}/runtime"), sections.runtime.1, sections.runtime.0.fields(context.file.as_ref()), "Save runtime"))
             @if context.role >= Role::Admin {
-                (forms::danger(signed, "Delete service", "Only a service without domains can be deleted.",
+                (forms::danger(signed, "Delete service", "Only a service without domains can be deleted. Remove them on the Domains tab first.",
                     &format!("/services/{}/delete", service.id), "Delete service", "Delete this service?"))
             }
         }
     };
-    let mut crumbs = crumbs(&context.project, Some(&context.environment));
-    crumbs.push((service.name.as_str(), format!("/services/{}", service.id)));
-    layout::page(signed, &format!("Settings · {}", service.name), &crumbs, content)
+    layout::page(signed, &format!("Settings · {}", service.name), &crumbs(&context.project, Some(&context.environment)), content)
 }
