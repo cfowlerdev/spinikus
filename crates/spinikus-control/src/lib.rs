@@ -3,7 +3,7 @@
 
 mod access;
 pub mod agents;
-mod audit;
+pub mod audit;
 pub mod auth;
 pub mod backups;
 pub mod ca;
@@ -14,6 +14,7 @@ pub mod domains;
 pub mod environments;
 pub mod error;
 mod input;
+pub mod members;
 pub mod page;
 pub mod password;
 pub mod projects;
@@ -26,6 +27,7 @@ pub mod sources;
 #[cfg(test)]
 mod test_support;
 pub mod tokens;
+pub mod users;
 pub mod variables;
 pub mod volumes;
 pub mod webhooks;
@@ -33,6 +35,7 @@ pub mod webhooks;
 use std::sync::Arc;
 
 use agents::AgentHub;
+pub use audit::AuditPage;
 pub use auth::{ClientInfo, Credential, Principal};
 pub use backups::{BackupScheduleChanges, BackupTimings, NewBackupSchedule, NewStorageDestination, StorageDestinationChanges};
 pub use certificates::{
@@ -44,6 +47,7 @@ pub use deployments::DeploymentTimings;
 pub use domains::{DomainChanges, NewDomain, ServiceDomains};
 pub use environments::{EnvironmentChanges, NewEnvironment};
 pub use error::ControlError;
+pub use members::Member;
 pub use page::Page;
 pub use projects::{NewProject, ProjectChanges};
 pub use servers::{Enrolled, JoinToken, NewServer};
@@ -51,6 +55,7 @@ pub use services::{NewService, ServiceChanges};
 use spinikus_store::SqliteStore;
 pub use tokens::NewToken;
 use tokio::sync::OnceCell;
+pub use users::{NewUser, UserChanges};
 pub use variables::{NewVariable, VariableChanges};
 pub use volumes::{NewVolume, VolumeChanges};
 

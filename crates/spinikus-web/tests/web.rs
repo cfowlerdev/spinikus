@@ -112,7 +112,12 @@ impl Web {
     }
 
     async fn sign_in(&self, email: &str) -> String {
-        let reply = self.post("/login", None, &format!("email={email}&password=correct+horse+battery+staple")).await;
+        self.sign_in_with(email, "correct+horse+battery+staple").await
+    }
+
+    /// Signs in with a URL-encoded email and password.
+    async fn sign_in_with(&self, email: &str, password: &str) -> String {
+        let reply = self.post("/login", None, &format!("email={email}&password={password}")).await;
         assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
         reply.session().0
     }
@@ -1085,7 +1090,7 @@ async fn instance_admins_change_the_general_settings() {
     let ada = web.sign_in("ada%40example.com").await;
     let dev = web.sign_in("dev%40example.com").await;
     assert_eq!(web.get("/settings", Some(&ada)).await.header("location"), Some("/settings/general"));
-    assert_eq!(web.get("/settings", Some(&dev)).await.header("location"), Some("/settings/tokens"));
+    assert_eq!(web.get("/settings", Some(&dev)).await.header("location"), Some("/settings/account"));
     assert_eq!(web.get("/settings/general", Some(&dev)).await.status, StatusCode::FORBIDDEN);
     let page = web.get("/settings/general", Some(&ada)).await;
     assert!(page.body.contains(r#"value="localhost""#), "the default base domain is shown");
@@ -1235,12 +1240,16 @@ async fn everyone_manages_their_own_api_tokens() {
     let revoked = web.post(&format!("/settings/tokens/{}/revoke", tokens[0].id), Some(&dev), &form(&[("_csrf", &token)])).await;
     assert_eq!(revoked.header("location"), Some("/settings/tokens"));
     assert!(web.control.authenticate_api_token(&secret).await.is_err());
-    // Someone else's token is not theirs to revoke.
+    // Someone else's token is not theirs to revoke, unless they are an instance admin.
+    let viewer = web.sign_in("viewer%40example.com").await;
+    let viewer_token = web.get("/", Some(&viewer)).await.csrf();
+    let other = web.control.list_api_tokens(&principal).await.unwrap().remove(0);
+    web.post(&format!("/settings/tokens/{}/revoke", other.id), Some(&viewer), &form(&[("_csrf", &viewer_token)])).await;
+    assert!(web.control.list_api_tokens(&principal).await.unwrap().iter().any(|token| token.id == other.id));
     let ada = web.sign_in("ada%40example.com").await;
     let ada_token = web.get("/", Some(&ada)).await.csrf();
-    let other = web.control.list_api_tokens(&principal).await.unwrap().remove(0);
     web.post(&format!("/settings/tokens/{}/revoke", other.id), Some(&ada), &form(&[("_csrf", &ada_token)])).await;
-    assert!(web.control.list_api_tokens(&principal).await.unwrap().iter().any(|token| token.id == other.id));
+    assert!(web.control.list_api_tokens(&principal).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1309,4 +1318,147 @@ async fn the_palette_lists_what_the_user_can_open() {
     let for_admin = web.get("/palette", Some(&ada)).await.body;
     assert!(for_admin.contains(&format!("/projects/{}", blog.id)) && for_admin.contains("/settings/servers"));
     assert_eq!(web.get("/palette", None).await.status, StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn instance_admins_manage_users_and_everyone_their_password() {
+    let web = Web::new().await;
+    let (admin, _, _, _) = shop_with_team(&web).await;
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+    let token = web.get("/", Some(&ada)).await.csrf();
+    assert_eq!(web.get("/settings/users", Some(&dev)).await.status, StatusCode::FORBIDDEN);
+    let list = web.get("/settings/users", Some(&ada)).await;
+    assert!(list.body.contains("dev@example.com") && list.body.contains("Users"));
+
+    let new =
+        |password: &str| form(&[("_csrf", &token), ("name", "Grace"), ("email", "grace@example.com"), ("password", password)]);
+    let weak = web.post("/settings/users", Some(&ada), &new("short-pw")).await;
+    assert_eq!(weak.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(weak.body.contains("Use at least 12 characters") && !weak.body.contains("short-pw"), "the password isn't sent back");
+    let reply = web.post("/settings/users", Some(&ada), &new("an initial password")).await;
+    let id = created(&reply, "/settings/users/");
+    let page = web.get(&format!("/settings/users/{id}"), Some(&ada)).await;
+    assert!(page.body.contains("Grace") && page.body.contains("No memberships.") && page.body.contains("Disable user"));
+
+    let account = |name: &str, admin: bool, revision: &str| {
+        let mut fields = vec![("_csrf", token.as_str()), ("name", name), ("email", "grace@example.com"), ("revision", revision)];
+        if admin {
+            fields.push(("admin", "on"));
+        }
+        form(&fields)
+    };
+    let saved = web.post(&format!("/settings/users/{id}"), Some(&ada), &account("Grace H.", true, "1")).await;
+    assert_eq!(saved.header("location"), Some(format!("/settings/users/{id}?saved=account").as_str()));
+    let stale = web.post(&format!("/settings/users/{id}"), Some(&ada), &account("Grace", false, "1")).await;
+    assert_eq!(stale.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let grace = web.control.get_user(&admin, id.parse().unwrap()).await.unwrap();
+    assert_eq!((grace.name.as_str(), grace.admin), ("Grace H.", true));
+
+    // Grace changes her own password; her other sessions end.
+    let grace_session = web.sign_in_with("grace%40example.com", "an%20initial%20password").await;
+    let other_session = web.sign_in_with("grace%40example.com", "an%20initial%20password").await;
+    let grace_token = web.get("/settings/account", Some(&grace_session)).await.csrf();
+    let change = |current: &str, new: &str, again: &str| {
+        form(&[("_csrf", &grace_token), ("current_password", current), ("new_password", new), ("confirm_password", again)])
+    };
+    let differ = web
+        .post(
+            "/settings/account/password",
+            Some(&grace_session),
+            &change("an initial password", "a new password!", "another one!!"),
+        )
+        .await;
+    assert!(differ.status == StatusCode::UNPROCESSABLE_ENTITY && differ.body.contains("The new passwords differ"));
+    let wrong = web
+        .post("/settings/account/password", Some(&grace_session), &change("wrong password", "a new password!", "a new password!"))
+        .await;
+    assert!(wrong.body.contains("It is not your current password"), "{}", wrong.body);
+    let changed = web
+        .post(
+            "/settings/account/password",
+            Some(&grace_session),
+            &change("an initial password", "a new password!", "a new password!"),
+        )
+        .await;
+    assert_eq!(changed.header("location"), Some("/settings/account?saved=password"));
+    assert_eq!(web.get("/settings/account", Some(&grace_session)).await.status, StatusCode::OK);
+    assert_eq!(web.get("/settings/account", Some(&other_session)).await.status, StatusCode::SEE_OTHER, "signed out");
+
+    // Her token can be revoked from her page, and disabling her ends her session.
+    let (grace_api, _) = web
+        .control
+        .create_api_token(
+            &web.control.authenticate_session(&grace_session).await.unwrap(),
+            spinikus_control::NewToken { name: "CI".into(), role: Role::Viewer, scope: None, expires_at: None },
+        )
+        .await
+        .unwrap();
+    assert!(web.get(&format!("/settings/users/{id}"), Some(&ada)).await.body.contains("CI"));
+    let revoked =
+        web.post(&format!("/settings/users/{id}/tokens/{}/revoke", grace_api.id), Some(&ada), &form(&[("_csrf", &token)])).await;
+    assert_eq!(revoked.status, StatusCode::SEE_OTHER);
+    let disabled = web.post(&format!("/settings/users/{id}/disable"), Some(&ada), &form(&[("_csrf", &token)])).await;
+    assert_eq!(disabled.status, StatusCode::SEE_OTHER);
+    assert_eq!(web.get("/settings/account", Some(&grace_session)).await.status, StatusCode::SEE_OTHER);
+    let page = web.get(&format!("/settings/users/{id}"), Some(&ada)).await;
+    assert!(page.body.contains("Enable user") && page.body.contains("No API tokens."));
+    let reset = web
+        .post(&format!("/settings/users/{id}/password"), Some(&ada), &form(&[("_csrf", &token), ("password", "reset by ada!")]))
+        .await;
+    assert_eq!(reset.header("location"), Some(format!("/settings/users/{id}?saved=password").as_str()));
+    // Admins can't disable themselves: no button, and a refusal if posted anyway.
+    let own = web.get(&format!("/settings/users/{}", admin.user.id), Some(&ada)).await;
+    assert!(!own.body.contains("Disable user"));
+    let refused = web.post(&format!("/settings/users/{}/disable", admin.user.id), Some(&ada), &form(&[("_csrf", &token)])).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.body.contains("You can't disable yourself"), "{}", refused.body);
+}
+
+#[tokio::test]
+async fn admins_manage_members_and_read_the_audit_log() {
+    let web = Web::new().await;
+    let (admin, shop, production, _) = shop_with_team(&web).await;
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+    let token = web.get("/", Some(&ada)).await.csrf();
+    let members = format!("/projects/{}/members", shop.id);
+    assert!(web.get(&format!("/projects/{}", shop.id), Some(&ada)).await.body.contains(&members), "the Members tab");
+    assert!(!web.get(&format!("/environments/{}", production.id), Some(&dev)).await.body.contains("/members"));
+    assert_eq!(web.get(&members, Some(&dev)).await.status, StatusCode::FORBIDDEN);
+
+    let add = |email: &str, role: &str| form(&[("_csrf", &token), ("email", email), ("role", role)]);
+    let nobody = web.post(&members, Some(&ada), &add("nobody@example.com", "viewer")).await;
+    assert!(nobody.status == StatusCode::UNPROCESSABLE_ENTITY && nobody.body.contains("No user has this email"));
+    assert!(nobody.body.contains("nobody@example.com"), "what was typed stays");
+    let added = web.post(&members, Some(&ada), &add("dev@example.com", "admin")).await;
+    assert_eq!(added.header("location"), Some(format!("{members}?saved=1").as_str()));
+    let page = web.get(&members, Some(&dev)).await;
+    assert_eq!(page.status, StatusCode::OK, "dev is a project admin now");
+    assert!(page.body.contains("dev@example.com") && page.body.contains("(you)"));
+    let membership = web.control.list_members(&admin, MembershipScope::Project(shop.id)).await.unwrap().remove(0).membership;
+    let scope = format!("project:{}", shop.id);
+    let role = form(&[("_csrf", &token), ("role", "viewer"), ("revision", &membership.revision.to_string()), ("scope", &scope)]);
+    assert_eq!(web.post(&format!("/memberships/{}", membership.id), Some(&ada), &role).await.status, StatusCode::SEE_OTHER);
+    let stale = web.post(&format!("/memberships/{}", membership.id), Some(&ada), &role).await;
+    assert!(stale.status == StatusCode::UNPROCESSABLE_ENTITY && stale.body.contains("Someone changed this"));
+
+    // The environment's members, and removing one.
+    let environment_members = format!("/environments/{}/members", production.id);
+    let page = web.get(&environment_members, Some(&ada)).await;
+    assert!(page.body.contains("viewer@example.com") && page.body.contains("have their project role here too"));
+    let removed = web
+        .post(&format!("/memberships/{}/delete", membership.id), Some(&ada), &form(&[("_csrf", &token), ("scope", &scope)]))
+        .await;
+    assert_eq!(removed.header("location"), Some(format!("{members}?saved=1").as_str()));
+    assert!(web.get(&members, Some(&ada)).await.body.contains("No members yet."));
+
+    // The audit log: the project's part for its admins, everything for instance admins.
+    let log = web.get(&format!("/projects/{}/audit-log", shop.id), Some(&ada)).await;
+    assert!(log.body.contains("membership.delete") && log.body.contains("by Ada &lt;ada@example.com&gt;"), "{}", log.body);
+    assert_eq!(web.get(&format!("/projects/{}/audit-log", shop.id), Some(&dev)).await.status, StatusCode::FORBIDDEN);
+    let all = web.get("/settings/audit-log", Some(&ada)).await;
+    assert!(all.body.contains("project.create") && all.body.contains(&format!(r#"href="/projects/{}""#, shop.id)));
+    assert_eq!(web.get("/settings/audit-log", Some(&dev)).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(web.get("/settings/audit-log?before=junk", Some(&ada)).await.status, StatusCode::OK);
 }

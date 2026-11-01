@@ -1,9 +1,11 @@
+mod audit;
 mod backups;
 mod databases;
 mod deployments;
 mod domains;
 mod environments;
 mod hooks;
+mod members;
 mod projects;
 mod servers;
 mod service_logs;
@@ -12,6 +14,7 @@ mod session;
 mod settings;
 mod sources;
 mod tokens;
+mod users;
 mod variables;
 mod volumes;
 
@@ -27,6 +30,17 @@ pub fn v1() -> Router<Control> {
         .route("/setup", get(session::setup_status).post(session::setup))
         .route("/login", post(session::login))
         .route("/me", get(session::me))
+        .route("/me/password", axum::routing::put(users::change_password))
+        .route("/users", get(users::list).post(users::create))
+        .route("/users/{id}", get(users::show).patch(users::update))
+        .route("/users/{id}/disable", post(users::disable))
+        .route("/users/{id}/enable", post(users::enable))
+        .route("/users/{id}/password", axum::routing::put(users::reset_password))
+        .route("/users/{id}/tokens", get(users::tokens))
+        .route("/projects/{id}/members", get(members::list_project).post(members::add_project))
+        .route("/environments/{id}/members", get(members::list_environment).post(members::add_environment))
+        .route("/memberships/{id}", axum::routing::patch(members::update).delete(members::delete))
+        .route("/audit-log", get(audit::list))
         .route("/tokens", get(tokens::list).post(tokens::create))
         .route("/tokens/{id}", axum::routing::delete(tokens::revoke))
         .route("/projects", get(projects::list).post(projects::create))

@@ -1,11 +1,13 @@
 //! Page handlers, by area.
 
+pub mod audit;
 pub mod backups;
 pub mod databases;
 pub mod deployments;
 pub mod domains;
 pub mod logs;
 pub mod manage;
+pub mod members;
 pub mod overview;
 pub mod palette;
 pub mod projects;
@@ -16,6 +18,7 @@ pub mod session;
 pub mod settings;
 pub mod storage;
 pub mod tokens;
+pub mod users;
 pub mod variables;
 
 use axum::{
@@ -44,6 +47,8 @@ enum Tab {
     Variables,
     Domains,
     Backups,
+    Members,
+    AuditLog,
     Settings,
 }
 
@@ -55,6 +60,8 @@ fn project_tabs(project: &Project, role: Option<Role>, current: Tab) -> Markup {
         tabs.push(("Variables", format!("{base}/variables"), current == Tab::Variables));
     }
     if role == Some(Role::Admin) {
+        tabs.push(("Members", format!("{base}/members"), current == Tab::Members));
+        tabs.push(("Audit log", format!("{base}/audit-log"), current == Tab::AuditLog));
         tabs.push(("Settings", format!("{base}/settings"), current == Tab::Settings));
     }
     layout::tabs(&tabs)
@@ -67,6 +74,7 @@ fn environment_tabs(environment: &Environment, role: Role, current: Tab) -> Mark
         ("Variables", format!("{base}/variables"), current == Tab::Variables),
     ];
     if role >= Role::Admin {
+        tabs.push(("Members", format!("{base}/members"), current == Tab::Members));
         tabs.push(("Settings", format!("{base}/settings"), current == Tab::Settings));
     }
     layout::tabs(&tabs)

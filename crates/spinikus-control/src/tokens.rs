@@ -63,11 +63,13 @@ impl Control {
         Ok(tokens.into_iter().filter(|token| token.revoked_at.is_none()).collect())
     }
 
-    /// Revokes one of the principal's own tokens, which may be the one in use. Anyone else's,
-    /// or one already revoked, is `NotFound`.
+    /// Revokes one of the principal's own tokens, which may be the one in use, or for instance
+    /// admins anyone's. Someone else's otherwise, or one already revoked, is `NotFound`.
     pub async fn revoke_api_token(&self, principal: &Principal, id: ApiTokenId) -> Result<(), ControlError> {
         let token = match self.store().get_api_token(id).await {
-            Ok(token) if token.user_id == principal.user.id && token.revoked_at.is_none() => token,
+            Ok(token) if (token.user_id == principal.user.id || principal.is_instance_admin()) && token.revoked_at.is_none() => {
+                token
+            }
             Ok(_) | Err(spinikus_store::StoreError::NotFound { .. }) => return Err(not_found("api_token", id)),
             Err(error) => return Err(error.into()),
         };
@@ -117,6 +119,21 @@ mod tests {
         let audit = control.store().list_audit_entries(None, None, None, 10).await.unwrap();
         let actions: Vec<_> = audit.iter().map(|entry| entry.action.as_str()).collect();
         assert_eq!(actions, ["api_token.revoke", "api_token.create"]);
+    }
+
+    #[tokio::test]
+    async fn instance_admins_revoke_anyones_tokens() {
+        let (_dir, control) = control().await;
+        let admin = user(&control, "admin@example.com", true).await;
+        let ada = user(&control, "ada@example.com", false).await;
+        let (token, _) = control.create_api_token(&ada, new("CI", Role::Viewer, None)).await.unwrap();
+
+        let listed = control.list_user_api_tokens(&admin, ada.user.id).await.unwrap();
+        control.revoke_api_token(&admin, token.id).await.unwrap();
+
+        assert_eq!(listed.iter().map(|token| token.id).collect::<Vec<_>>(), [token.id]);
+        assert!(control.list_api_tokens(&ada).await.unwrap().is_empty());
+        assert!(matches!(control.list_user_api_tokens(&ada, admin.user.id).await, Err(ControlError::Forbidden)));
     }
 
     #[tokio::test]

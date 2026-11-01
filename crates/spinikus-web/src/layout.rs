@@ -173,9 +173,9 @@ pub fn tabs(tabs: &[(&str, String, bool)]) -> Markup {
         nav aria-label="Sections" class="mb-6 flex gap-6 overflow-x-auto border-b border-zinc-200 text-sm dark:border-zinc-800" {
             @for (label, href, current) in tabs {
                 @if *current {
-                    a href=(href) aria-current="page" class="-mb-px border-b-2 border-indigo-500 pb-3 font-medium text-zinc-900 dark:text-zinc-100" { (label) }
+                    a href=(href) aria-current="page" class="-mb-px shrink-0 border-b-2 border-indigo-500 pb-3 font-medium whitespace-nowrap text-zinc-900 dark:text-zinc-100" { (label) }
                 } @else {
-                    a href=(href) class="-mb-px border-b-2 border-transparent pb-3 text-zinc-500 hover:border-zinc-300 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { (label) }
+                    a href=(href) class="-mb-px shrink-0 border-b-2 border-transparent pb-3 whitespace-nowrap text-zinc-500 hover:border-zinc-300 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { (label) }
                 }
             }
         }

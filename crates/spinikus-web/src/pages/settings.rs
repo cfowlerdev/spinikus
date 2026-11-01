@@ -30,17 +30,23 @@ pub(super) enum SettingsTab {
     General,
     Servers,
     Storage,
+    Users,
+    AuditLog,
+    Account,
     Tokens,
 }
 
-/// The settings' tabs: the instance's for instance admins, API tokens for everyone.
+/// The settings' tabs: the instance's for instance admins, the account and API tokens for everyone.
 pub(super) fn tabs(signed: &Signed, current: SettingsTab) -> Markup {
     let mut tabs = Vec::new();
     if signed.principal.is_instance_admin() {
         tabs.push(("General", "/settings/general".to_string(), current == SettingsTab::General));
         tabs.push(("Servers", "/settings/servers".to_string(), current == SettingsTab::Servers));
         tabs.push(("Storage", "/settings/storage".to_string(), current == SettingsTab::Storage));
+        tabs.push(("Users", "/settings/users".to_string(), current == SettingsTab::Users));
+        tabs.push(("Audit log", "/settings/audit-log".to_string(), current == SettingsTab::AuditLog));
     }
+    tabs.push(("Account", "/settings/account".to_string(), current == SettingsTab::Account));
     tabs.push(("API tokens", "/settings/tokens".to_string(), current == SettingsTab::Tokens));
     html! {
         (layout::heading("Settings", None))
@@ -59,7 +65,7 @@ pub(super) fn require_admin(signed: &Signed) -> Result<(), WebError> {
 pub async fn index(signed: Signed) -> Response {
     match signed.principal.is_instance_admin() {
         true => Redirect::to("/settings/general").into_response(),
-        false => Redirect::to("/settings/tokens").into_response(),
+        false => Redirect::to("/settings/account").into_response(),
     }
 }
 

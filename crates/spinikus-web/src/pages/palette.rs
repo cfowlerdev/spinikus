@@ -45,7 +45,10 @@ async fn entries(control: &Control, signed: &Signed) -> Result<Vec<Entry>, Contr
         entries.push(page("General settings", "/settings/general"));
         entries.push(page("Servers", "/settings/servers"));
         entries.push(page("Storage destinations", "/settings/storage"));
+        entries.push(page("Users", "/settings/users"));
+        entries.push(page("Audit log", "/settings/audit-log"));
     }
+    entries.push(page("Account", "/settings/account"));
     entries.push(page("API tokens", "/settings/tokens"));
 
     let mut after = None;

@@ -642,3 +642,102 @@ async fn manages_destinations_schedules_and_backups_of_a_database() {
     assert_eq!(restores.body["items"], json!([]));
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn admins_manage_users_members_and_read_the_audit_log() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+    let login = |email: &str, password: &str| {
+        api.send(Method::POST, "/api/v1/login", None, &[], Some(json!({ "email": email, "password": password })))
+    };
+
+    let new_user = json!({ "email": "grace@example.com", "name": "Grace", "password": "an initial password" });
+    let created = api.send(Method::POST, "/api/v1/users", token, &[], Some(new_user)).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = created.body["id"].as_str().unwrap().to_string();
+    let etag = created.header(header::ETAG).to_string();
+    let renamed = api
+        .send(
+            Method::PATCH,
+            &format!("/api/v1/users/{id}"),
+            token,
+            &[(header::IF_MATCH, &etag)],
+            Some(json!({ "name": "Grace H." })),
+        )
+        .await;
+    assert_eq!((renamed.status, &renamed.body["name"]), (StatusCode::OK, &json!("Grace H.")));
+    let grace = login("grace@example.com", "an initial password").await.body["token"].as_str().unwrap().to_string();
+    let changed = api
+        .send(
+            Method::PUT,
+            "/api/v1/me/password",
+            Some(&grace),
+            &[],
+            Some(json!({ "current_password": "an initial password", "new_password": "grace's own password" })),
+        )
+        .await;
+    assert_eq!(changed.status, StatusCode::NO_CONTENT);
+    assert_eq!(login("grace@example.com", "grace's own password").await.status, StatusCode::CREATED);
+    assert_eq!(api.send(Method::GET, "/api/v1/users", Some(&grace), &[], None).await.status, StatusCode::FORBIDDEN);
+    let tokens = api.send(Method::GET, &format!("/api/v1/users/{id}/tokens"), token, &[], None).await;
+    assert_eq!(tokens.body["items"].as_array().unwrap().len(), 2, "two logins");
+
+    // Members of a project, by email.
+    let project = api.send(Method::POST, "/api/v1/projects", token, &[], Some(json!({ "name": "Shop" }))).await;
+    let members = format!("/api/v1/projects/{}/members", project.body["id"].as_str().unwrap());
+    let added =
+        api.send(Method::POST, &members, token, &[], Some(json!({ "email": "grace@example.com", "role": "viewer" }))).await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    assert_eq!(
+        (&added.body["user"]["name"], &added.body["role"], &added.body["scope"]),
+        (&json!("Grace H."), &json!("viewer"), &json!("project"))
+    );
+    let membership = added.body["id"].as_str().unwrap().to_string();
+    let etag = added.header(header::ETAG).to_string();
+    let promoted = api
+        .send(
+            Method::PATCH,
+            &format!("/api/v1/memberships/{membership}"),
+            token,
+            &[(header::IF_MATCH, &etag)],
+            Some(json!({ "role": "admin" })),
+        )
+        .await;
+    assert_eq!(promoted.body["role"], "admin");
+    let listed = api.send(Method::GET, &members, Some(&grace), &[], None).await;
+    assert_eq!(listed.body["items"].as_array().unwrap().len(), 1, "a project admin lists its members");
+    let unknown =
+        api.send(Method::POST, &members, token, &[], Some(json!({ "email": "nobody@example.com", "role": "viewer" }))).await;
+    assert_eq!((unknown.status, &unknown.body["code"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("invalid")));
+
+    // The project's admins read its part of the log; only instance admins read all of it.
+    let project_log = format!("/api/v1/audit-log?project_id={}", project.body["id"].as_str().unwrap());
+    let log = api.send(Method::GET, &project_log, Some(&grace), &[], None).await;
+    let actions: Vec<_> = log.body["items"].as_array().unwrap().iter().map(|entry| entry["action"].clone()).collect();
+    assert_eq!(actions, [json!("membership.update"), json!("membership.create"), json!("project.create")]);
+    assert_eq!(log.body["users"][0]["email"], "admin@example.com", "the actors come along");
+    assert_eq!(api.send(Method::GET, "/api/v1/audit-log", Some(&grace), &[], None).await.status, StatusCode::FORBIDDEN);
+    let all = api.send(Method::GET, "/api/v1/audit-log?limit=2", token, &[], None).await;
+    assert_eq!(all.body["items"].as_array().unwrap().len(), 2);
+    let older = api
+        .send(
+            Method::GET,
+            &format!("/api/v1/audit-log?limit=2&before={}", all.body["next_cursor"].as_str().unwrap()),
+            token,
+            &[],
+            None,
+        )
+        .await;
+    assert_ne!(older.body["items"][0]["id"], all.body["items"][0]["id"]);
+
+    let removed = api.send(Method::DELETE, &format!("/api/v1/memberships/{membership}"), token, &[], None).await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT);
+    let disabled = api.send(Method::POST, &format!("/api/v1/users/{id}/disable"), token, &[], None).await;
+    assert!(disabled.body["disabled_at"].is_string());
+    assert_eq!(api.send(Method::GET, "/api/v1/me", Some(&grace), &[], None).await.status, StatusCode::UNAUTHORIZED);
+    let reset = api
+        .send(Method::PUT, &format!("/api/v1/users/{id}/password"), token, &[], Some(json!({ "password": "a reset password" })))
+        .await;
+    assert_eq!(reset.status, StatusCode::NO_CONTENT);
+}
