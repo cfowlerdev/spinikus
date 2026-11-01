@@ -29,9 +29,9 @@ pub async fn join(config: &SpinikusConfig, args: AgentJoinArgs) -> anyhow::Resul
             files.dir().display()
         );
     }
-    let token = match args.token.or_else(|| std::env::var(JOIN_TOKEN_VAR).ok()) {
+    let token = match args.join_token.or_else(|| std::env::var(JOIN_TOKEN_VAR).ok()) {
         Some(token) => Secret::new(token),
-        None => bail!("Pass the join token with --token or {JOIN_TOKEN_VAR}"),
+        None => bail!("Pass the join token with --join-token or {JOIN_TOKEN_VAR}"),
     };
 
     let credentials = spinikus_agent::join(&args.url, &token, &args.ca_fingerprint, spinikus_agent::server_facts())

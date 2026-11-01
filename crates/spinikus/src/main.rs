@@ -1,9 +1,11 @@
+use std::process::ExitCode;
+
 use anyhow::Context;
 use clap::Parser;
 use spinikus::{
     admin, agent,
     cli::{AdminCommand, AgentCommand, Cli, Commands, ServerCommand},
-    config, server,
+    client, config, server,
 };
 use spinikus_core::config::SpinikusConfig;
 
@@ -20,22 +22,38 @@ async fn run_command(command: Commands, config: &SpinikusConfig) -> anyhow::Resu
             ServerCommand::Run(args) => server::run(config, args).await?,
             ServerCommand::Migrate => server::migrate(config).await?,
         },
+        _ => unreachable!("client commands run without the instance config"),
     }
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Parse the command line
-    let cli = Cli::parse();
-
-    // Load config
+/// The server and agent commands: they read `spinikus.toml` and log.
+async fn run_instance(command: Commands) -> anyhow::Result<()> {
     let config = config::load().context("Failed to load Spinikus configuration")?;
-
-    // Init logging
     config::init_logging(&config.logging);
-
     tracing::info!("Spinikus v0.1");
-    // Decide what to do based on command line
-    run_command(cli.command, &config).await
+    run_command(command, &config).await
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match cli.command {
+        command @ (Commands::Server(_) | Commands::Admin(_) | Commands::Agent(_)) => match run_instance(command).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Error: {error:?}");
+                ExitCode::FAILURE
+            }
+        },
+        // The client commands talk to an instance over its API and need no config file.
+        command => match client::run(command, cli.global).await {
+            Some(Ok(())) => ExitCode::SUCCESS,
+            Some(Err(error)) => {
+                eprintln!("error: {error:#}");
+                ExitCode::from(client::exit_status(&error))
+            }
+            None => unreachable!("instance commands are handled above"),
+        },
+    }
 }

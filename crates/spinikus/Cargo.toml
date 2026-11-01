@@ -6,12 +6,17 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
-clap = {version = "4.6.7", features = ["derive"]}
+clap = {version = "4.6.7", features = ["derive", "env"]}
 config = "0.15.27"
+jiff.workspace = true
+reqwest.workspace = true
 rpassword.workspace = true
+rustls.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+toml = "1.1.2"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
@@ -30,8 +35,6 @@ async-trait.workspace = true
 spinikus-agent = { workspace = true, features = ["test-support"] }
 spinikus-proto.workspace = true
 prost-types.workspace = true
-serde_json.workspace = true
-jiff.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 tempfile.workspace = true

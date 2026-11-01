@@ -485,23 +485,24 @@ The CLI is the same `spinikus` binary as the server.
 # running Spinikus
 spinikus server run | migrate | backup | restore | check-config
 spinikus admin create-user          # bootstrap the first admin
-spinikus agent run | join <url> --token <t>
+spinikus agent run | join <url> --join-token <t>
 
 # talking to a Spinikus instance
-spinikus login | logout | context list|use
-spinikus link                       # remember which service this directory means
-spinikus project|env|service list|create|show|delete
+spinikus login | logout | whoami | context list|use|remove
+spinikus link [project/environment[/service]]   # remember what this directory deploys
+spinikus project|environment|service list|create|show|delete
 spinikus deploy [service]           # waits and streams build logs
-spinikus rollback [service]
+spinikus rollback [service] [--to <deployment>]
+spinikus deployment list|show|logs|cancel
 spinikus logs [service] -f
-spinikus shell [service]            # web terminal equivalent
-spinikus env list|set|unset|import|export
-spinikus domain add|remove
-spinikus db backup|restore
-spinikus token create|revoke
+spinikus shell [service]            # web terminal equivalent (not yet)
+spinikus env list|set|unset|import|export     # variables
+spinikus domain list|add|remove
+spinikus db create|backup|backups|restore
+spinikus token list|create|revoke
 ```
 
-- **Global flags**: `--server`, `--token`, `-o table|json|yaml`, `--quiet` and `--no-color`. `SPINIKUS_URL` and `SPINIKUS_TOKEN` work for CI.
+- **Global flags**: `--server`, `--token`, `--context`, `-o table|json`, `--quiet` and `--no-color`. `SPINIKUS_URL` and `SPINIKUS_TOKEN` work for CI.
 - **Config**: named contexts (server URL plus token) in `~/.config/spinikus/`, with the token in the OS keychain if available, otherwise in a file with 0600 permissions.
 - **`deploy`** waits by default and streams build logs, exiting non-zero on failure. `--detach` returns immediately.
 - **Stable exit codes**, and JSON output that matches the API's shapes, so scripts do not have to parse tables.
@@ -517,6 +518,15 @@ spinikus token create|revoke
 - **Idempotency**: an `Idempotency-Key` header on POSTs that create deployments or other side effects.
 - **Concurrent edits**: every mutable resource carries a revision, and updates use `If-Match`, so the UI and CLI cannot silently overwrite each other.
 - **Secrets are write-only.** Reads return metadata only, and a separate reveal endpoint requires the right role and writes to the audit log.
+- **The CLI is a plain API client**, with no access the API doesn't give: `spinikus login` exchanges an email and password for an API token (`POST /login`, named "spinikus CLI"), saved per context; `logout` revokes it, and signing in again replaces (and revokes) the old one. Client commands don't read `spinikus.toml`, so they work anywhere.
+- **Tokens are kept in a file for now** (`~/.config/spinikus/credentials.toml`, mode 0600, apart from `config.toml`), not the OS keychain: a keychain needs a platform library on each OS (Secret Service over D-Bus on Linux, often absent on servers and in CI) and a fallback anyway. The keychain can come later behind the same `ConfigDir`.
+- **Which instance a command uses**: `--context`, else `--server` (with `--token`, or the context for that server), else the context for the directory's link, else the current context. So a directory linked to one instance keeps using it after switching the current context.
+- **The link file is `.spinikus/link.json`** (instance, project, environment and optionally service IDs), found by walking up from the current directory like `.git`, with a `.gitignore` of its own inside: the IDs belong to one instance, not to the code, so they stay out of the repository without touching the project's `.gitignore`. Names elsewhere are IDs, slug paths (`shop/production/web`), or slugs relative to the link (`web`, `production/web`).
+- **Variables are `spinikus env`; environments are `spinikus environment`**: the short name went to the command used most, as in other platforms' CLIs. `env` acts on the linked service unless `-s`, `-e` or `-p` names a service, environment or project (without a value: the linked one). `env set NAME` alone reads the value without echoing it, or from stdin, so secrets stay out of shell history; `env export` writes plain values and leaves secrets as comments unless `--reveal` (audited, admins).
+- **Output**: results on stdout, progress and deployment logs on stderr, so `spinikus deploy -o json > result.json` captures only the deployment. `-o json` prints the API's own JSON (lists as one array of every page's items); tables read only the fields they show, so new API fields never break an older CLI. YAML was left out: JSON covers scripts, and the YAML crates for serde are unmaintained.
+- **Exit statuses are stable**: 1 any other failure, 2 usage, 3 not signed in or token rejected, 4 forbidden, 5 not found, 6 refused (invalid, conflict, stale revision), 7 a deployment, backup or restore that was waited for failed or was canceled.
+- **`deploy` follows the deployment's SSE stream** (reconnecting with `Last-Event-ID`) and ends with where the app answers; `rollback`, `db create`, `db backup` and `db restore` wait the same way (backups and restores by polling), and `--detach` prints the ID and returns. Deleting asks for confirmation on a terminal and needs `--yes` without one.
+- **`agent join` takes `--join-token`** (or `SPINIKUS_JOIN_TOKEN`), since `--token` is the API token on every client command.
 - **Authentication**: a session cookie for the web UI (HttpOnly, SameSite, CSRF protection) and bearer API tokens for the CLI and automation. Tokens have a recognizable prefix, are shown once, are stored hashed, are scoped like memberships (role plus project or environment), and can expire. Users manage only their own (`GET`/`POST /tokens`, `DELETE /tokens/{id}`; revoked ones are not listed, and someone else's is not found). The scope must be a project or environment the user can see, and a token created with a token can't widen it: its role is at most that token's, and a scoped token can only create scoped ones within its scope. Instance admins may also revoke anyone's token (`DELETE /tokens/{id}`) and list a user's (`GET /users/{id}/tokens`).
 - **Users are managed by instance admins** (`/users`: list, create, edit name, email and admin flag, disable and enable, reset the password). There are no invitations or email yet: an admin sets an initial password (the same policy as setup, at least 12 characters) and gives it to the person, who changes it with `PUT /me/password`, giving the current one. Changing your own password ends your other sessions and keeps the one in use; an admin's reset ends all of them. Disabling a user ends their sessions, their API tokens stop working, and their memberships and history stay; nobody can disable themselves, and the last instance admin can't lose the flag. Users are never deleted, since audit entries and deployments name them.
 - **Members are managed by the scope's admins** (`/projects/{id}/members`, `/environments/{id}/members`, `/memberships/{id}`): a project's admins (and so instance admins) manage its and its environments' members, an environment's admins that environment's. Members are added by email, so the user must exist and be active; a user has at most one membership per scope, and changing it is an update of its role, not a second membership. Project members have their role in every environment; an environment membership can only add to it.
