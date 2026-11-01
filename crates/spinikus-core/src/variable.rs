@@ -94,7 +94,8 @@ impl ScopeLevel {
 pub enum VariableAvailability {
     /// Set in the running container's environment.
     Runtime,
-    /// Passed to the build only. Build values can end up in image layers.
+    /// Passed to the build only. Plain build values (build arguments) can end up in image
+    /// layers; secret ones are BuildKit secrets, which don't.
     Build,
     Both,
 }

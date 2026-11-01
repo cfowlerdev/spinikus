@@ -402,6 +402,66 @@ async fn the_agent_deploys_an_image_with_docker() {
     assert!(network.status.success(), "the environment's network was not there");
 }
 
+#[tokio::test]
+#[ignore = "needs a Docker daemon; pulls busybox"]
+async fn the_release_command_runs_before_the_start_and_a_failing_one_stops_the_deployment() {
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let (_stop, _agent) = start_agent_with(&files, Arc::new(DockerRuntime::new()), None);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let runtime = |release: &str| json!({ "port": 8080, "start": "exec httpd -f -p 8080 -h /tmp", "release": release, "shutdown_timeout": "2s" });
+    // Passes only with the runtime variables, on the environment's network.
+    let release = r#"test "$PORT" = 8080 && test -n "$(hostname)" && echo migrated"#;
+    let service = control_plane.service(server, "busybox:1.37", runtime(release)).await;
+    let (control, admin) = (&control_plane.control, &control_plane.admin);
+    let within = Duration::from_secs(120);
+
+    let first = control.create_deployment(admin, service).await.unwrap();
+    control_plane.wait_for_deployment(first.id, DeploymentStatus::Live, within).await;
+    let path: Vec<_> = control.list_deployment_events(admin, first.id).await.unwrap().iter().map(|event| event.to).collect();
+    let revision = control.get_service(admin, service).await.unwrap().revision;
+    let config = json!({ "runtime": runtime("echo boom >&2; exit 3") }).as_object().cloned().unwrap();
+    let changes = spinikus_control::ServiceChanges { config: Some(config), ..Default::default() };
+    control.update_service(admin, service, revision, changes).await.unwrap();
+    let second = control.create_deployment(admin, service).await.unwrap();
+    control_plane.wait_for_deployment(second.id, DeploymentStatus::Failed, within).await;
+    let second = control.store().get_deployment(second.id).await.unwrap();
+    let first_now = control.store().get_deployment(first.id).await.unwrap().status;
+    let leftovers = std::process::Command::new("docker")
+        .args(["ps", "--all", "--quiet", "--filter", "label=spinikus.one-off"])
+        .output()
+        .unwrap();
+    // Clean up: delete the service, which removes its containers and image.
+    let environment = control.get_service(admin, service).await.unwrap().environment_id;
+    control.delete_service(admin, service).await.unwrap();
+    let deadline = tokio::time::Instant::now() + within;
+    while control.store().list_deleted_services_with_deployments().await.unwrap().contains(&service) {
+        assert!(tokio::time::Instant::now() < deadline, "the deployments were not cleaned up");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let network = format!("spinikus-{environment}");
+    let network_removed =
+        std::process::Command::new("docker").args(["network", "rm", &network]).output().unwrap().status.success();
+
+    assert_eq!(
+        path,
+        [
+            DeploymentStatus::Queued,
+            DeploymentStatus::Preparing,
+            DeploymentStatus::Releasing,
+            DeploymentStatus::Starting,
+            DeploymentStatus::Verifying,
+            DeploymentStatus::Live
+        ]
+    );
+    assert_eq!(second.reason, Some(spinikus_core::deployment::EndReason::ReleaseFailed));
+    assert_eq!(first_now, DeploymentStatus::Live, "the release failed before anything changed");
+    assert!(String::from_utf8_lossy(&leftovers.stdout).trim().is_empty(), "release containers are removed");
+    assert!(network_removed);
+}
+
 /// Removes the network of the service's environment, which its containers joined, and
 /// says whether it was there.
 async fn remove_network(control_plane: &ControlPlane, service: ServiceId) -> bool {
@@ -483,13 +543,23 @@ async fn a_deployment_is_built_from_git_with_its_app_file() {
 }
 
 #[tokio::test]
-#[ignore = "needs a Docker daemon; pulls traefik/whoami"]
+#[ignore = "needs a Docker daemon; pulls traefik/whoami and busybox"]
 async fn the_agent_builds_from_git_and_deploys_with_docker() {
+    use spinikus_control::variables::NewVariable;
+    use spinikus_core::variable::{VariableAvailability, VariableScope};
+
     let control_plane = ControlPlane::start().await;
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    std::fs::write(repo.join("Dockerfile"), "FROM traefik/whoami:v1.10\nARG GREETING\nLABEL greeting=$GREETING\n").unwrap();
+    // The secret build variable is a BuildKit secret, read by the check stage only.
+    let dockerfile = "FROM busybox:1.37 AS check\n\
+                      RUN --mount=type=secret,id=TOKEN grep -qx '[s]3cret-token' /run/secrets/TOKEN && touch /checked\n\
+                      FROM traefik/whoami:v1.10\n\
+                      COPY --from=check /checked /checked\n\
+                      ARG GREETING\n\
+                      LABEL greeting=$GREETING\n";
+    std::fs::write(repo.join("Dockerfile"), dockerfile).unwrap();
     std::fs::write(repo.join("spinikus.json"), r#"{ "runtime": { "port": 80, "healthcheck": { "path": "/" } } }"#).unwrap();
     git(&repo, &["init", "--quiet"]);
     git(&repo, &["add", "--all"]);
@@ -509,6 +579,13 @@ async fn the_agent_builds_from_git_and_deploys_with_docker() {
     control.store().update_source(service, 1, source).await.unwrap();
 
     let admin = &control_plane.admin;
+    let token = NewVariable {
+        name: "TOKEN".to_string(),
+        value: Secret::new("s3cret-token"),
+        availability: VariableAvailability::Build,
+        secret: true,
+    };
+    control.create_variable(admin, VariableScope::Service(service), token).await.unwrap();
     let within = Duration::from_secs(180);
     let kept = control.set_setting(admin, "releases_kept", 0, json!(1)).await.unwrap();
 
@@ -538,6 +615,8 @@ async fn the_agent_builds_from_git_and_deploys_with_docker() {
     let (first_image, second_image) = (first.image.clone().unwrap(), second.image.clone().unwrap());
     let kept_first = (image_exists(&first_tag), image_exists(&first_image));
     let removed_second = (image_exists(&second_tag), image_exists(&second_image));
+    let history = std::process::Command::new("docker").args(["history", "--no-trunc", &first_image]).output().unwrap();
+    let history = String::from_utf8_lossy(&history.stdout).into_owned();
     // Clean up: stop the rollback, then remove the first image.
     let stop = pb::StopDeployment { deployment_id: rollback.id.to_string(), grace_period: None };
     send_command(&control_plane, server, "cleanup", Kind::StopDeployment(stop)).await;
@@ -546,6 +625,7 @@ async fn the_agent_builds_from_git_and_deploys_with_docker() {
     remove_network(&control_plane, service).await;
 
     assert!(served.contains("Host: web-production-shop.localhost"), "{served}");
+    assert!(history.contains("COPY /checked") && !history.contains("s3cret"), "{history}");
     assert!(first_image.starts_with("sha256:") && first_image != second_image, "{first_image} {second_image}");
     assert_eq!(first.snapshot.from_file, ["runtime.healthcheck", "runtime.port"]);
     assert_eq!(rollback.image.as_deref(), Some(first_image.as_str()));
@@ -902,8 +982,14 @@ impl S3Server {
     async fn start() -> Self {
         let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().unwrap();
         let present = |image: &str| docker(&["image", "inspect", image]).status.success();
-        let pulled = [S3_IMAGE, AWS_CLI_IMAGE].into_iter().filter(|image| !present(image)).collect();
-        let name = format!("spinikus-test-s3-{}-{}", std::process::id(), Timestamp::now().as_millisecond());
+        let pulled: Vec<&'static str> = [S3_IMAGE, AWS_CLI_IMAGE].into_iter().filter(|image| !present(image)).collect();
+        // Before the wait for the server below, which a pull would use up.
+        for image in &pulled {
+            assert!(docker(&["pull", "--quiet", image]).status.success(), "pulling {image}");
+        }
+        // Unique even for two tests starting in the same millisecond, and a valid hostname,
+        // since the AWS CLI reaches the server by it.
+        let name = format!("spinikus-test-s3-{}", DeploymentId::new().to_string().to_lowercase().replace('_', "-"));
         let mut server = Self { name: name.clone(), port: 0, pulled };
         assert!(docker(&["network", "create", &name]).status.success());
         let access = format!("RUSTFS_ACCESS_KEY={S3_ACCESS_KEY}");

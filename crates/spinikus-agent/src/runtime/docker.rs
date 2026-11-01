@@ -35,6 +35,7 @@ use tokio_stream::StreamExt;
 use super::{
     BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, ExecInput, ExecOutput, ExecStream, LogLine,
     LogLines, LogOptions, Network, ONE_OFF_LABEL, OneOffExit, OneOffSpec, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
+    session,
 };
 
 /// Aborts a task when dropped, such as stdin's writer once the command's output ends.
@@ -119,6 +120,46 @@ impl DockerRuntime {
     fn waiting(&self, grace: Duration) -> Result<Docker, RuntimeError> {
         Ok(self.client()?.with_timeout(REQUEST_TIMEOUT + grace))
     }
+}
+
+async fn build_with_bollard(
+    docker: &Docker,
+    spec: &BuildSpec,
+    context: tokio::io::DuplexStream,
+    output: &mut BuildOutput,
+    progress: &(dyn Fn(String) + Send + Sync),
+) -> Result<(), RuntimeError> {
+    let options = BuildImageOptionsBuilder::new()
+        .dockerfile(&spec.dockerfile)
+        .t(&spec.tag)
+        .target(spec.target.as_deref().unwrap_or_default())
+        .buildargs(&spec.args.iter().cloned().collect())
+        .rm(true)
+        .version(BuilderVersion::BuilderBuildKit)
+        .session(&format!("spinikus-{:032x}", rand::random::<u128>()))
+        .build();
+    let body = body_try_stream(tokio_util::io::ReaderStream::new(context));
+    let mut building = docker.build_image(options, None, Some(body));
+    while let Some(step) = building.next().await {
+        match step {
+            Ok(info) => output.show(info, progress),
+            Err(Error::DockerStreamError { error }) => return Err(RuntimeError::Failed(error)),
+            Err(error) => return Err(runtime_error(error)),
+        }
+    }
+    Ok(())
+}
+
+async fn build_with_secrets(
+    spec: &BuildSpec,
+    context: tokio::io::DuplexStream,
+    output: &mut BuildOutput,
+    progress: &(dyn Fn(String) + Send + Sync),
+) -> Result<(), RuntimeError> {
+    let endpoint = session::Endpoint::from_env(local_socket())?;
+    let secrets = spec.secrets.iter().map(|(id, value)| (id.clone(), value.clone().into_bytes())).collect();
+    let session = session::open(&endpoint, secrets).await?;
+    session::build(&endpoint, &session, spec, context, &mut |info| output.show(info, progress)).await
 }
 
 fn local_socket() -> Option<String> {
@@ -318,7 +359,8 @@ impl ContainerRuntime for DockerRuntime {
     }
 
     /// Builds with BuildKit, which Dockerfiles with `RUN --mount` and the like need, sending
-    /// the context as a tar stream written while it uploads.
+    /// the context as a tar stream written while it uploads. A build with secrets goes
+    /// through a BuildKit session of our own (`session.rs`), since bollard's serves none.
     async fn build(&self, spec: &BuildSpec, progress: &(dyn Fn(String) + Send + Sync)) -> Result<String, RuntimeError> {
         let docker = self.client()?;
         let (reader, writer) = tokio::io::duplex(64 * 1024);
@@ -329,35 +371,14 @@ impl ContainerRuntime for DockerRuntime {
             pack(&mut tar, &context, Path::new(""))?;
             tar.into_inner()?.flush()
         });
-        let options = BuildImageOptionsBuilder::new()
-            .dockerfile(&spec.dockerfile)
-            .t(&spec.tag)
-            .target(spec.target.as_deref().unwrap_or_default())
-            .buildargs(&spec.args.iter().cloned().collect())
-            .rm(true)
-            .version(BuilderVersion::BuilderBuildKit)
-            .session(&format!("spinikus-{:032x}", rand::random::<u128>()))
-            .build();
-        let body = body_try_stream(tokio_util::io::ReaderStream::new(reader));
-        let mut building = docker.build_image(options, None, Some(body));
         let mut output = BuildOutput::default();
-        let mut failure = None;
-        while let Some(step) = building.next().await {
-            match step {
-                Ok(info) => output.show(info, progress),
-                Err(Error::DockerStreamError { error }) => {
-                    failure = Some(RuntimeError::Failed(error));
-                    break;
-                }
-                Err(error) => {
-                    failure = Some(runtime_error(error));
-                    break;
-                }
-            }
-        }
-        drop(building);
+        let built = if spec.secrets.is_empty() {
+            build_with_bollard(&docker, spec, reader, &mut output, progress).await
+        } else {
+            build_with_secrets(spec, reader, &mut output, progress).await
+        };
         let packed = packing.await.map_err(|error| RuntimeError::Failed(format!("packing the build context: {error}")))?;
-        if let Some(failure) = failure {
+        if let Err(failure) = built {
             return Err(match (failure, output.error) {
                 (RuntimeError::Failed(message), Some(step)) => RuntimeError::Failed(format!("{step}: {message}")),
                 (failure, _) => failure,

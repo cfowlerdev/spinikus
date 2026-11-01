@@ -4,16 +4,17 @@
 //! the `BUILDKIT_SYNTAX` build argument names the frontend (the version matching the
 //! `railpack` that wrote the plan), and `cache-key` keeps each service's build caches apart.
 //!
-//! Railpack passes build variables as BuildKit secrets, which the runtime's builds can't
-//! provide yet. So plain build variables are written into the plan's steps instead (which
-//! also leaves them in the image's environment), and secret ones are refused.
+//! Railpack gives build steps the build variables as BuildKit secrets (the plan lists their
+//! names), so every build variable is one, and `secrets-hash` (a digest of their values)
+//! makes a change to them invalidate the cache.
 
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
 };
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use spinikus_core::{build::BuildSettings, id::ServiceId};
 use spinikus_proto::agent::v1::{self as pb, FailureReason};
 use tokio::{
@@ -68,13 +69,7 @@ pub(crate) async fn plan(
     if !settings.args.is_empty() {
         return Err(build_failed("build.args are for Dockerfile builds; set build variables instead"));
     }
-    let secret: Vec<&str> = variables.iter().filter(|variable| variable.secret).map(|variable| variable.name.as_str()).collect();
-    if !secret.is_empty() {
-        return Err(build_failed(format!(
-            "Railpack builds can't use secret build variables yet ({}): make them runtime-only or not secret, or build with a Dockerfile",
-            secret.join(", ")
-        )));
-    }
+    progress.redact(variables.iter().filter(|variable| variable.secret).map(|variable| variable.value.clone()));
     progress.line(format!("No Dockerfile: building with Railpack {version}"));
 
     let plan_out = work.join("railpack-plan.json");
@@ -109,39 +104,40 @@ pub(crate) async fn plan(
         args: vec![
             ("BUILDKIT_SYNTAX".to_string(), format!("{FRONTEND}:v{version}")),
             ("cache-key".to_string(), service.to_string()),
+            ("secrets-hash".to_string(), secrets_hash(variables)),
         ],
     })
 }
 
-/// Moves the build variables from the plan's secrets into every step's variables, and
-/// leaves the plan file out of the image.
+/// Checks that the plan needs no secrets but the build variables, and leaves the plan file
+/// out of the image.
 fn rewrite(mut plan: Value, variables: &[pb::Variable]) -> Result<Value, pb::CommandFailed> {
     let object = plan.as_object_mut().ok_or_else(|| build_failed("Railpack's build plan is not an object"))?;
-    let secrets: Vec<String> = match object.remove("secrets") {
-        Some(Value::Array(names)) => names.into_iter().filter_map(|name| name.as_str().map(str::to_string)).collect(),
-        _ => Vec::new(),
-    };
     // Railpack only declares secrets for what it was given, and it was given only these.
-    let unknown: Vec<&str> =
-        secrets.iter().map(String::as_str).filter(|name| !variables.iter().any(|variable| variable.name == *name)).collect();
+    let secrets = object.get("secrets").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+    let unknown: Vec<&str> = secrets.filter(|name| !variables.iter().any(|variable| variable.name == *name)).collect();
     if !unknown.is_empty() {
         return Err(build_failed(format!("Railpack's build plan needs secrets Spinikus can't give it: {}", unknown.join(", "))));
-    }
-    if let Some(Value::Array(steps)) = object.get_mut("steps") {
-        for step in steps.iter_mut().filter_map(Value::as_object_mut) {
-            let step_variables = step.entry("variables").or_insert_with(|| Value::Object(Map::new()));
-            if let Some(step_variables) = step_variables.as_object_mut() {
-                for variable in variables.iter().filter(|variable| secrets.contains(&variable.name)) {
-                    step_variables.entry(variable.name.clone()).or_insert_with(|| json!(variable.value));
-                }
-            }
-        }
     }
     let exclude = object.entry("exclude").or_insert_with(|| json!([]));
     if let Some(exclude) = exclude.as_array_mut() {
         exclude.push(json!(PLAN_FILE));
     }
     Ok(plan)
+}
+
+/// A digest of the build variables' names and values, in name order.
+fn secrets_hash(variables: &[pb::Variable]) -> String {
+    let mut sorted: Vec<&pb::Variable> = variables.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut digest = Sha256::new();
+    for variable in sorted {
+        digest.update(variable.name.as_bytes());
+        digest.update([0]);
+        digest.update(variable.value.as_bytes());
+        digest.update([0]);
+    }
+    digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// The version `railpack --version` reports, such as `0.43.0`.
@@ -221,28 +217,30 @@ mod tests {
     }
 
     #[test]
-    fn build_variables_become_step_variables() {
+    fn the_plan_keeps_its_secrets_and_leaves_itself_out() {
         let plan = json!({
-            "steps": [
-                { "name": "install", "secrets": ["*"], "variables": { "CI": "true" } },
-                { "name": "build", "secrets": ["*"] },
-            ],
+            "steps": [{ "name": "install", "secrets": ["*"], "variables": { "CI": "true" } }],
             "secrets": ["NODE_ENV", "RAILPACK_NODE_VERSION"],
             "deploy": { "startCommand": "node server.js" },
         });
         let variables = [variable("NODE_ENV", "production"), variable("RAILPACK_NODE_VERSION", "22")];
 
-        let plan = rewrite(plan, &variables).unwrap();
+        let rewritten = rewrite(plan.clone(), &variables).unwrap();
 
-        assert_eq!(plan.get("secrets"), None, "nothing for BuildKit to mount");
-        assert_eq!(
-            plan["steps"][0]["variables"],
-            json!({ "CI": "true", "NODE_ENV": "production", "RAILPACK_NODE_VERSION": "22" })
-        );
-        assert_eq!(plan["steps"][1]["variables"], json!({ "NODE_ENV": "production", "RAILPACK_NODE_VERSION": "22" }));
-        assert_eq!(plan["exclude"], json!([PLAN_FILE]));
-        assert_eq!(plan["deploy"]["startCommand"], "node server.js");
+        assert_eq!(rewritten["secrets"], plan["secrets"]);
+        assert_eq!(rewritten["steps"], plan["steps"]);
+        assert_eq!(rewritten["exclude"], json!([PLAN_FILE]));
         let unknown = rewrite(json!({ "secrets": ["GITHUB_TOKEN"] }), &variables).unwrap_err();
         assert!(unknown.message.ends_with("can't give it: GITHUB_TOKEN"), "{}", unknown.message);
+    }
+
+    #[test]
+    fn the_secrets_hash_changes_with_the_values_only() {
+        let hash = secrets_hash(&[variable("A", "1"), variable("B", "2")]);
+
+        assert_eq!(hash, secrets_hash(&[variable("B", "2"), variable("A", "1")]));
+        assert_ne!(hash, secrets_hash(&[variable("A", "1"), variable("B", "3")]));
+        assert_ne!(secrets_hash(&[variable("A", "1=")]), secrets_hash(&[variable("A=1", "")]));
+        assert_eq!(hash.len(), 64);
     }
 }

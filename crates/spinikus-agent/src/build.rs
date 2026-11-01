@@ -129,7 +129,8 @@ async fn build(
             progress.phase("planning");
             let variables = &prepare.build_variables;
             let planned = railpack::plan(&options.railpack, &root, work, &settings, variables, service, progress).await?;
-            BuildSpec { context: root.clone(), dockerfile: planned.plan_file, target: None, args: planned.args, tag }
+            let secrets = variables.iter().map(|variable| (variable.name.clone(), variable.value.clone())).collect();
+            BuildSpec { context: root.clone(), dockerfile: planned.plan_file, target: None, args: planned.args, secrets, tag }
         }
         strategy => return Err(build_failed(format!("the `{}` build strategy is not supported yet", strategy.as_str()))),
     };
@@ -157,14 +158,24 @@ fn dockerfile_build(
         .to_string_lossy()
         .into_owned();
 
-    // Variables win over the settings' defaults.
+    // Variables win over the settings' defaults. Secret ones are BuildKit secrets, which
+    // stay out of the image and its history, unlike build arguments.
     let mut args: Vec<(String, String)> = settings.args.into_iter().collect();
+    let mut secrets = Vec::new();
     for variable in &prepare.build_variables {
         args.retain(|(name, _)| *name != variable.name);
-        args.push((variable.name.clone(), variable.value.clone()));
+        let pair = (variable.name.clone(), variable.value.clone());
+        if variable.secret { secrets.push(pair) } else { args.push(pair) }
     }
-    progress.redact(prepare.build_variables.iter().filter(|variable| variable.secret).map(|variable| variable.value.clone()));
-    Ok(BuildSpec { context, dockerfile, target: settings.target, args, tag })
+    progress.redact(secrets.iter().map(|(_, value)| value.clone()));
+    if !secrets.is_empty() {
+        let names: Vec<&str> = secrets.iter().map(|(name, _)| name.as_str()).collect();
+        progress.line(format!(
+            "Secret build variables are BuildKit secrets, not build arguments (`RUN --mount=type=secret,id=<NAME>`): {}",
+            names.join(", ")
+        ));
+    }
+    Ok(BuildSpec { context, dockerfile, target: settings.target, args, secrets, tag })
 }
 
 /// `relative` under `base`, which must exist and stay inside `repo` once symlinks resolve.
@@ -412,7 +423,8 @@ mod tests {
         assert!(spec.context.ends_with("apps/web"), "{:?}", spec.context);
         assert_eq!((spec.dockerfile.as_str(), spec.target.as_deref()), ("docker/Dockerfile", Some("app")));
         let args: Vec<_> = spec.args.iter().map(|(name, value)| format!("{name}={value}")).collect();
-        assert_eq!(args, ["LEVEL=info", "NODE_ENV=staging", "TOKEN=s3cret-token"]);
+        assert_eq!(args, ["LEVEL=info", "NODE_ENV=staging"]);
+        assert_eq!(spec.secrets, [("TOKEN".to_string(), "s3cret-token".to_string())], "secret variables are BuildKit secrets");
         assert!(prepared.image.starts_with("sha256:"), "{}", prepared.image);
         assert!(spec.tag.starts_with("spinikus/svc_") && spec.tag.contains(":dep_"), "{}", spec.tag);
         assert_eq!(spec.tag, spec.tag.to_lowercase());
@@ -514,8 +526,7 @@ printf '{"steps":[{"name":"build","secrets":["*"]}],"secrets":[%s],"deploy":{"st
         setup.options.railpack = fake_railpack(setup.dir.path());
         let (repo, _) =
             repository(setup.dir.path(), &[("app/package.json", "{}"), ("broken/FAIL", ""), ("both/Dockerfile", "FROM a\n")]);
-        let (mut prepare, git) = prepare(&repo, "app", serde_json::json!({ "build": { "command": "npm run build:prod" } }));
-        prepare.build_variables.retain(|variable| !variable.secret);
+        let (prepare, git) = prepare(&repo, "app", serde_json::json!({ "build": { "command": "npm run build:prod" } }));
 
         let (result, reported) = run(&setup, &prepare, &git).await;
 
@@ -525,23 +536,23 @@ printf '{"steps":[{"name":"build","secrets":["*"]}],"secrets":[%s],"deploy":{"st
         assert!(spec.context.ends_with("app"), "{:?}", spec.context);
         assert_eq!((spec.dockerfile.as_str(), spec.target.as_deref()), (railpack::PLAN_FILE, None));
         let syntax = ("BUILDKIT_SYNTAX".to_string(), "ghcr.io/railwayapp/railpack-frontend:v0.43.0".to_string());
-        assert_eq!(spec.args, [syntax, ("cache-key".to_string(), prepare.service_id.clone())]);
+        assert_eq!(spec.args[..2], [syntax, ("cache-key".to_string(), prepare.service_id.clone())]);
+        assert_eq!(spec.args[2].0, "secrets-hash");
+        let variables: Vec<_> =
+            prepare.build_variables.iter().map(|variable| (variable.name.clone(), variable.value.clone())).collect();
+        assert_eq!(spec.secrets, variables, "every build variable is a BuildKit secret");
         let plan: serde_json::Value = serde_json::from_str(plan).unwrap();
-        assert_eq!(plan["steps"][0]["variables"], serde_json::json!({ "NODE_ENV": "staging" }));
-        assert_eq!(plan.get("secrets"), None);
+        assert_eq!(plan["steps"][0].get("variables"), None);
+        assert_eq!(plan["secrets"], serde_json::json!(["NODE_ENV", "TOKEN"]));
         assert_eq!(plan["exclude"], serde_json::json!([railpack::PLAN_FILE]));
         let args = std::fs::read_to_string(setup.dir.path().join("bin/args")).unwrap();
-        assert!(args.contains("--env\nNODE_ENV=staging\n--build-cmd\nnpm run build:prod\n"), "{args}");
+        assert!(args.contains("--env\nNODE_ENV=staging\n--env\nTOKEN=s3cret-token\n--build-cmd\nnpm run build:prod\n"), "{args}");
         let phases: Vec<_> = reported.iter().map(|progress| progress.phase.as_str()).collect();
         assert!(phases.contains(&"planning") && phases.contains(&"building"), "{phases:?}");
         let lines: Vec<_> =
             reported.iter().flat_map(|progress| progress.log_lines.iter().map(|line| line.text.as_str())).collect();
         assert!(lines.contains(&"No Dockerfile: building with Railpack 0.43.0") && lines.contains(&"Detected Node"), "{lines:?}");
 
-        // Secret build variables have no way into a Railpack build yet.
-        let (with_secret, _) = self::prepare(&repo, "app", serde_json::json!({}));
-        let refused = run(&setup, &with_secret, &git).await.0.unwrap_err();
-        assert!(refused.message.contains("secret build variables yet (TOKEN)"), "{}", refused.message);
         let (broken, git_broken) = self::prepare(&repo, "broken", serde_json::json!({}));
         let mut broken = broken;
         broken.build_variables.clear();

@@ -209,6 +209,7 @@ async fn builds_with_buildkit() {
         dockerfile: "docker/Dockerfile".to_string(),
         target: Some("base".to_string()),
         args: vec![("GREETING".to_string(), "hi there".to_string())],
+        secrets: Vec::new(),
         tag: tag.clone(),
     };
     let lines = std::sync::Mutex::new(Vec::new());
@@ -225,6 +226,49 @@ async fn builds_with_buildkit() {
         Err(RuntimeError::Failed(message)) => {
             assert!(message.contains("exit 3") || message.contains("exit code: 3"), "{message}")
         }
+        other => panic!("expected a failed build, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn builds_with_secrets_that_stay_out_of_the_image() {
+    let runtime = DockerRuntime::new();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Dockerfile"),
+        "FROM busybox:1.37 AS base\n\
+         ARG LEVEL\n\
+         RUN --mount=type=secret,id=TOKEN grep -qx '[s]3cret-token' /run/secrets/TOKEN && echo \"$LEVEL\" > /level\n\
+         FROM base AS broken\n\
+         RUN --mount=type=secret,id=TOKEN,required=true --mount=type=secret,id=MISSING,required=true true\n",
+    )
+    .unwrap();
+    let tag = format!("spinikus/test:{}", DeploymentId::new().to_string().to_lowercase());
+    let _cleanup = ImageCleanup(runtime.clone(), tag.clone());
+    let spec = BuildSpec {
+        context: dir.path().to_path_buf(),
+        dockerfile: "Dockerfile".to_string(),
+        target: Some("base".to_string()),
+        args: vec![("LEVEL".to_string(), "info".to_string())],
+        secrets: vec![("TOKEN".to_string(), "s3cret-token".to_string())],
+        tag: tag.clone(),
+    };
+    let lines = std::sync::Mutex::new(Vec::new());
+
+    let image = runtime.build(&spec, &|line| lines.lock().unwrap().push(line)).await.unwrap();
+    let broken = runtime.build(&BuildSpec { target: Some("broken".to_string()), ..spec.clone() }, &|_| {}).await;
+
+    assert!(image.starts_with("sha256:"), "{image}");
+    let lines = lines.into_inner().unwrap();
+    assert!(lines.iter().any(|line| line.contains("--mount=type=secret,id=TOKEN")), "{lines:#?}");
+    let docker = runtime.client().unwrap();
+    let history = serde_json::to_string(&docker.image_history(&tag).await.unwrap()).unwrap();
+    let inspected = serde_json::to_string(&docker.inspect_image(&tag).await.unwrap()).unwrap();
+    assert!(!history.contains("s3cret") && !inspected.contains("s3cret"), "the secret is not in the image");
+    assert!(history.contains("LEVEL"), "{history}");
+    match broken {
+        Err(RuntimeError::Failed(message)) => assert!(message.contains("MISSING"), "{message}"),
         other => panic!("expected a failed build, got {other:?}"),
     }
 }
@@ -419,7 +463,10 @@ async fn runs_a_one_off_container_to_completion_and_removes_it() {
     let exit = runtime.run_once(&spec, &|line| lines.lock().unwrap().push((line.stderr, line.text))).await.unwrap();
 
     assert_eq!(exit, OneOffExit::Exited(3));
-    assert_eq!(*lines.lock().unwrap(), [(false, "migrating".to_string()), (true, "oops".to_string())]);
+    // Docker keeps each stream's order, not the order between them.
+    let mut lines = lines.into_inner().unwrap();
+    lines.sort();
+    assert_eq!(lines, [(false, "migrating".to_string()), (true, "oops".to_string())]);
     let inspected = runtime.client().unwrap().inspect_container(&spec.name, None).await;
     assert!(inspected.is_err(), "the container is removed: {inspected:?}");
     assert!(runtime.list().await.unwrap().iter().all(|instance| instance.deployment_id != deployment));

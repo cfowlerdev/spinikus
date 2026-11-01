@@ -14,6 +14,7 @@ use tokio_stream::Stream;
 mod docker;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
+mod session;
 
 pub use docker::DockerRuntime;
 #[cfg(any(test, feature = "test-support"))]
@@ -92,6 +93,9 @@ pub struct BuildSpec {
     pub target: Option<String>,
     /// Build arguments. Values may be secrets: never log them.
     pub args: Vec<(String, String)>,
+    /// BuildKit secrets by ID, which `RUN --mount=type=secret,id=<ID>` reads during the
+    /// build and which stay out of the image. Never log them.
+    pub secrets: Vec<(String, String)>,
     /// The tag to give the image.
     pub tag: String,
 }
