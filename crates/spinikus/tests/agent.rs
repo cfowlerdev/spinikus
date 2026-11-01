@@ -24,10 +24,11 @@ use spinikus_core::{
     secret::Secret,
     server::{InstanceHealth, InstanceStatus, ObservedInstance, ServerStatus},
     source::{GitSource, ImageSource, SourceSpec},
+    token::NewSession,
     webhook::GitProvider,
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, control_message};
-use spinikus_store::{DeploymentRepository, InstanceRepository, ServerRepository, SourceRepository};
+use spinikus_store::{DeploymentRepository, InstanceRepository, ServerRepository, SessionRepository, SourceRepository};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -714,10 +715,57 @@ async fn runtime_logs_come_from_the_agent_and_stop_when_nobody_reads() {
     let unknown =
         control.service_logs(admin, service, LogQuery { deployment_id: Some(DeploymentId::new()), ..Default::default() }).await;
     assert!(matches!(unknown, Err(ControlError::NotFound { .. })), "{unknown:?}");
+
+    // The dashboard's logs page streams and downloads them, filtered.
+    let dashboard = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = dashboard.local_addr().unwrap();
+    tokio::spawn(axum::serve(dashboard, spinikus_web::router(control.clone())).into_future());
+    let session = NewSession {
+        user_id: admin.user.id,
+        expires_at: Timestamp::now() + SignedDuration::from_hours(1),
+        user_agent: None,
+        ip_address: None,
+    };
+    let (_, cookie) = control.store().create_session(session).await.unwrap();
+    let cookie = cookie.expose();
+    let streamed = read_until(address, &format!("/services/{service}/logs/stream?stream=stdout"), cookie, "GET / 200").await;
+    let downloaded = read_until(address, &format!("/services/{service}/logs/download?q=WARN"), cookie, "\r\n0\r\n").await;
+
+    assert!(streamed.contains("text/event-stream") && streamed.contains("booting"), "{streamed}");
+    assert!(!streamed.contains("no cache"), "stderr is left out: {streamed}");
+    assert!(downloaded.contains("attachment;"), "{downloaded}");
+    assert!(downloaded.contains(" stderr warning: no cache\n") && !downloaded.contains("booting"), "{downloaded}");
+
     drop(stop);
     control_plane.wait_for_status(server, ServerStatus::Disconnected).await;
     let away = control.service_logs(admin, service, LogQuery::default()).await;
     assert!(matches!(away, Err(ControlError::Rejected { .. })), "{away:?}");
+    let refused = read_until(address, &format!("/services/{service}/logs/stream"), cookie, "event: end").await;
+    assert!(refused.contains("not connected"), "said in the log box: {refused}");
+}
+
+/// A raw HTTP/1.1 GET with a session cookie, read until `marker` shows up (or the response
+/// ends), so a stream that goes on can be read too.
+async fn read_until(address: SocketAddr, path: &str, cookie: &str, marker: &str) -> String {
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nCookie: spinikus_session={cookie}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    let read = async {
+        let mut buffer = [0; 4096];
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            response.extend_from_slice(&buffer[..read]);
+            if read == 0 || String::from_utf8_lossy(&response).contains(marker) {
+                return;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), read)
+        .await
+        .unwrap_or_else(|_| panic!("no {marker:?} in {}", String::from_utf8_lossy(&response)));
+    String::from_utf8_lossy(&response).into_owned()
 }
 
 /// Removes what a database test made in Docker, even when an assertion fails: the services'

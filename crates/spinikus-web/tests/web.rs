@@ -1242,3 +1242,71 @@ async fn everyone_manages_their_own_api_tokens() {
     web.post(&format!("/settings/tokens/{}/revoke", other.id), Some(&ada), &form(&[("_csrf", &ada_token)])).await;
     assert!(web.control.list_api_tokens(&principal).await.unwrap().iter().any(|token| token.id == other.id));
 }
+
+#[tokio::test]
+async fn shows_runtime_logs_and_downloads_deployment_logs() {
+    let web = Web::new().await;
+    let (admin, _, _, service) = shop_with_team(&web).await;
+    let viewer = web.sign_in("viewer%40example.com").await;
+
+    // Viewers read the logs; the page follows the stream with what was asked for.
+    let page = web.get(&format!("/services/{}/logs?q=time+out&stream=stderr&tail=1000", service.id), Some(&viewer)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains(&format!(r#"href="/services/{}/logs""#, service.id)), "the Logs tab");
+    let stream = format!("/services/{}/logs/stream?q=time%20out&amp;stream=stderr&amp;tail=1000", service.id);
+    assert!(page.body.contains(&format!(r#"sse-connect="{stream}""#)), "{}", page.body);
+    assert!(page.body.contains(r#"<option value="1000" selected>"#));
+    assert_eq!(
+        web.get(&format!("/services/{}/logs?deployment_id=nope", service.id), Some(&viewer)).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // With nothing live, the stream says so in the log box and ends, rather than failing.
+    let events = web.events(&format!("/services/{}/logs/stream", service.id), &viewer, "event: end").await;
+    assert!(events.contains("event: log") && events.contains("The service has nothing live"), "{events}");
+    let download = web.get(&format!("/services/{}/logs/download", service.id), Some(&viewer)).await;
+    assert_eq!(download.header("content-type"), Some("text/plain; charset=utf-8"));
+    assert!(download.header("content-disposition").unwrap().starts_with("attachment; filename=\"web-"));
+    assert!(download.body.starts_with("# The service has nothing live"), "{}", download.body);
+
+    // A deployment's own log downloads as it is.
+    let server = web.control.create_server(&admin, NewServer { name: "web-1".to_string() }).await.unwrap();
+    let changes = spinikus_control::ServiceChanges { server_id: Some(Some(server.id)), ..Default::default() };
+    web.control.update_service(&admin, service.id, service.revision, changes).await.unwrap();
+    let image = SourceSpec::Image(ImageSource { image: "nginx:1".to_string() });
+    web.control.create_source(&admin, service.id, image).await.unwrap();
+    let deployment = web.control.create_deployment(&admin, service.id).await.unwrap();
+    let logs = web._dir.path().join("logs").join("deployments");
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(logs.join(format!("{}.log", deployment.id)), "2026-11-01T10:00:00Z ==> preparing\n").unwrap();
+    let log = web.get(&format!("/deployments/{}/log", deployment.id), Some(&viewer)).await;
+    assert_eq!(log.body, "2026-11-01T10:00:00Z ==> preparing\n");
+    assert_eq!(log.header("content-disposition"), Some(format!("attachment; filename=\"{}.log\"", deployment.id).as_str()));
+}
+
+#[tokio::test]
+async fn the_palette_lists_what_the_user_can_open() {
+    let web = Web::new().await;
+    let (admin, shop, production, service) = shop_with_team(&web).await;
+    let blog = web.control.create_project(&admin, NewProject { name: "Blog".to_string(), slug: None }).await.unwrap();
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+
+    let page = web.get("/", Some(&dev)).await;
+    assert!(page.body.contains(r#"<dialog id="palette""#) && page.body.contains("/assets/palette.js?v="));
+    let script = web.get("/assets/palette.js", None).await;
+    assert_eq!((script.status, script.header("content-type")), (StatusCode::OK, Some("text/javascript; charset=utf-8")));
+
+    let for_dev = web.get("/palette", Some(&dev)).await.body;
+    for href in
+        [format!("/projects/{}", shop.id), format!("/environments/{}", production.id), format!("/services/{}", service.id)]
+    {
+        assert!(for_dev.contains(&format!(r#"href="{href}""#)), "{href} in {for_dev}");
+    }
+    assert!(for_dev.contains(r#"data-search="web shop / production · service""#), "{for_dev}");
+    assert!(!for_dev.contains(&blog.id.to_string()) && !for_dev.contains("/settings/servers"), "only what they can open");
+    assert!(for_dev.contains("/settings/tokens"));
+    let for_admin = web.get("/palette", Some(&ada)).await.body;
+    assert!(for_admin.contains(&format!("/projects/{}", blog.id)) && for_admin.contains("/settings/servers"));
+    assert_eq!(web.get("/palette", None).await.status, StatusCode::SEE_OTHER);
+}

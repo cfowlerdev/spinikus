@@ -70,6 +70,9 @@ pub fn router(control: Control) -> Router {
             "/services/{id}/variables",
             get(pages::variables::service_variables).post(pages::variables::create_service_variable),
         )
+        .route("/services/{id}/logs", get(pages::logs::logs))
+        .route("/services/{id}/logs/stream", get(pages::logs::stream))
+        .route("/services/{id}/logs/download", get(pages::logs::download))
         .route("/services/{id}/domains", get(pages::domains::domains).post(pages::domains::create))
         .route("/variables/{id}/edit", get(pages::variables::edit).post(pages::variables::update))
         .route("/variables/{id}/delete", post(pages::variables::delete))
@@ -83,6 +86,7 @@ pub fn router(control: Control) -> Router {
         .route("/backup-schedules/{id}/delete", post(pages::backups::delete_schedule))
         .route("/backups/{id}/restore", post(pages::backups::restore))
         .route("/backups/{id}/delete", post(pages::backups::delete_backup))
+        .route("/palette", get(pages::palette::palette))
         .route("/settings", get(pages::settings::index))
         .route("/settings/general", get(pages::settings::general))
         .route("/settings/general/{section}", post(pages::settings::update_general))
@@ -100,6 +104,7 @@ pub fn router(control: Control) -> Router {
         .route("/services/{id}/deploy", post(pages::services::deploy))
         .route("/services/{id}/rollback", post(pages::services::rollback))
         .route("/deployments/{id}", get(pages::deployments::deployment))
+        .route("/deployments/{id}/log", get(pages::deployments::download_log))
         .route("/deployments/{id}/summary", get(pages::deployments::summary))
         .route("/deployments/{id}/stream", get(pages::deployments::stream))
         .route("/deployments/{id}/cancel", post(pages::deployments::cancel))

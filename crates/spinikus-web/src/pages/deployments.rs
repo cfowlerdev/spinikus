@@ -10,7 +10,7 @@ use std::convert::Infallible;
 
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -37,6 +37,27 @@ use crate::{
 
 pub async fn deployment(State(control): State<Control>, signed: Signed, Path(id): Path<String>) -> Result<Markup, WebError> {
     Ok(deployment_page(&control, &signed, parse_id(&id)?, None).await?)
+}
+
+/// The deployment's log as a text file, as far as it goes.
+pub async fn download_log(State(control): State<Control>, signed: Signed, Path(id): Path<String>) -> Result<Response, WebError> {
+    let id: DeploymentId = parse_id(&id)?;
+    let log = control.deployment_logs(&signed.principal, id).await?;
+    // An ID is letters, digits and an underscore.
+    let disposition =
+        HeaderValue::from_str(&format!("attachment; filename=\"{id}.log\"")).expect("an ID is a valid header value");
+    let headers = [
+        (header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8")),
+        (header::CONTENT_DISPOSITION, disposition),
+    ];
+    Ok((headers, log).into_response())
+}
+
+/// Whether the deployment may still have a container to read the runtime logs of: one that
+/// started and wasn't cleaned up yet (failed ones are kept for their logs).
+fn may_have_container(deployment: &Deployment) -> bool {
+    use spinikus_core::deployment::DeploymentStatus::*;
+    deployment.cleaned_at.is_none() && matches!(deployment.status, Starting | Verifying | Live | Draining | Superseded | Failed)
 }
 
 /// The summary alone, which reloads itself when the status changes.
@@ -128,7 +149,15 @@ async fn deployment_page(
         div hx-ext=[following.then_some("sse")] sse-connect=[following.then_some(&stream)] sse-close=[following.then_some("end")] {
             (summary_section(signed, &deployment, role, &events))
             section {
-                h2 class="mb-3 font-semibold" { "Log" }
+                div class="mb-3 flex flex-wrap items-baseline gap-x-4 gap-y-1" {
+                    h2 class="font-semibold" { "Log" }
+                    @if !following {
+                        a href={ "/deployments/" (deployment.id) "/log" } hx-boost="false" download class={ (LINK) " text-sm" } { "Download" }
+                    }
+                    @if may_have_container(&deployment) {
+                        a href={ "/services/" (service.id) "/logs?deployment_id=" (deployment.id) } class={ (LINK) " text-sm" } { "Container logs" }
+                    }
+                }
                 div class="flex max-h-[36rem] flex-col-reverse overflow-y-auto rounded-lg bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-200 ring-1 ring-zinc-800" {
                     div id="log" sse-swap=[following.then_some("log")] hx-swap="beforeend" {
                         @for line in log.lines() { (log_line(line)) }

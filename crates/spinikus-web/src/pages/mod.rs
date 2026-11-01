@@ -4,8 +4,10 @@ pub mod backups;
 pub mod databases;
 pub mod deployments;
 pub mod domains;
+pub mod logs;
 pub mod manage;
 pub mod overview;
+pub mod palette;
 pub mod projects;
 pub mod servers;
 pub mod service_settings;
@@ -38,6 +40,7 @@ use crate::{auth::is_htmx, error::WebError, layout};
 enum Tab {
     /// The project's environments, the environment's services, the service's deployments.
     Main,
+    Logs,
     Variables,
     Domains,
     Backups,
@@ -74,6 +77,7 @@ fn service_tabs(service: &Service, role: Role, current: Tab) -> Markup {
     let base = format!("/services/{}", service.id);
     let mut tabs = vec![
         ("Deployments", base.clone(), current == Tab::Main),
+        ("Logs", format!("{base}/logs"), current == Tab::Logs),
         ("Variables", format!("{base}/variables"), current == Tab::Variables),
     ];
     if service.kind == ServiceKind::App {

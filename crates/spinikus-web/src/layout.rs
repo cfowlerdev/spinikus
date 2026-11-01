@@ -54,6 +54,7 @@ fn document(title: &str, body: Markup) -> Markup {
                 link rel="stylesheet" href=(assets::url("app.css"));
                 script src=(assets::url("htmx.min.js")) defer {}
                 script src=(assets::url("htmx-ext-sse.min.js")) defer {}
+                script src=(assets::url("palette.js")) defer {}
             }
             body class="h-full bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100" hx-boost="true" {
                 (body)
@@ -72,16 +73,21 @@ pub fn page(signed: &Signed, title: &str, crumbs: &[(&str, String)], content: Ma
         html! {
             div class="min-h-full" hx-headers=(headers) {
                 header class="border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" {
-                    div class="mx-auto flex h-14 max-w-6xl items-center gap-6 px-4" {
+                    div class="mx-auto flex h-14 max-w-6xl items-center gap-4 px-4 sm:gap-6" {
                         a href="/" class="flex items-center gap-2 font-semibold tracking-tight" {
                             span class="size-2.5 rounded-full bg-indigo-500" {}
                             "Spinikus"
                         }
-                        nav class="flex items-center gap-4 text-sm" {
+                        nav class="flex items-center gap-3 text-sm sm:gap-4" {
                             a href="/" class="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { "Projects" }
                             a href="/settings" class="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { "Settings" }
                         }
-                        div class="ml-auto flex items-center gap-4 text-sm" {
+                        div class="ml-auto flex items-center gap-3 text-sm whitespace-nowrap sm:gap-4" {
+                            button type="button" data-palette-open title="Go to… (Cmd/Ctrl+K)"
+                                class="flex items-center gap-2 rounded-md px-2 py-1 text-zinc-500 ring-1 ring-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:ring-zinc-800 dark:hover:text-zinc-100" {
+                                "Search"
+                                kbd class="hidden font-sans text-xs text-zinc-400 sm:inline" { "⌘K" }
+                            }
                             span class="hidden text-zinc-600 sm:inline dark:text-zinc-400" title=(user.email.as_str()) { (user.name) }
                             form method="post" action="/logout" {
                                 (csrf_field(signed))
@@ -103,9 +109,27 @@ pub fn page(signed: &Signed, title: &str, crumbs: &[(&str, String)], content: Ma
                     }
                     (content)
                 }
+                (palette())
             }
         },
     )
+}
+
+/// The command palette's dialog, filled and driven by `palette.js`. The dialog itself has
+/// no padding, so a click on it rather than its content is a click on the backdrop.
+fn palette() -> Markup {
+    html! {
+        dialog id="palette" aria-label="Go to"
+            class="mx-auto mt-[12vh] w-[min(36rem,calc(100%-2rem))] rounded-xl bg-white p-0 text-zinc-900 shadow-2xl ring-1 ring-zinc-200 backdrop:bg-zinc-950/40 dark:bg-zinc-900 dark:text-zinc-100 dark:ring-zinc-800" {
+            div class="p-2" {
+                input id="palette-input" type="search" autocomplete="off" spellcheck="false" aria-controls="palette-results"
+                    placeholder="Go to a project, environment, service or page…"
+                    class="block w-full rounded-md border-0 bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-zinc-400";
+                ul id="palette-results" role="listbox" class="max-h-[50vh] overflow-y-auto border-t border-zinc-200 pt-2 dark:border-zinc-800" {}
+                p id="palette-empty" hidden class="px-3 py-6 text-center text-sm text-zinc-500 dark:text-zinc-400" { "Nothing matches." }
+            }
+        }
+    }
 }
 
 /// A page without the header, centered: signing in, setup and errors.

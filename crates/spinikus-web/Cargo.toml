@@ -10,6 +10,7 @@ maud.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
 tokio-stream.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
@@ -21,7 +22,6 @@ spinikus-core.workspace = true
 http-body-util.workspace = true
 object_store.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
 tower.workspace = true
 
 spinikus-store.workspace = true
