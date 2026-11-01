@@ -8,6 +8,9 @@
 //! - the target of a rollback in progress (once it runs, the image check below keeps the
 //!   image they share).
 //!
+//! A deleted service keeps nothing that has finished: the runner cancels its deployments in
+//! progress and drains its live one, and each is cleaned up once it has finished.
+//!
 //! Everything else that has finished is cleaned up by a `RemoveDeployment` sent to its
 //! server's agent, which removes the deployment's containers and its image references. An
 //! image is removed only when no deployment kept on that server runs it, since rollbacks and
@@ -31,8 +34,13 @@ use crate::{Control, ControlError};
 /// The most failed and canceled deployments a service keeps.
 pub const FAILURES_KEPT: usize = 10;
 
-/// The deployments to clean up, out of every deployment not cleaned up yet.
-pub(crate) fn to_clean(uncleaned: &[Deployment], releases_kept: usize) -> Vec<&Deployment> {
+/// The deployments to clean up, out of every deployment not cleaned up yet. Those of
+/// `deleted` services are all cleaned up once they have finished.
+pub(crate) fn to_clean<'a>(
+    uncleaned: &'a [Deployment],
+    releases_kept: usize,
+    deleted: &HashSet<ServiceId>,
+) -> Vec<&'a Deployment> {
     let rollback_targets: HashSet<DeploymentId> = uncleaned
         .iter()
         .filter(|deployment| deployment.status.is_in_progress())
@@ -52,6 +60,7 @@ pub(crate) fn to_clean(uncleaned: &[Deployment], releases_kept: usize) -> Vec<&D
         let (mut releases, mut failures) = (0, 0);
         for deployment in newest_first {
             let keep = match deployment.status {
+                status if deleted.contains(&service) => !status.is_terminal(),
                 _ if rollback_targets.contains(&deployment.id) => true,
                 DeploymentStatus::Superseded => {
                     releases += 1;
@@ -89,9 +98,10 @@ impl Control {
         &self,
         sent: &mut super::runner::Sent,
         uncleaned: &[Deployment],
+        deleted: &HashSet<ServiceId>,
     ) -> Result<(), ControlError> {
         let kept = self.releases_kept().await?;
-        let cleaning = to_clean(uncleaned, kept);
+        let cleaning = to_clean(uncleaned, kept, deleted);
         let cleaning_ids: HashSet<DeploymentId> = cleaning.iter().map(|deployment| deployment.id).collect();
         for deployment in cleaning {
             let server = self.store().get_server(deployment.server_id).await?;
@@ -184,8 +194,8 @@ mod tests {
             .map(|status| deployment(service, status))
             .collect();
 
-        let two = ids(to_clean(&all, 2));
-        let none = ids(to_clean(&all, 0));
+        let two = ids(to_clean(&all, 2, &HashSet::new()));
+        let none = ids(to_clean(&all, 0, &HashSet::new()));
 
         // The oldest release, and the failures before the live one.
         assert_eq!(two, [all[0].id, all[1].id, all[4].id]);
@@ -203,12 +213,12 @@ mod tests {
         let other = deployment(api, Superseded);
         let all = [target, newer, rollback, other.clone()];
 
-        assert_eq!(ids(to_clean(&all, 1)), Vec::<DeploymentId>::new());
-        assert_eq!(ids(to_clean(&all, 0)), [all[1].id, other.id]);
+        assert_eq!(ids(to_clean(&all, 1, &HashSet::new())), Vec::<DeploymentId>::new());
+        assert_eq!(ids(to_clean(&all, 0, &HashSet::new())), [all[1].id, other.id]);
         // A live rollback no longer holds on to its target.
         let mut live = all.clone();
         live[2].status = Live;
-        assert_eq!(ids(to_clean(&live, 0)), [all[0].id, all[1].id, other.id]);
+        assert_eq!(ids(to_clean(&live, 0, &HashSet::new())), [all[0].id, all[1].id, other.id]);
     }
 
     #[test]
@@ -216,7 +226,24 @@ mod tests {
         let service = ServiceId::new();
         let failures: Vec<Deployment> = (0..FAILURES_KEPT + 2).map(|_| deployment(service, DeploymentStatus::Failed)).collect();
 
-        assert_eq!(ids(to_clean(&failures, 5)), [failures[0].id, failures[1].id]);
+        assert_eq!(ids(to_clean(&failures, 5, &HashSet::new())), [failures[0].id, failures[1].id]);
+    }
+
+    #[test]
+    fn a_deleted_service_keeps_only_what_has_not_finished() {
+        use DeploymentStatus::*;
+        let (deleted, other) = (ServiceId::new(), ServiceId::new());
+        let mut all: Vec<Deployment> =
+            [Superseded, Failed, Canceled, Draining, Queued].into_iter().map(|status| deployment(deleted, status)).collect();
+        all.push(deployment(other, Superseded));
+
+        let cleaning = ids(to_clean(&all, 5, &HashSet::from([deleted])));
+
+        assert_eq!(
+            cleaning,
+            [all[0].id, all[1].id, all[2].id],
+            "the draining and queued ones wait, the other service keeps its release"
+        );
     }
 
     #[test]

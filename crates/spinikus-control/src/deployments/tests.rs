@@ -876,3 +876,76 @@ async fn a_follower_hears_why_a_deployment_failed() {
     let failed = Status { status: Failed, reason: Some(EndReason::BuildFailed), message: Some("cannot pull".to_string()) };
     assert_eq!(updates, [failed, End(Failed)]);
 }
+
+/// Everything sent so far: commands other than removals, route tables, and removals as
+/// (deployment, images), sorted.
+#[derive(Default)]
+struct Everything {
+    commands: Vec<pb::Command>,
+    routes: Vec<pb::SetRoutes>,
+    removed: Vec<(String, Vec<String>)>,
+}
+
+fn everything(agent: &mut mpsc::Receiver<pb::ControlMessage>) -> Everything {
+    let mut all = Everything::default();
+    while let Ok(message) = agent.try_recv() {
+        match message.message {
+            Some(control_message::Message::Command(pb::Command { kind: Some(Kind::RemoveDeployment(remove)), .. })) => {
+                all.removed.push((remove.deployment_id, remove.images));
+            }
+            Some(control_message::Message::Command(command)) => all.commands.push(command),
+            Some(control_message::Message::SetRoutes(set)) => all.routes.push(set),
+            _ => {}
+        }
+    }
+    all.removed.sort();
+    all
+}
+
+#[tokio::test]
+async fn deleting_a_service_stops_and_removes_its_deployments() {
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    let mut agent = connect(control, setup.server.id);
+    let first = deploy_image(&setup, &mut agent, "web@sha256:01").await;
+    let second = deploy_image(&setup, &mut agent, "web@sha256:02").await;
+    drain(&setup, &mut agent).await;
+    let building = control.create_deployment(&setup.admin, setup.service.id).await.unwrap();
+    control.advance_deployments().await;
+    assert!(matches!(only(sent(&mut agent)).kind, Some(Kind::PrepareDeployment(_))));
+
+    control.delete_service(&setup.admin, setup.service.id).await.unwrap();
+    control.advance_deployments().await;
+
+    // The build is canceled and removed with the old release; the live one drains first.
+    let Everything { commands, routes, removed } = everything(&mut agent);
+    assert!(commands.is_empty(), "nothing to stop until the routes are applied: {commands:?}");
+    let routes = routes.last().unwrap();
+    assert!(routes.routes.is_empty(), "{routes:?}");
+    let mut expected = vec![(first.id.to_string(), vec!["web@sha256:01".to_string()]), (building.id.to_string(), Vec::new())];
+    expected.sort();
+    assert_eq!(removed, expected);
+    let canceled = control.store().get_deployment(building.id).await.unwrap();
+    assert_eq!((canceled.status, canceled.reason), (Canceled, Some(EndReason::CanceledByUser)));
+    let events = control.store().list_deployment_events(building.id).await.unwrap();
+    assert_eq!(events.last().unwrap().message.as_deref(), Some("its service was deleted"));
+    assert_eq!(status(control, second.id).await, Draining);
+
+    control.routes_applied(setup.server.id, routes.revision).await;
+    control.advance_deployments().await;
+    let stop = only(sent(&mut agent));
+    let Some(Kind::StopDeployment(stopping)) = &stop.kind else { panic!("{stop:?}") };
+    assert_eq!(stopping.deployment_id, second.id.to_string());
+    control.deployment_result(setup.server.id, succeeded(&stop, None)).await;
+    control.advance_deployments().await;
+    let removed = everything(&mut agent).removed;
+    assert_eq!(removed, [(second.id.to_string(), vec!["web@sha256:02".to_string()])]);
+
+    for id in [first.id, second.id, building.id] {
+        let remove = pb::Command { command_id: format!("{id}/remove"), kind: None };
+        control.deployment_result(setup.server.id, succeeded(&remove, None)).await;
+    }
+    assert!(control.store().list_deleted_services_with_deployments().await.unwrap().is_empty());
+    control.advance_deployments().await;
+    assert!(everything(&mut agent).removed.is_empty(), "nothing left to remove");
+}

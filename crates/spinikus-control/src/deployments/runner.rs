@@ -96,6 +96,9 @@ fn with_app_file(deployment: &Deployment, text: &str) -> Result<DeploymentSnapsh
 }
 
 /// How long ago `since` was, zero if in the future.
+/// Why a deleted service's deployments end, on their events and logs.
+const SERVICE_DELETED: &str = "its service was deleted";
+
 fn elapsed(since: Timestamp) -> Duration {
     Duration::try_from(Timestamp::now().duration_since(since)).unwrap_or_default()
 }
@@ -134,8 +137,8 @@ impl Control {
     pub(crate) async fn advance_deployments(&self) {
         let mut sent = self.runner().sent.lock().await;
         // Active deployments are never cleaned up, so these include them.
-        let uncleaned = match self.store().list_uncleaned_deployments().await {
-            Ok(uncleaned) => uncleaned,
+        let (uncleaned, deleted) = match self.retire_deleted_services().await {
+            Ok(found) => found,
             Err(error) => {
                 tracing::error!(%error, "failed to list the deployments");
                 return;
@@ -166,9 +169,46 @@ impl Control {
                 tracing::error!(deployment = %id, %error, "failed to advance a deployment");
             }
         }
-        if let Err(error) = self.clean_up_deployments(&mut sent, &uncleaned).await {
+        if let Err(error) = self.clean_up_deployments(&mut sent, &uncleaned, &deleted).await {
             tracing::error!(%error, "failed to clean up deployments");
         }
+    }
+
+    /// Every deployment not cleaned up yet, after ending those of deleted services: one in
+    /// progress is canceled and a live one drains (so it is stopped once the proxy no longer
+    /// routes to it), and cleanup removes them once finished. Also returns the deleted
+    /// services that still have deployments.
+    async fn retire_deleted_services(&self) -> Result<(Vec<Deployment>, HashSet<ServiceId>), ControlError> {
+        let uncleaned = self.store().list_uncleaned_deployments().await?;
+        let deleted: HashSet<ServiceId> = self.store().list_deleted_services_with_deployments().await?.into_iter().collect();
+        let mut retired = false;
+        for deployment in uncleaned.iter().filter(|deployment| deleted.contains(&deployment.service_id)) {
+            let id = deployment.id;
+            let ended = match deployment.status {
+                status if status.is_in_progress() => {
+                    let (canceled, reason) = (DeploymentStatus::Canceled, Some(EndReason::CanceledByUser));
+                    let message = Some(SERVICE_DELETED);
+                    self.store().transition_deployment(id, canceled, reason, message, Actor::System).await?;
+                    self.log_line(id, &format!("canceled: {SERVICE_DELETED}")).await;
+                    true
+                }
+                DeploymentStatus::Live => {
+                    self.store().transition_deployment(id, DeploymentStatus::Draining, None, None, Actor::System).await?;
+                    self.log_line(id, &format!("draining: {SERVICE_DELETED}")).await;
+                    true
+                }
+                _ => false,
+            };
+            if ended {
+                tracing::info!(deployment = %id, service = %deployment.service_id, "ended a deployment of a deleted service");
+                retired = true;
+            }
+        }
+        let uncleaned = match retired {
+            true => self.store().list_uncleaned_deployments().await?,
+            false => uncleaned,
+        };
+        Ok((uncleaned, deleted))
     }
 
     async fn advance(&self, sent: &mut Sent, deployment: Deployment, busy: &mut HashSet<ServiceId>) -> Result<(), ControlError> {

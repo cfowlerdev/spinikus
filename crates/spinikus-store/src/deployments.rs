@@ -46,6 +46,10 @@ pub trait DeploymentRepository: Send + Sync {
     /// Every deployment not cleaned up yet, active ones included, oldest first.
     async fn list_uncleaned_deployments(&self) -> Result<Vec<Deployment>, StoreError>;
 
+    /// Deleted services that still have deployments not cleaned up, so the runner can stop
+    /// and remove them.
+    async fn list_deleted_services_with_deployments(&self) -> Result<Vec<ServiceId>, StoreError>;
+
     /// The deployments on `server_id` that run `image`, of any service, cleaned or not.
     async fn list_deployments_with_image(&self, server_id: ServerId, image: &str) -> Result<Vec<Deployment>, StoreError>;
 
@@ -423,6 +427,18 @@ impl DeploymentRepository for SqliteStore {
         rows.into_iter().map(Deployment::try_from).collect()
     }
 
+    async fn list_deleted_services_with_deployments(&self) -> Result<Vec<ServiceId>, StoreError> {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT deployments.service_id FROM deployments
+             JOIN services ON services.id = deployments.service_id
+             WHERE deployments.cleaned_at IS NULL AND services.deleted_at IS NOT NULL
+             ORDER BY deployments.service_id",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        ids.iter().map(|id| parse_column(ENTITY, "service_id", id)).collect()
+    }
+
     async fn list_deployments_with_image(&self, server_id: ServerId, image: &str) -> Result<Vec<Deployment>, StoreError> {
         let rows: Vec<DeploymentRow> =
             sqlx::query_as(concat!("SELECT ", columns!(), " FROM deployments WHERE server_id = ? AND image = ? ORDER BY id"))
@@ -629,6 +645,21 @@ mod tests {
         assert_eq!((last.to, last.reason, last.message.as_deref()), (Failed, Some(EndReason::BuildFailed), Some("cannot pull")));
         assert_eq!(last.actor, Actor::Server(server_id));
         assert_eq!(events[0].message, None);
+    }
+
+    #[tokio::test]
+    async fn lists_deleted_services_until_their_deployments_are_cleaned_up() {
+        let (_dir, store) = store().await;
+        let (service_id, server_id) = service(&store).await;
+        let deployment = deploy_live(&store, service_id, server_id).await;
+        assert!(store.list_deleted_services_with_deployments().await.unwrap().is_empty(), "not deleted");
+
+        store.delete_service(service_id).await.unwrap();
+        assert_eq!(store.list_deleted_services_with_deployments().await.unwrap(), [service_id]);
+        store.transition_deployment(deployment.id, Draining, None, None, Actor::System).await.unwrap();
+        store.transition_deployment(deployment.id, Superseded, None, None, Actor::System).await.unwrap();
+        store.mark_deployment_cleaned(deployment.id).await.unwrap();
+        assert!(store.list_deleted_services_with_deployments().await.unwrap().is_empty(), "all cleaned up");
     }
 
     #[tokio::test]

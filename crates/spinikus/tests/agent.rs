@@ -381,11 +381,24 @@ async fn the_agent_deploys_an_image_with_docker() {
     assert!(served.contains("X-Forwarded-For: 127.0.0.1"), "{served}");
     assert_eq!(status, 200, "{body}");
     assert!(count > 10 && failures.is_empty(), "{} of {count} requests failed: {failures:?}", failures.len());
-    // Clean up: stop the live one too.
-    let stop = pb::StopDeployment { deployment_id: second.id.to_string(), grace_period: None };
-    send_command(&control_plane, server, "cleanup", Kind::StopDeployment(stop)).await;
+
+    // Deleting the service takes it off the proxy, then stops and removes its containers
+    // and images.
+    let environment = control.get_service(&control_plane.admin, service).await.unwrap().environment_id;
+    control.delete_service(&control_plane.admin, service).await.unwrap();
+    wait_for_response(proxy, host, 404, Duration::from_secs(10)).await;
+    control_plane.wait_for_deployment(second.id, DeploymentStatus::Superseded, Duration::from_secs(30)).await;
     wait_for_deployment(&control_plane, server, second.id, None).await;
-    assert!(remove_network(&control_plane, service).await, "the environment's network was not there");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while control.store().list_deleted_services_with_deployments().await.unwrap().contains(&service) {
+        assert!(tokio::time::Instant::now() < deadline, "the deployments were not cleaned up");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let image = std::process::Command::new("docker").args(["image", "inspect", "traefik/whoami:v1.10"]).output().unwrap();
+    assert!(!image.status.success(), "the image was removed with the last deployment that ran it");
+    let network =
+        std::process::Command::new("docker").args(["network", "rm", &format!("spinikus-{environment}")]).output().unwrap();
+    assert!(network.status.success(), "the environment's network was not there");
 }
 
 /// Removes the network of the service's environment, which its containers joined, and
