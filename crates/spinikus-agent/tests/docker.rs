@@ -166,10 +166,15 @@ async fn pulls_creates_and_publishes_an_app_on_loopback() {
 
     // A mounted volume stays; once its container is gone, it can go.
     assert_eq!(runtime.remove_volume(&volume).await, Err(RuntimeError::InUse));
+    runtime.stop(&id, Duration::from_secs(1)).await.unwrap();
     runtime.remove(&id).await.unwrap();
     runtime.remove_volume(&volume).await.unwrap();
     assert_eq!(runtime.remove_volume(&volume).await, Err(RuntimeError::NotFound));
 }
+
+/// Held by the tests that use networks: one of them removes every unused Spinikus network,
+/// and each test has its own runtime, whose lock guards only its own containers.
+static NETWORKS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Removes an image even when an assertion fails.
 struct ImageCleanup(DockerRuntime, String);
@@ -394,6 +399,7 @@ impl Drop for NetworkCleanup {
 #[tokio::test]
 #[ignore = "needs a Docker daemon"]
 async fn containers_on_an_environments_network_reach_each_other_by_alias() {
+    let _networks = NETWORKS.lock().await;
     let runtime = DockerRuntime::new();
     let docker = runtime.client().unwrap();
     let pinned = runtime.pull("traefik/whoami:v1.10", &|_| {}).await.unwrap();
@@ -448,6 +454,7 @@ async fn containers_on_an_environments_network_reach_each_other_by_alias() {
 #[tokio::test]
 #[ignore = "needs a Docker daemon"]
 async fn runs_a_one_off_container_to_completion_and_removes_it() {
+    let _networks = NETWORKS.lock().await;
     let runtime = DockerRuntime::new();
     runtime.pull(IMAGE, &|_| {}).await.unwrap();
     let network = format!("spinikus-test-{}", DeploymentId::new());
@@ -492,6 +499,7 @@ async fn runs_a_one_off_container_to_completion_and_removes_it() {
 #[tokio::test]
 #[ignore = "needs a Docker daemon"]
 async fn removes_networks_no_container_is_on() {
+    let _networks = NETWORKS.lock().await;
     let runtime = DockerRuntime::new();
     runtime.pull(IMAGE, &|_| {}).await.unwrap();
     let (used, unused) = (format!("spinikus-test-{}", DeploymentId::new()), format!("spinikus-test-{}", DeploymentId::new()));
