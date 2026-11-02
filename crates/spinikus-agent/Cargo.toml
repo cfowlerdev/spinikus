@@ -32,7 +32,7 @@ tar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
-tokio-stream = { workspace = true, features = ["sync"] }
+tokio-stream = { workspace = true, features = ["sync", "net"] }
 tokio-util.workspace = true
 tonic = { workspace = true, features = ["tls-ring"] }
 tracing.workspace = true

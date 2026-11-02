@@ -12,6 +12,7 @@ use spinikus_core::server::ObservedInstance;
 use tokio_stream::Stream;
 
 mod docker;
+mod filesync;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
 mod session;
@@ -98,6 +99,10 @@ pub struct BuildSpec {
     pub secrets: Vec<(String, String)>,
     /// The tag to give the image.
     pub tag: String,
+    /// Whether the builder reads the context from the agent's BuildKit session as local
+    /// sources (`context` and `dockerfile`) rather than from an uploaded tarball, as
+    /// frontends that read them themselves need (Railpack's).
+    pub local_sources: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -150,16 +150,36 @@ async fn build_with_bollard(
     Ok(())
 }
 
-async fn build_with_secrets(
+/// A build through our own BuildKit session: with secrets, and with the context as local
+/// sources (then `context` is `None`), which bollard's session serves neither of.
+async fn build_with_session(
     spec: &BuildSpec,
-    context: tokio::io::DuplexStream,
+    context: Option<tokio::io::DuplexStream>,
     output: &mut BuildOutput,
     progress: &(dyn Fn(String) + Send + Sync),
 ) -> Result<(), RuntimeError> {
     let endpoint = session::Endpoint::from_env(local_socket())?;
     let secrets = spec.secrets.iter().map(|(id, value)| (id.clone(), value.clone().into_bytes())).collect();
-    let session = session::open(&endpoint, secrets).await?;
+    let sources = spec.local_sources.then(|| spec.context.clone());
+    let session = session::open(&endpoint, secrets, sources).await?;
     session::build(&endpoint, &session, spec, context, &mut |info| output.show(info, progress)).await
+}
+
+/// The built image's ID, or the build's failure with the step that failed.
+async fn finish(
+    docker: &Docker,
+    spec: &BuildSpec,
+    built: Result<(), RuntimeError>,
+    output: BuildOutput,
+) -> Result<String, RuntimeError> {
+    if let Err(failure) = built {
+        return Err(match (failure, output.error) {
+            (RuntimeError::Failed(message), Some(step)) => RuntimeError::Failed(format!("{step}: {message}")),
+            (failure, _) => failure,
+        });
+    }
+    let image = docker.inspect_image(&spec.tag).await.map_err(runtime_error)?;
+    image.id.ok_or_else(|| RuntimeError::Failed(format!("the built image {} has no ID", spec.tag)))
 }
 
 fn local_socket() -> Option<String> {
@@ -363,6 +383,11 @@ impl ContainerRuntime for DockerRuntime {
     /// through a BuildKit session of our own (`session.rs`), since bollard's serves none.
     async fn build(&self, spec: &BuildSpec, progress: &(dyn Fn(String) + Send + Sync)) -> Result<String, RuntimeError> {
         let docker = self.client()?;
+        let mut output = BuildOutput::default();
+        if spec.local_sources {
+            let built = build_with_session(spec, None, &mut output, progress).await;
+            return finish(&docker, spec, built, output).await;
+        }
         let (reader, writer) = tokio::io::duplex(64 * 1024);
         let context = spec.context.clone();
         let packing = tokio::task::spawn_blocking(move || {
@@ -371,26 +396,18 @@ impl ContainerRuntime for DockerRuntime {
             pack(&mut tar, &context, Path::new(""))?;
             tar.into_inner()?.flush()
         });
-        let mut output = BuildOutput::default();
         let built = if spec.secrets.is_empty() {
             build_with_bollard(&docker, spec, reader, &mut output, progress).await
         } else {
-            build_with_secrets(spec, reader, &mut output, progress).await
+            build_with_session(spec, Some(reader), &mut output, progress).await
         };
         let packed = packing.await.map_err(|error| RuntimeError::Failed(format!("packing the build context: {error}")))?;
-        if let Err(failure) = built {
-            return Err(match (failure, output.error) {
-                (RuntimeError::Failed(message), Some(step)) => RuntimeError::Failed(format!("{step}: {message}")),
-                (failure, _) => failure,
-            });
-        }
         // The upload ends when the builder has read what it needs; only a failure to read
         // the context matters, and then the build has failed too.
-        if let Err(error) = packed {
+        if let (Ok(()), Err(error)) = (&built, packed) {
             tracing::debug!(%error, "the builder stopped reading the context early");
         }
-        let image = docker.inspect_image(&spec.tag).await.map_err(runtime_error)?;
-        image.id.ok_or_else(|| RuntimeError::Failed(format!("the built image {} has no ID", spec.tag)))
+        finish(&docker, spec, built, output).await
     }
 
     async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError> {

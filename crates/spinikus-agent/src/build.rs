@@ -130,7 +130,16 @@ async fn build(
             let variables = &prepare.build_variables;
             let planned = railpack::plan(&options.railpack, &root, work, &settings, variables, service, progress).await?;
             let secrets = variables.iter().map(|variable| (variable.name.clone(), variable.value.clone())).collect();
-            BuildSpec { context: root.clone(), dockerfile: planned.plan_file, target: None, args: planned.args, secrets, tag }
+            // Railpack's frontend reads the plan and the context as local sources.
+            BuildSpec {
+                context: root.clone(),
+                dockerfile: planned.plan_file,
+                target: None,
+                args: planned.args,
+                secrets,
+                tag,
+                local_sources: true,
+            }
         }
         strategy => return Err(build_failed(format!("the `{}` build strategy is not supported yet", strategy.as_str()))),
     };
@@ -175,7 +184,7 @@ fn dockerfile_build(
             names.join(", ")
         ));
     }
-    Ok(BuildSpec { context, dockerfile, target: settings.target, args, secrets, tag })
+    Ok(BuildSpec { context, dockerfile, target: settings.target, args, secrets, tag, local_sources: false })
 }
 
 /// `relative` under `base`, which must exist and stay inside `repo` once symlinks resolve.

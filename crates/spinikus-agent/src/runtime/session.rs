@@ -6,7 +6,11 @@
 //! as bollard would. Dockerfiles read the secrets with `RUN --mount=type=secret,id=<NAME>`;
 //! they never become part of the image.
 //!
-//! This needs Docker on a Unix socket or plain TCP. Builds without secrets go through bollard.
+//! Builds whose frontend reads the context as local sources (Railpack's) go this way too:
+//! the session also serves the context directory over `FileSync` (`filesync.rs`), and
+//! `/build` gets `remote=client-session` and no tarball.
+//!
+//! This needs Docker on a Unix socket or plain TCP. Other builds go through bollard.
 
 use std::{
     collections::HashMap,
@@ -30,6 +34,7 @@ use bollard_buildkit_proto::{
         },
         v1::StatusResponse,
     },
+    moby::filesync::v1::file_sync_server::FileSyncServer,
 };
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, StreamBody};
@@ -43,10 +48,13 @@ use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_stream::StreamExt;
 
-use super::{BuildSpec, RuntimeError};
+use super::{BuildSpec, RuntimeError, filesync::LocalSources};
 
 /// The gRPC methods the session serves, which Docker needs to be told.
 const METHODS: [&str; 2] = ["/moby.buildkit.secrets.v1.Secrets/GetSecret", "/grpc.health.v1.Health/Check"];
+
+/// The method that serves local sources, when the session has them.
+const DIFF_COPY: &str = "/moby.filesync.v1.FileSync/DiffCopy";
 
 /// Where the Docker daemon listens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,8 +113,13 @@ impl Drop for Session {
     }
 }
 
-/// Opens a session that gives BuildKit `secrets` by their IDs.
-pub(super) async fn open(endpoint: &Endpoint, secrets: HashMap<String, Vec<u8>>) -> Result<Session, RuntimeError> {
+/// Opens a session that gives BuildKit `secrets` by their IDs and, with `sources`, that
+/// directory as the local sources `context` and `dockerfile`.
+pub(super) async fn open(
+    endpoint: &Endpoint,
+    secrets: HashMap<String, Vec<u8>>,
+    sources: Option<PathBuf>,
+) -> Result<Session, RuntimeError> {
     let (mut sender, connection) = hyper::client::conn::http1::handshake(endpoint.connect().await?)
         .await
         .map_err(|error| RuntimeError::Unavailable(error.to_string()))?;
@@ -122,7 +135,7 @@ pub(super) async fn open(endpoint: &Endpoint, secrets: HashMap<String, Vec<u8>>)
         .header(UPGRADE, "h2c")
         .header("X-Docker-Expose-Session-Uuid", &id)
         .header("X-Docker-Expose-Session-Name", "spinikus");
-    for method in METHODS {
+    for method in METHODS.into_iter().chain(sources.is_some().then_some(DIFF_COPY)) {
         request = request.header("X-Docker-Expose-Session-Grpc-Method", method);
     }
     let response = sender.send_request(request.body(Empty::<Bytes>::new()).map_err(failed)?).await.map_err(failed)?;
@@ -135,7 +148,8 @@ pub(super) async fn open(endpoint: &Endpoint, secrets: HashMap<String, Vec<u8>>)
     let transport = Transport(TokioIo::new(upgraded));
     let server = tonic::transport::Server::builder()
         .add_service(HealthServer::new(Healthy))
-        .add_service(SecretsServer::new(SecretStore(secrets)));
+        .add_service(SecretsServer::new(SecretStore(secrets)))
+        .add_optional_service(sources.map(|root| FileSyncServer::new(LocalSources { root })));
     let serving = tokio::spawn(async move {
         let incoming = tokio_stream::once(Ok::<_, std::io::Error>(transport));
         if let Err(error) = server.serve_with_incoming(incoming).await {
@@ -145,13 +159,14 @@ pub(super) async fn open(endpoint: &Endpoint, secrets: HashMap<String, Vec<u8>>)
     Ok(Session { id, serving })
 }
 
-/// Runs a BuildKit build of `context` (a tar stream) in `session`, giving `show` its output.
-/// A failed build is `Failed`, with the builder's error.
+/// Runs a BuildKit build in `session` of `context` (a tar stream), or of the session's local
+/// sources without one, giving `show` its output. A failed build is `Failed`, with the
+/// builder's error.
 pub(super) async fn build(
     endpoint: &Endpoint,
     session: &Session,
     spec: &BuildSpec,
-    context: tokio::io::DuplexStream,
+    context: Option<tokio::io::DuplexStream>,
     show: &mut (dyn FnMut(BuildInfo) + Send),
 ) -> Result<(), RuntimeError> {
     let (mut sender, connection) = hyper::client::conn::http1::handshake(endpoint.connect().await?)
@@ -174,13 +189,19 @@ pub(super) async fn build(
     if let Some(target) = &spec.target {
         query.push(("target", target.clone()));
     }
+    if context.is_none() {
+        query.push(("remote", "client-session".to_string()));
+    }
     let query: Vec<String> = query.iter().map(|(name, value)| format!("{name}={}", encode(value))).collect();
-    let body = StreamBody::new(tokio_util::io::ReaderStream::new(context).map(|chunk| chunk.map(Frame::data)));
-    let request = Request::post(format!("/build?{}", query.join("&")))
-        .header(HOST, "docker")
-        .header(CONTENT_TYPE, "application/x-tar")
-        .body(body)
-        .map_err(failed)?;
+    let request = Request::post(format!("/build?{}", query.join("&"))).header(HOST, "docker");
+    let request = match context {
+        Some(context) => {
+            let body = StreamBody::new(tokio_util::io::ReaderStream::new(context).map(|chunk| chunk.map(Frame::data)));
+            request.header(CONTENT_TYPE, "application/x-tar").body(body.boxed())
+        }
+        None => request.body(Empty::<Bytes>::new().map_err(|never| match never {}).boxed()),
+    }
+    .map_err(failed)?;
     let response = sender.send_request(request).await.map_err(failed)?;
     let status = response.status();
     let mut body = response.into_body();

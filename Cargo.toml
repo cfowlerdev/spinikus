@@ -7,7 +7,7 @@ members = [
 
 [workspace.package]
 # One version for every crate: the release's (`cargo xtask release --tag v<version>` checks it).
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [workspace.dependencies]

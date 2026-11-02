@@ -222,6 +222,7 @@ async fn builds_with_buildkit() {
         args: vec![("GREETING".to_string(), "hi there".to_string())],
         secrets: Vec::new(),
         tag: tag.clone(),
+        local_sources: false,
     };
     let lines = std::sync::Mutex::new(Vec::new());
 
@@ -239,6 +240,112 @@ async fn builds_with_buildkit() {
         }
         other => panic!("expected a failed build, got {other:?}"),
     }
+}
+
+/// The context as local sources over the agent's BuildKit session, as Railpack's frontend
+/// reads it. Docker's Dockerfile frontend reads it the same way with `remote=client-session`,
+/// including `.dockerignore` (by `followpaths`, then as `exclude-patterns`).
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn builds_from_local_sources_over_the_session() {
+    let runtime = DockerRuntime::new();
+    let dir = tempfile::tempdir().unwrap();
+    let context = dir.path();
+    std::fs::create_dir_all(context.join(".git")).unwrap();
+    std::fs::create_dir_all(context.join("src/deep")).unwrap();
+    std::fs::write(context.join(".git/HEAD"), "not for the image").unwrap();
+    std::fs::write(context.join("src/deep/big.bin"), vec![7u8; 300_000]).unwrap();
+    std::fs::write(context.join("ignored.txt"), "left out").unwrap();
+    std::fs::write(context.join(".dockerignore"), "ignored.txt\n").unwrap();
+    std::fs::write(context.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    std::fs::set_permissions(context.join("run.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("run.sh", context.join("link")).unwrap();
+    std::fs::write(
+        context.join("Build.dockerfile"),
+        "FROM busybox:1.37\n\
+         COPY . /src\n\
+         RUN test ! -e /src/.git && test ! -e /src/ignored.txt && test -x /src/run.sh && test -L /src/link \\\n\
+             && test \"$(wc -c < /src/src/deep/big.bin)\" -eq 300000 && /src/link | grep -qx hi\n",
+    )
+    .unwrap();
+    let tag = format!("spinikus/test:{}", DeploymentId::new().to_string().to_lowercase());
+    let _cleanup = ImageCleanup(runtime.clone(), tag.clone());
+    let spec = BuildSpec {
+        context: context.to_path_buf(),
+        dockerfile: "Build.dockerfile".to_string(),
+        target: None,
+        args: Vec::new(),
+        secrets: Vec::new(),
+        tag: tag.clone(),
+        local_sources: true,
+    };
+    let lines = std::sync::Mutex::new(Vec::new());
+
+    let built = runtime.build(&spec, &|line| lines.lock().unwrap().push(line)).await;
+
+    let lines = lines.into_inner().unwrap();
+    let image = built.unwrap_or_else(|error| panic!("{error}: {lines:#?}"));
+    assert!(image.starts_with("sha256:"), "{image}");
+    let missing = runtime.build(&BuildSpec { dockerfile: "Missing.dockerfile".to_string(), ..spec.clone() }, &|_| {}).await;
+    assert!(matches!(missing, Err(RuntimeError::Failed(_))), "{missing:?}");
+}
+
+/// A plan built by Railpack's BuildKit frontend, which reads the plan and the context as
+/// local sources: what a Railpack build does once `railpack prepare` has written the plan.
+/// The plan is a minimal hand-written one, so this needs no `railpack` binary.
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn builds_a_plan_with_the_railpack_frontend() {
+    const PLAN_FILE: &str = ".spinikus-railpack-plan.json";
+    let runtime = DockerRuntime::new();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("hello.txt"), "hello from the context").unwrap();
+    let plan = serde_json::json!({
+        "deploy": {
+            // Railpack's images run commands with /bin/bash -c.
+            "base": { "image": "debian:trixie-slim" },
+            "inputs": [{ "local": true, "include": ["."] }],
+            "startCommand": "cat hello.txt",
+        },
+        "exclude": [PLAN_FILE],
+    });
+    std::fs::write(dir.path().join(PLAN_FILE), plan.to_string()).unwrap();
+    let tag = format!("spinikus/test:{}", DeploymentId::new().to_string().to_lowercase());
+    let _cleanup = ImageCleanup(runtime.clone(), tag.clone());
+    let spec = BuildSpec {
+        context: dir.path().to_path_buf(),
+        dockerfile: PLAN_FILE.to_string(),
+        target: None,
+        args: vec![
+            ("BUILDKIT_SYNTAX".to_string(), "ghcr.io/railwayapp/railpack-frontend:v0.43.0".to_string()),
+            ("cache-key".to_string(), ServiceId::new().to_string()),
+            ("secrets-hash".to_string(), "none".to_string()),
+        ],
+        secrets: Vec::new(),
+        tag: tag.clone(),
+        local_sources: true,
+    };
+    let lines = std::sync::Mutex::new(Vec::new());
+    let built = runtime.build(&spec, &|line| lines.lock().unwrap().push(line)).await;
+    let lines = lines.into_inner().unwrap();
+    built.unwrap_or_else(|error| panic!("{error}: {lines:#?}"));
+
+    let output = std::sync::Mutex::new(Vec::new());
+    let check = OneOffSpec {
+        name: format!("spinikus-test-{}", DeploymentId::new().to_string().to_lowercase()),
+        image: tag.clone(),
+        service_id: ServiceId::new(),
+        deployment_id: DeploymentId::new(),
+        env: Vec::new(),
+        network: None,
+        command: vec![format!("pwd; ls -a; cat hello.txt && test ! -e {PLAN_FILE} && test ! -e .git")],
+        timeout: Duration::from_secs(30),
+    };
+    let exit = runtime.run_once(&check, &|line| output.lock().unwrap().push(line.text)).await.unwrap();
+    let output = output.into_inner().unwrap();
+    assert_eq!(exit, OneOffExit::Exited(0), "{output:#?}");
+    assert!(output.iter().any(|line| line.contains("hello from the context")), "{output:#?}");
 }
 
 #[tokio::test]
@@ -264,6 +371,7 @@ async fn builds_with_secrets_that_stay_out_of_the_image() {
         args: vec![("LEVEL".to_string(), "info".to_string())],
         secrets: vec![("TOKEN".to_string(), "s3cret-token".to_string())],
         tag: tag.clone(),
+        local_sources: false,
     };
     let lines = std::sync::Mutex::new(Vec::new());
 
