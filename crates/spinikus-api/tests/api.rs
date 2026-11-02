@@ -182,6 +182,11 @@ async fn creates_environments_and_services() {
     let no_pr = api.send(Method::POST, &environments, token, &[], Some(json!({ "name": "PR", "kind": "preview" }))).await;
     let production =
         api.send(Method::POST, &environments, token, &[], Some(json!({ "name": "Production", "kind": "production" }))).await;
+    let staging = json!({ "name": "Staging", "kind": "staging", "previews": true });
+    let staging = api.send(Method::POST, &environments, token, &[], Some(staging)).await;
+    let staging_url = format!("/api/v1/environments/{}", staging.body["id"].as_str().unwrap());
+    let off =
+        api.send(Method::PATCH, &staging_url, token, &[(header::IF_MATCH, "\"1\"")], Some(json!({ "previews": false }))).await;
     let services = format!("/api/v1/environments/{}/services", production.body["id"].as_str().unwrap());
     let typo = api.send(Method::POST, &services, token, &[], Some(json!({ "name": "Web", "kind": "app", "conifg": {} }))).await;
     let web = json!({ "name": "Web", "kind": "app", "config": { "port": 8080 } });
@@ -190,6 +195,8 @@ async fn creates_environments_and_services() {
 
     assert_eq!((no_pr.status, &no_pr.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("kind")));
     assert_eq!(production.body["kind"], "production");
+    assert_eq!((&production.body["previews"], &production.body["base_environment_id"]), (&json!(false), &json!(null)));
+    assert_eq!((staging.body["previews"].clone(), off.body["previews"].clone()), (json!(true), json!(false)));
     assert_eq!((typo.status, &typo.body["code"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("invalid_body")));
     assert_eq!(created.status, StatusCode::CREATED);
     assert_eq!(created.body["config"], json!({ "port": 8080 }));

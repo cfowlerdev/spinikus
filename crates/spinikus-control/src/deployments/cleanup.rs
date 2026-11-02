@@ -26,7 +26,7 @@ use spinikus_core::{
     source::SourceSpec,
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind};
-use spinikus_store::{DeploymentRepository, ServerRepository};
+use spinikus_store::{DeploymentRepository, ServerRepository, VolumeRepository};
 
 use super::commands::{Step, command_id};
 use crate::{Control, ControlError};
@@ -112,13 +112,45 @@ impl Control {
             if !self.agents().is_connected(server.id) {
                 continue;
             }
+            let Some(volumes) = self.volumes_to_remove(deployment, uncleaned, deleted).await? else {
+                continue;
+            };
             let images = self.images_to_remove(deployment, &cleaning_ids).await?;
-            let remove = pb::RemoveDeployment { deployment_id: deployment.id.to_string(), images };
+            let remove = pb::RemoveDeployment { deployment_id: deployment.id.to_string(), images, volumes };
             let command =
                 pb::Command { command_id: command_id(deployment.id, Step::Remove), kind: Some(Kind::RemoveDeployment(remove)) };
             self.send_command(sent, server.id, command).await;
         }
         Ok(())
+    }
+
+    /// The volumes to remove with `deployment`: those of a deleted preview service, with its
+    /// last deployment on that server. `None` while that is `deployment` and others there
+    /// are not cleaned up yet, so no container of theirs still mounts the volumes.
+    async fn volumes_to_remove(
+        &self,
+        deployment: &Deployment,
+        uncleaned: &[Deployment],
+        deleted: &HashSet<ServiceId>,
+    ) -> Result<Option<Vec<String>>, ControlError> {
+        if !deleted.contains(&deployment.service_id) {
+            return Ok(Some(Vec::new()));
+        }
+        let volumes = self.store().list_disposable_volumes(deployment.service_id).await?;
+        if volumes.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let siblings: Vec<&Deployment> = uncleaned
+            .iter()
+            .filter(|other| other.service_id == deployment.service_id && other.server_id == deployment.server_id)
+            .collect();
+        let newest = siblings.iter().map(|other| other.id).max() == Some(deployment.id);
+        match (siblings.len(), newest) {
+            (1, _) => {}
+            (_, true) => return Ok(None),
+            (_, false) => return Ok(Some(Vec::new())),
+        }
+        Ok(Some(volumes.into_iter().map(|volume| volume.id.to_string()).collect()))
     }
 
     /// The image references to remove with `deployment`: none while a deployment that is kept

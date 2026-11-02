@@ -731,7 +731,7 @@ mod tests {
     async fn database(store: &SqliteStore) -> ServiceId {
         let project =
             store.create_project(ProjectFields { name: "Shop".to_string(), slug: "shop".parse().unwrap() }).await.unwrap();
-        let fields = EnvironmentFields { name: "Production".to_string(), slug: "production".parse().unwrap() };
+        let fields = EnvironmentFields { name: "Production".to_string(), slug: "production".parse().unwrap(), previews: false };
         let environment = store.create_environment(project.id, EnvironmentKind::Production, fields).await.unwrap();
         let fields = ServiceFields {
             name: "Postgres".to_string(),

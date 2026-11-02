@@ -117,6 +117,9 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
     // Creating things, and linking the directory to the service.
     assert_eq!(cli(&["project", "create", "Shop"]).await.code, 0);
     assert_eq!(cli(&["environment", "create", "Production", "--project", "shop"]).await.code, 0);
+    let previews = cli(&["environment", "previews", "on", "shop/production"]).await;
+    assert_eq!((previews.code, previews.stdout.as_str()), (0, "Previews of shop/production are on.\n"), "{}", previews.stderr);
+    assert!(cli(&["environment", "list", "shop"]).await.stdout.contains("production (previews)"));
     let created = spinikus(
         &config,
         &work,

@@ -29,7 +29,7 @@ pub(crate) struct Setup {
     _dir: tempfile::TempDir,
     pub(crate) control: Control,
     pub(crate) admin: Principal,
-    environment: Environment,
+    pub(crate) environment: Environment,
     pub(crate) service: Service,
     pub(crate) server: Server,
 }
@@ -45,7 +45,7 @@ pub(crate) async fn setup_with(timings: DeploymentTimings, change: impl FnOnce(C
     let control = change(control.with_deployment_timings(timings));
     let admin = user(&control, "admin@example.com", true).await;
     let project = control.create_project(&admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
-    let new = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
+    let new = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production, previews: false };
     let environment = control.create_environment(&admin, project.id, new).await.unwrap();
     let server = control.create_server(&admin, NewServer { name: "web-1".to_string() }).await.unwrap();
     let config = json!({ "runtime": { "port": 3000, "healthcheck": { "path": "/healthz" }, "shutdown_timeout": "20s" } });

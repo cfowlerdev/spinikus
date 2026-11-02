@@ -114,7 +114,8 @@ impl ControlPlane {
     pub async fn service(&self, server: ServerId, image: &str, runtime: serde_json::Value) -> ServiceId {
         let project =
             self.control.create_project(&self.admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
-        let new = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
+        let new =
+            NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production, previews: false };
         let environment = self.control.create_environment(&self.admin, project.id, new).await.unwrap();
         let new = NewService {
             name: "Web".to_string(),

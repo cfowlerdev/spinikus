@@ -149,7 +149,7 @@ mod tests {
             .create_environment(
                 shop.id,
                 EnvironmentKind::Staging,
-                EnvironmentFields { name: "Staging".into(), slug: "staging".parse().unwrap() },
+                EnvironmentFields { name: "Staging".into(), slug: "staging".parse().unwrap(), previews: false },
             )
             .await
             .unwrap();

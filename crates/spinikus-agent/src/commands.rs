@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use spinikus_core::id::DeploymentId;
+use spinikus_core::id::{DeploymentId, VolumeId};
 use spinikus_proto::agent::v1::{self as pb, FailureReason, command::Kind, command_result::Outcome};
 use tokio::{
     sync::mpsc,
@@ -322,8 +322,8 @@ pub(crate) async fn stop_containers(
     Ok(())
 }
 
-/// Removes a finished deployment's containers, then its images. An image still in use stays,
-/// such as one a container outside Spinikus runs.
+/// Removes a finished deployment's containers, then its images and the volumes it names. An
+/// image or volume still in use stays, such as an image a container outside Spinikus runs.
 async fn remove_deployment(runtime: &dyn ContainerRuntime, remove: pb::RemoveDeployment) -> Result<(), pb::CommandFailed> {
     let deployment = parse_id("deployment ID", &remove.deployment_id)?;
     // Its containers stopped long ago, or never ran.
@@ -333,6 +333,15 @@ async fn remove_deployment(runtime: &dyn ContainerRuntime, remove: pb::RemoveDep
             Ok(()) => tracing::info!(deployment = %deployment, image, "removed an image"),
             Err(RuntimeError::NotFound) => {}
             Err(RuntimeError::InUse) => tracing::info!(deployment = %deployment, image, "kept an image that is in use"),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for volume in &remove.volumes {
+        let _: VolumeId = parse_id("volume ID", volume)?;
+        match runtime.remove_volume(volume).await {
+            Ok(()) => tracing::info!(deployment = %deployment, volume, "removed a volume"),
+            Err(RuntimeError::NotFound) => {}
+            Err(RuntimeError::InUse) => tracing::warn!(deployment = %deployment, volume, "kept a volume that is in use"),
             Err(error) => return Err(error.into()),
         }
     }
@@ -463,13 +472,23 @@ mod tests {
         runtime.create(&spec).await.unwrap();
         let mut commands = Commands::new(runtime.clone(), builds(), BackupStores::default());
         let images = ["web@sha256:01", "web@sha256:02", "gone@sha256:03"].map(str::to_string).to_vec();
-        let remove = pb::RemoveDeployment { deployment_id: old.to_string(), images };
+        let (data, mounted) = (VolumeId::new().to_string(), VolumeId::new().to_string());
+        let mut spec = spec;
+        spec.name = "spinikus-other".to_string();
+        spec.deployment_id = DeploymentId::new();
+        spec.volumes = vec![crate::runtime::Mount { volume: mounted.clone(), path: "/data".to_string() }];
+        runtime.create(&spec).await.unwrap();
+        let volumes = vec![data.clone(), mounted];
+        let remove = pb::RemoveDeployment { deployment_id: old.to_string(), images, volumes };
 
-        commands.start(command("cmd-1", Kind::RemoveDeployment(remove)));
+        commands.start(command("cmd-1", Kind::RemoveDeployment(remove.clone())));
         let result = finish(&mut commands).await;
+        commands.start(command("cmd-2", Kind::RemoveDeployment(remove)));
+        let again = finish(&mut commands).await;
 
-        assert!(succeeded(&result), "{result:?}");
+        assert!(succeeded(&result) && succeeded(&again), "{result:?} {again:?}");
         assert!(runtime.get("old").is_none());
+        assert_eq!(runtime.removed_volumes(), [data], "a volume in use stays");
         assert_eq!(runtime.removed_images(), ["web@sha256:01"]);
         assert!(!runtime.has_image("web@sha256:01") && runtime.has_image("web@sha256:02"));
     }

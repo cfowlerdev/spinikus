@@ -18,6 +18,11 @@ pub struct Environment {
     /// Fixed when the environment is created.
     #[serde(flatten)]
     pub kind: EnvironmentKind,
+    /// Whether pull requests get preview environments copied from this one. Never on for
+    /// a preview.
+    pub previews: bool,
+    /// For a preview made from a pull request, the environment it is a copy of.
+    pub base_environment_id: Option<EnvironmentId>,
     pub revision: i64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -77,6 +82,8 @@ impl EnvironmentKind {
 pub struct EnvironmentFields {
     pub name: String,
     pub slug: Slug,
+    /// Whether pull requests get previews of the environment.
+    pub previews: bool,
 }
 
 #[cfg(test)]

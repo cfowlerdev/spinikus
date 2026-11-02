@@ -57,8 +57,9 @@ fn environment_table(session: &Session, environments: &[Value]) -> anyhow::Resul
     let rows = environments
         .iter()
         .map(|value| {
-            views::read::<Environment>(value)
-                .map(|environment| vec![environment.slug, environment.name, environment.kind, environment.id])
+            views::read::<Environment>(value).map(|environment| {
+                vec![environment.slug.clone(), environment.name.clone(), environment.described_kind(), environment.id]
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     session.out.table(&["SLUG", "NAME", "KIND", "ID"], &rows)
@@ -75,9 +76,9 @@ pub async fn environment(session: &Session, command: EnvironmentCommand) -> anyh
             }
             environment_table(session, &environments)
         }
-        EnvironmentCommand::Create { name, project, slug, kind } => {
+        EnvironmentCommand::Create { name, project, slug, kind, previews } => {
             let project = session.project(project.as_deref()).await?;
-            let body = json!({ "name": name, "slug": slug, "kind": kind });
+            let body = json!({ "name": name, "slug": slug, "kind": kind, "previews": previews });
             let created: Value = api.post(&format!("/projects/{}/environments", project.id), &body).await?;
             if out.json() {
                 return out.print_json(&created);
@@ -92,10 +93,20 @@ pub async fn environment(session: &Session, command: EnvironmentCommand) -> anyh
             }
             let path = session.environment_path(&environment).await?;
             let services: Vec<Value> = api.list(&format!("/environments/{}/services", environment.id)).await?;
-            let title = format!("{} ({}, {})", out.paint(&path, Style::Bold), environment.kind, environment.id);
+            let title = format!("{} ({}, {})", out.paint(&path, Style::Bold), environment.described_kind(), environment.id);
             out.done(&title)?;
             out.done("")?;
             service_table(session, &services)
+        }
+        EnvironmentCommand::Previews { state, environment } => {
+            let environment = session.environment(environment.as_deref()).await?;
+            let path = session.environment_path(&environment).await?;
+            let body = json!({ "previews": state == "on" });
+            let updated: Value = api.patch(&format!("/environments/{}", environment.id), environment.revision, &body).await?;
+            if out.json() {
+                return out.print_json(&updated);
+            }
+            out.done(&format!("Previews of {path} are {state}."))
         }
         EnvironmentCommand::Delete { environment, yes } => {
             let environment = session.environment(Some(&environment)).await?;

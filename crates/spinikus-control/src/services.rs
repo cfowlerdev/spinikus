@@ -201,7 +201,7 @@ mod tests {
         let project = control.create_project(admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
         let mut created = Vec::new();
         for (name, kind) in [("Production", EnvironmentKind::Production), ("Staging", EnvironmentKind::Staging)] {
-            let new = NewEnvironment { name: name.to_string(), slug: None, kind };
+            let new = NewEnvironment { name: name.to_string(), slug: None, kind, previews: false };
             created.push(control.create_environment(admin, project.id, new).await.unwrap());
         }
         let staging = created.pop().unwrap();

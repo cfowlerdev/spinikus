@@ -247,7 +247,7 @@ async fn pages_show_only_what_the_user_may_see() {
     let project = |name: &str| NewProject { name: name.to_string(), slug: None };
     let shop = control.create_project(&admin, project("Shop")).await.unwrap();
     let secret = control.create_project(&admin, project("Secret plans")).await.unwrap();
-    let environment = |name: &str, kind| NewEnvironment { name: name.to_string(), slug: None, kind };
+    let environment = |name: &str, kind| NewEnvironment { name: name.to_string(), slug: None, kind, previews: false };
     let production =
         control.create_environment(&admin, shop.id, environment("Production", EnvironmentKind::Production)).await.unwrap();
     let staging = control.create_environment(&admin, shop.id, environment("Staging", EnvironmentKind::Staging)).await.unwrap();
@@ -338,7 +338,8 @@ async fn deploys_follows_cancels_and_rolls_back() {
     let (_, secret) = control.sign_in("ada@example.com", Secret::new(PASSWORD), Default::default()).await.unwrap();
     let admin = control.authenticate_session(secret.expose()).await.unwrap();
     let shop = control.create_project(&admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
-    let production = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
+    let production =
+        NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production, previews: false };
     let production = control.create_environment(&admin, shop.id, production).await.unwrap();
     let server = control.create_server(&admin, NewServer { name: "web-1".to_string() }).await.unwrap();
     let service = |name: &str| NewService {
@@ -623,6 +624,28 @@ async fn creates_edits_and_deletes_projects_environments_and_services() {
     )
     .await;
     assert_eq!(staging.status, StatusCode::SEE_OTHER, "{}", staging.body);
+    let previews =
+        post(format!("/environments/{environment_id}/settings/previews"), vec![field("previews", "on"), field("revision", "2")])
+            .await;
+    assert_eq!(previews.header("location"), Some(format!("/environments/{environment_id}/settings?saved=previews").as_str()));
+    let page = web.get(&format!("/environments/{environment_id}/settings?saved=previews"), Some(&session)).await.body;
+    assert!(page.contains("Deploy a preview of each pull request") && page.contains("Saved."), "{page}");
+    let stale = post(format!("/environments/{environment_id}/settings/previews"), vec![field("revision", "2")]).await;
+    assert_eq!(stale.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let base = control.get_environment(&admin, environment_id.parse().unwrap()).await.unwrap();
+    assert!(base.previews);
+    let fields = spinikus_core::environment::EnvironmentFields {
+        name: "PR #7".to_string(),
+        slug: "pr-7".parse().unwrap(),
+        previews: false,
+    };
+    let preview =
+        spinikus_store::EnvironmentRepository::create_preview_environment(control.store(), base.id, 7, fields).await.unwrap();
+    let preview_page = web.get(&format!("/environments/{}", preview.id), Some(&session)).await.body;
+    assert!(preview_page.contains("The preview of pull request #7, copied from Live."), "{preview_page}");
+    let preview_settings = web.get(&format!("/environments/{}/settings", preview.id), Some(&session)).await.body;
+    assert!(preview_settings.contains("Delete preview") && !preview_settings.contains("Deploy a preview"), "{preview_settings}");
+    assert_eq!(post(format!("/environments/{}/delete", preview.id), vec![]).await.status, StatusCode::SEE_OTHER);
     let refused = post(format!("/projects/{project_id}/delete"), vec![]).await;
     assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(refused.body.contains("Delete the project's environments first."));
@@ -645,7 +668,8 @@ async fn runtime_settings_from_the_repository_are_read_only() {
     let (_, secret) = control.sign_in("ada@example.com", Secret::new(PASSWORD), Default::default()).await.unwrap();
     let admin = control.authenticate_session(secret.expose()).await.unwrap();
     let shop = control.create_project(&admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
-    let production = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
+    let production =
+        NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production, previews: false };
     let production = control.create_environment(&admin, shop.id, production).await.unwrap();
     let server = control.create_server(&admin, NewServer { name: "web-1".to_string() }).await.unwrap();
     let mut config = ServiceConfig::new();
@@ -713,7 +737,8 @@ async fn shop_with_team(
     let (_, secret) = control.sign_in("ada@example.com", Secret::new(PASSWORD), Default::default()).await.unwrap();
     let admin = control.authenticate_session(secret.expose()).await.unwrap();
     let shop = control.create_project(&admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
-    let production = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
+    let production =
+        NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production, previews: false };
     let production = control.create_environment(&admin, shop.id, production).await.unwrap();
     let new =
         NewService { name: "Web".to_string(), slug: None, kind: ServiceKind::App, config: ServiceConfig::new(), server_id: None };

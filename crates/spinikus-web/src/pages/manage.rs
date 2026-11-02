@@ -1,10 +1,10 @@
 //! Creating, editing and deleting projects and environments. Instance admins create
-//! projects; project admins edit and delete them and create and delete environments;
-//! environment admins rename environments.
+//! projects; project admins edit and delete them, create and delete environments, and turn
+//! previews of pull requests on or off; environment admins rename environments.
 
 use axum::{
     Form,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -180,7 +180,7 @@ pub async fn create_environment(
         "staging" => EnvironmentKind::Staging,
         _ => EnvironmentKind::Production,
     };
-    let new = NewEnvironment { name: form.naming.name.clone(), slug: form.naming.slug(), kind };
+    let new = NewEnvironment { name: form.naming.name.clone(), slug: form.naming.slug(), kind, previews: false };
     match control.create_environment(&signed.principal, project.id, new).await {
         Ok(environment) => Ok(redirect(&headers, &format!("/environments/{}", environment.id))),
         Err(error) => problem(error, |message| new_environment_page(&signed, &project, &form, Notice::Problem(message))),
@@ -204,15 +204,58 @@ fn new_environment_page(signed: &Signed, project: &Project, form: &NewEnvironmen
     layout::page(signed, "New environment", &crumbs, content)
 }
 
+/// Which section was just saved, from `?saved=`.
+#[derive(Deserialize)]
+pub struct Saved {
+    saved: Option<String>,
+}
+
 pub async fn environment_settings(
     State(control): State<Control>,
     signed: Signed,
     Path(id): Path<String>,
+    Query(Saved { saved }): Query<Saved>,
 ) -> Result<Markup, WebError> {
     let (environment, project, project_admin) = environment_as_admin(&control, &signed, parse_id(&id)?).await?;
-    let form =
-        Naming { revision: Some(environment.revision), name: environment.name.clone(), slug: environment.slug.to_string() };
-    Ok(environment_settings_page(&signed, &project, &environment, project_admin, &form, Notice::None))
+    let base = base_environment(&control, &signed, &environment).await;
+    let form = naming(&environment);
+    let previews = if saved.as_deref() == Some("previews") { Notice::Saved } else { Notice::None };
+    let notices = Notices { general: Notice::None, previews };
+    Ok(environment_settings_page(&signed, &project, &environment, base.as_ref(), project_admin, &form, notices))
+}
+
+/// The base environment of a preview, if the principal may see it.
+async fn base_environment(control: &Control, signed: &Signed, environment: &Environment) -> Option<Environment> {
+    control.get_environment(&signed.principal, environment.base_environment_id?).await.ok()
+}
+
+fn naming(environment: &Environment) -> Naming {
+    Naming { revision: Some(environment.revision), name: environment.name.clone(), slug: environment.slug.to_string() }
+}
+
+/// What a previews form posts.
+#[derive(Deserialize)]
+pub struct PreviewsForm {
+    revision: i64,
+    previews: Option<String>,
+}
+
+pub async fn update_previews(
+    State(control): State<Control>,
+    signed: Signed,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<PreviewsForm>,
+) -> Result<Response, WebError> {
+    let (environment, project, project_admin) = environment_as_admin(&control, &signed, parse_id(&id)?).await?;
+    let changes = EnvironmentChanges { previews: Some(form.previews.is_some()), ..Default::default() };
+    match control.update_environment(&signed.principal, environment.id, form.revision, changes).await {
+        Ok(environment) => Ok(redirect(&headers, &format!("/environments/{}/settings?saved=previews", environment.id))),
+        Err(error) => problem(error, |message| {
+            let notices = Notices { general: Notice::None, previews: Notice::Problem(message) };
+            environment_settings_page(&signed, &project, &environment, None, project_admin, &naming(&environment), notices)
+        }),
+    }
 }
 
 pub async fn update_environment(
@@ -223,11 +266,12 @@ pub async fn update_environment(
     Form(form): Form<Naming>,
 ) -> Result<Response, WebError> {
     let (environment, project, project_admin) = environment_as_admin(&control, &signed, parse_id(&id)?).await?;
-    let changes = EnvironmentChanges { name: Some(form.name.clone()), slug: form.slug() };
+    let changes = EnvironmentChanges { name: Some(form.name.clone()), slug: form.slug(), previews: None };
     match control.update_environment(&signed.principal, environment.id, form.revision.unwrap_or(-1), changes).await {
         Ok(environment) => Ok(redirect(&headers, &format!("/environments/{}", environment.id))),
         Err(error) => problem(error, |message| {
-            environment_settings_page(&signed, &project, &environment, project_admin, &form, Notice::Problem(message))
+            let notices = Notices { general: Notice::Problem(message), previews: Notice::None };
+            environment_settings_page(&signed, &project, &environment, None, project_admin, &form, notices)
         }),
     }
 }
@@ -242,13 +286,10 @@ pub async fn delete_environment(
     match control.delete_environment(&signed.principal, environment.id).await {
         Ok(()) => Ok(redirect(&headers, &format!("/projects/{}", project.id))),
         Err(ControlError::HasChildren { .. }) => {
-            let form = Naming {
-                revision: Some(environment.revision),
-                name: environment.name.clone(),
-                slug: environment.slug.to_string(),
-            };
-            let notice = Notice::Problem("Delete the environment's services first.");
-            let page = environment_settings_page(&signed, &project, &environment, project_admin, &form, notice);
+            let notices =
+                Notices { general: Notice::Problem("Delete the environment's services first."), previews: Notice::None };
+            let page =
+                environment_settings_page(&signed, &project, &environment, None, project_admin, &naming(&environment), notices);
             Ok((StatusCode::UNPROCESSABLE_ENTITY, page).into_response())
         }
         Err(error) => Err(error.into()),
@@ -271,25 +312,59 @@ async fn environment_as_admin(
     Ok((environment, project, project_admin))
 }
 
+/// What to say above each form of the environment's settings.
+struct Notices<'a> {
+    general: Notice<'a>,
+    previews: Notice<'a>,
+}
+
 fn environment_settings_page(
     signed: &Signed,
     project: &Project,
     environment: &Environment,
+    base: Option<&Environment>,
     project_admin: bool,
     form: &Naming,
-    notice: Notice<'_>,
+    notices: Notices<'_>,
 ) -> Markup {
     let action = format!("/environments/{}/settings", environment.id);
+    let pr_number = environment.kind.pr_number();
+    let previews = html! {
+        (forms::checkbox("environment-previews", "previews", "Deploy a preview of each pull request", environment.previews, false,
+            Some("A pull request to the branch a Git service here deploys gets its own environment, pr-<number>, copied from this one with its own empty volumes, and new commits redeploy it. Closing the pull request deletes the preview and its data. The services' webhooks must send pull request events too; pull requests from forks get no preview.")))
+        input type="hidden" name="revision" value=(environment.revision);
+    };
     let content = html! {
         (layout::heading(&environment.name, Some(html! { span class="font-mono" { (environment.slug) } })))
         (environment_tabs(environment, Role::Admin, Tab::Settings))
         div class="max-w-xl space-y-6" {
-            (forms::card(signed, "General", None, &action, notice, form.fields("environment"), "Save"))
+            @if let Some(number) = pr_number {
+                (layout::notice(&preview_note(number, base)))
+            }
+            (forms::card(signed, "General", None, &action, notices.general, form.fields("environment"), "Save"))
+            @if project_admin && pr_number.is_none() {
+                (forms::card(signed, "Previews", None, &format!("{action}/previews"), notices.previews, previews, "Save"))
+            }
             @if project_admin {
-                (forms::danger(signed, "Delete environment", "Only an environment without services can be deleted.",
-                    &format!("/environments/{}/delete", environment.id), "Delete environment", "Delete this environment?"))
+                @if pr_number.is_some() {
+                    (forms::danger(signed, "Delete preview", "Deletes the preview with its services and their data. The next commit to the pull request makes it again.",
+                        &format!("/environments/{}/delete", environment.id), "Delete preview", "Delete this preview and its data?"))
+                } @else {
+                    (forms::danger(signed, "Delete environment", "Only an environment without services can be deleted.",
+                        &format!("/environments/{}/delete", environment.id), "Delete environment", "Delete this environment?"))
+                }
             }
         }
     };
     layout::page(signed, &format!("Settings · {}", environment.name), &crumbs(project, None), content)
+}
+
+/// What a preview is, for its pages.
+pub(super) fn preview_note(number: u32, base: Option<&Environment>) -> String {
+    match base {
+        Some(base) => {
+            format!("The preview of pull request #{number}, copied from {}. Closing the pull request deletes it.", base.name)
+        }
+        None => format!("The preview of pull request #{number}. Closing the pull request deletes it."),
+    }
 }

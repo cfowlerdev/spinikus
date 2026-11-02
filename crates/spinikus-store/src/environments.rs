@@ -8,6 +8,12 @@ use crate::{ProjectRepository, SqliteStore, StoreError, error::parse_column};
 
 const ENTITY: &str = "environment";
 
+macro_rules! columns {
+    () => {
+        "id, project_id, name, slug, kind, pr_number, previews, base_environment_id, revision, created_at, updated_at"
+    };
+}
+
 #[async_trait]
 pub trait EnvironmentRepository: Send + Sync {
     /// Fails with `NotFound` if the project does not exist or is deleted.
@@ -18,8 +24,21 @@ pub trait EnvironmentRepository: Send + Sync {
         fields: EnvironmentFields,
     ) -> Result<Environment, StoreError>;
 
+    /// A preview of pull request `pr_number`, copying `base`, in `base`'s project. Fails
+    /// with `NotFound` if `base` does not exist or is deleted, and `Conflict` on `pr_number`
+    /// if the project has a preview of that pull request.
+    async fn create_preview_environment(
+        &self,
+        base: EnvironmentId,
+        pr_number: u32,
+        fields: EnvironmentFields,
+    ) -> Result<Environment, StoreError>;
+
     /// Fails with `NotFound` for deleted environments too.
     async fn get_environment(&self, id: EnvironmentId) -> Result<Environment, StoreError>;
+
+    /// The project's preview of pull request `pr_number`, unless it is deleted.
+    async fn find_preview_environment(&self, project_id: ProjectId, pr_number: u32) -> Result<Option<Environment>, StoreError>;
 
     /// The project's environments in creation order, starting after the `after` cursor.
     async fn list_environments(
@@ -49,6 +68,8 @@ struct EnvironmentRow {
     slug: String,
     kind: String,
     pr_number: Option<u32>,
+    previews: bool,
+    base_environment_id: Option<String>,
     revision: i64,
     created_at: String,
     updated_at: String,
@@ -68,6 +89,11 @@ impl TryFrom<EnvironmentRow> for Environment {
                 column: "kind",
                 problem: error.to_string(),
             })?,
+            previews: row.previews,
+            base_environment_id: row
+                .base_environment_id
+                .map(|id| parse_column(ENTITY, "base_environment_id", &id))
+                .transpose()?,
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
             updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
@@ -101,16 +127,18 @@ impl EnvironmentRepository for SqliteStore {
         kind: EnvironmentKind,
         fields: EnvironmentFields,
     ) -> Result<Environment, StoreError> {
-        let row: Option<EnvironmentRow> = sqlx::query_as(
-            "INSERT INTO environments (id, project_id, name, slug, kind, pr_number)
-             SELECT ?, id, ?, ?, ?, ? FROM projects WHERE id = ? AND deleted_at IS NULL
-             RETURNING id, project_id, name, slug, kind, pr_number, revision, created_at, updated_at",
-        )
+        let row: Option<EnvironmentRow> = sqlx::query_as(concat!(
+            "INSERT INTO environments (id, project_id, name, slug, kind, pr_number, previews)
+             SELECT ?, id, ?, ?, ?, ?, ? FROM projects WHERE id = ? AND deleted_at IS NULL
+             RETURNING ",
+            columns!()
+        ))
         .bind(EnvironmentId::new().to_string())
         .bind(&fields.name)
         .bind(fields.slug.as_str())
         .bind(kind.as_str())
         .bind(kind.pr_number())
+        .bind(fields.previews)
         .bind(project_id.to_string())
         .fetch_optional(self.pool())
         .await
@@ -122,14 +150,50 @@ impl EnvironmentRepository for SqliteStore {
         }
     }
 
-    async fn get_environment(&self, id: EnvironmentId) -> Result<Environment, StoreError> {
-        let row: Option<EnvironmentRow> = sqlx::query_as(
-            "SELECT id, project_id, name, slug, kind, pr_number, revision, created_at, updated_at
-             FROM environments WHERE id = ? AND deleted_at IS NULL",
-        )
-        .bind(id.to_string())
+    async fn create_preview_environment(
+        &self,
+        base: EnvironmentId,
+        pr_number: u32,
+        fields: EnvironmentFields,
+    ) -> Result<Environment, StoreError> {
+        let kind = EnvironmentKind::Preview { pr_number };
+        let row: Option<EnvironmentRow> = sqlx::query_as(concat!(
+            "INSERT INTO environments (id, project_id, name, slug, kind, pr_number, base_environment_id)
+             SELECT ?, project_id, ?, ?, 'preview', ?, id FROM environments WHERE id = ? AND deleted_at IS NULL
+             RETURNING ",
+            columns!()
+        ))
+        .bind(EnvironmentId::new().to_string())
+        .bind(&fields.name)
+        .bind(fields.slug.as_str())
+        .bind(pr_number)
+        .bind(base.to_string())
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| StoreError::on_unique_violation(error, conflict(Some(kind), &fields)))?;
+
+        row.ok_or_else(|| not_found(base))?.try_into()
+    }
+
+    async fn find_preview_environment(&self, project_id: ProjectId, pr_number: u32) -> Result<Option<Environment>, StoreError> {
+        let row: Option<EnvironmentRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM environments WHERE project_id = ? AND kind = 'preview' AND pr_number = ? AND deleted_at IS NULL"
+        ))
+        .bind(project_id.to_string())
+        .bind(pr_number)
         .fetch_optional(self.pool())
         .await?;
+        row.map(Environment::try_from).transpose()
+    }
+
+    async fn get_environment(&self, id: EnvironmentId) -> Result<Environment, StoreError> {
+        let row: Option<EnvironmentRow> =
+            sqlx::query_as(concat!("SELECT ", columns!(), " FROM environments WHERE id = ? AND deleted_at IS NULL"))
+                .bind(id.to_string())
+                .fetch_optional(self.pool())
+                .await?;
 
         row.ok_or_else(|| not_found(id))?.try_into()
     }
@@ -140,10 +204,11 @@ impl EnvironmentRepository for SqliteStore {
         after: Option<EnvironmentId>,
         limit: u32,
     ) -> Result<Vec<Environment>, StoreError> {
-        let rows: Vec<EnvironmentRow> = sqlx::query_as(
-            "SELECT id, project_id, name, slug, kind, pr_number, revision, created_at, updated_at
-             FROM environments WHERE project_id = ? AND deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?",
-        )
+        let rows: Vec<EnvironmentRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM environments WHERE project_id = ? AND deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?"
+        ))
         .bind(project_id.to_string())
         .bind(after.map(|id| id.to_string()).unwrap_or_default())
         .bind(limit)
@@ -163,14 +228,17 @@ impl EnvironmentRepository for SqliteStore {
         revision: i64,
         fields: EnvironmentFields,
     ) -> Result<Environment, StoreError> {
-        let row: Option<EnvironmentRow> = sqlx::query_as(
+        let row: Option<EnvironmentRow> = sqlx::query_as(concat!(
             "UPDATE environments
-             SET name = ?, slug = ?, revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             SET name = ?, slug = ?, previews = ?, revision = revision + 1,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ? AND revision = ? AND deleted_at IS NULL
-             RETURNING id, project_id, name, slug, kind, pr_number, revision, created_at, updated_at",
-        )
+             RETURNING ",
+            columns!()
+        ))
         .bind(&fields.name)
         .bind(fields.slug.as_str())
+        .bind(fields.previews)
         .bind(id.to_string())
         .bind(revision)
         .fetch_optional(self.pool())
@@ -221,7 +289,7 @@ mod tests {
     use crate::test_support::store;
 
     fn fields(name: &str, slug: &str) -> EnvironmentFields {
-        EnvironmentFields { name: name.to_string(), slug: slug.parse().unwrap() }
+        EnvironmentFields { name: name.to_string(), slug: slug.parse().unwrap(), previews: false }
     }
 
     async fn project(store: &SqliteStore, slug: &str) -> ProjectId {
@@ -287,6 +355,38 @@ mod tests {
         assert!(matches!(production, Err(StoreError::Conflict { field: "kind", .. })), "{production:?}");
         assert!(matches!(same_pr, Err(StoreError::Conflict { field: "pr_number", .. })), "{same_pr:?}");
         assert!(other_pr.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_preview_copies_its_base_in_the_same_project() {
+        let (_dir, store) = store().await;
+        let web = project(&store, "web").await;
+        let staging = store
+            .create_environment(
+                web,
+                EnvironmentKind::Staging,
+                EnvironmentFields { previews: true, ..fields("Staging", "staging") },
+            )
+            .await
+            .unwrap();
+
+        let preview = store.create_preview_environment(staging.id, 7, fields("PR #7", "pr-7")).await.unwrap();
+        let again = store.create_preview_environment(staging.id, 7, fields("PR #7", "pr-7-again")).await;
+        let found = store.find_preview_environment(web, 7).await.unwrap();
+        let previews_of_a_preview =
+            store.update_environment(preview.id, 1, EnvironmentFields { previews: true, ..fields("PR #7", "pr-7") }).await;
+        let missing = store.create_preview_environment(EnvironmentId::new(), 8, fields("PR #8", "pr-8")).await;
+
+        assert!(staging.previews);
+        assert_eq!(
+            (preview.project_id, preview.kind, preview.base_environment_id, preview.previews),
+            (web, EnvironmentKind::Preview { pr_number: 7 }, Some(staging.id), false)
+        );
+        assert!(matches!(again, Err(StoreError::Conflict { field: "pr_number", .. })), "{again:?}");
+        assert_eq!(found, Some(preview));
+        assert_eq!(store.find_preview_environment(web, 8).await.unwrap(), None);
+        assert!(previews_of_a_preview.is_err(), "{previews_of_a_preview:?}");
+        assert!(matches!(missing, Err(StoreError::NotFound { entity: "environment", .. })), "{missing:?}");
     }
 
     #[tokio::test]

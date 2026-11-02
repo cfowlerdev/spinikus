@@ -38,6 +38,7 @@ pub struct MemoryRuntime {
     /// Builds so far, and the Dockerfile each one read.
     builds: Mutex<Vec<(BuildSpec, String)>>,
     removed_images: Mutex<Vec<String>>,
+    removed_volumes: Mutex<Vec<String>>,
     /// Every line containers wrote, and a channel for followers.
     logs: Mutex<Vec<(String, LogLine)>>,
     written: broadcast::Sender<(String, LogLine)>,
@@ -79,6 +80,7 @@ impl MemoryRuntime {
             endpoint: Mutex::default(),
             builds: Mutex::default(),
             removed_images: Mutex::default(),
+            removed_volumes: Mutex::default(),
             logs: Mutex::default(),
             written: broadcast::channel(256).0,
             build_failure: Mutex::default(),
@@ -123,6 +125,11 @@ impl MemoryRuntime {
     /// The image references removed so far, in order.
     pub fn removed_images(&self) -> Vec<String> {
         lock(&self.removed_images).clone()
+    }
+
+    /// The volumes removed so far, in order. Every volume exists until removed once.
+    pub fn removed_volumes(&self) -> Vec<String> {
+        lock(&self.removed_volumes).clone()
     }
 
     /// Whether `image` (a reference or what it resolves to) is still there.
@@ -361,6 +368,19 @@ impl ContainerRuntime for MemoryRuntime {
 
     /// Removes the references named `image` and those resolving to it, unless a container
     /// was created from it.
+    async fn remove_volume(&self, name: &str) -> Result<(), RuntimeError> {
+        self.check()?;
+        if lock(&self.specs).values().any(|spec| spec.volumes.iter().any(|mount| mount.volume == name)) {
+            return Err(RuntimeError::InUse);
+        }
+        let mut removed = lock(&self.removed_volumes);
+        if removed.iter().any(|volume| volume == name) {
+            return Err(RuntimeError::NotFound);
+        }
+        removed.push(name.to_string());
+        Ok(())
+    }
+
     async fn remove_image(&self, image: &str) -> Result<(), RuntimeError> {
         self.check()?;
         let mut images = lock(&self.images);

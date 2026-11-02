@@ -163,6 +163,12 @@ async fn pulls_creates_and_publishes_an_app_on_loopback() {
     let inspected = runtime.client().unwrap().inspect_container(&id, None).await.unwrap();
     let mounts = inspected.mounts.unwrap_or_default();
     assert!(mounts.iter().any(|mount| mount.name.as_deref() == Some(&volume) && mount.destination.as_deref() == Some("/data")));
+
+    // A mounted volume stays; once its container is gone, it can go.
+    assert_eq!(runtime.remove_volume(&volume).await, Err(RuntimeError::InUse));
+    runtime.remove(&id).await.unwrap();
+    runtime.remove_volume(&volume).await.unwrap();
+    assert_eq!(runtime.remove_volume(&volume).await, Err(RuntimeError::NotFound));
 }
 
 /// Removes an image even when an assertion fails.

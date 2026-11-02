@@ -267,7 +267,7 @@ mod tests {
     async fn environment(store: &SqliteStore, slug: &str) -> EnvironmentId {
         let project = ProjectFields { name: slug.to_string(), slug: slug.parse().unwrap() };
         let project_id = store.create_project(project).await.unwrap().id;
-        let env = EnvironmentFields { name: "Staging".to_string(), slug: "staging".parse().unwrap() };
+        let env = EnvironmentFields { name: "Staging".to_string(), slug: "staging".parse().unwrap(), previews: false };
         store.create_environment(project_id, EnvironmentKind::Staging, env).await.unwrap().id
     }
 

@@ -2,6 +2,9 @@
 //! service's branch arrives. The repository's host sends it to
 //! `/hooks/git/<provider>/<webhook ID>`, signed with the webhook's secret.
 //!
+//! Pull request events (GitLab: merge requests) keep the previews of pull requests to that
+//! branch (`PullRequest`).
+//!
 //! GitHub, GitLab and Gitea (Forgejo too, which sends Gitea's headers and payload) are
 //! understood. Their push payloads share a shape: `ref`, `before`, `after`, and `commits`
 //! listing the files each commit added, modified and removed. That list is how a monorepo
@@ -60,6 +63,15 @@ impl GitProvider {
         match self {
             Self::GitHub | Self::Gitea => event == "push",
             Self::GitLab => event == "Push Hook",
+        }
+    }
+
+    /// What the event header says for a pull (or merge) request being opened, updated or
+    /// closed. Gitea and Forgejo send `pull_request` for new commits too.
+    pub fn is_pull_request(self, event: &str) -> bool {
+        match self {
+            Self::GitHub | Self::Gitea => event == "pull_request",
+            Self::GitLab => event == "Merge Request Hook",
         }
     }
 
@@ -212,6 +224,136 @@ impl Push {
     }
 }
 
+/// What happened to a pull request, as far as its preview goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestAction {
+    /// Opened, reopened, or given new commits: its preview is (re)deployed.
+    Updated,
+    /// Closed or merged: its preview goes.
+    Closed,
+    /// Anything else, such as a new title or a label.
+    Other,
+}
+
+/// A pull request (GitLab: merge request) event, as far as previews need to know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequest {
+    /// The number shown in the repository (GitLab's `iid`).
+    pub number: u32,
+    pub action: PullRequestAction,
+    /// The branch the changes are on.
+    pub head_branch: String,
+    /// The newest commit on it.
+    pub head_commit: String,
+    /// The branch the request would merge into.
+    pub base_branch: String,
+    /// Whether the head branch is in another repository, such as a fork.
+    pub from_fork: bool,
+}
+
+#[derive(Deserialize)]
+struct GitHubPullRequestPayload {
+    action: String,
+    number: u32,
+    pull_request: GitHubPullRequest,
+}
+
+#[derive(Deserialize)]
+struct GitHubPullRequest {
+    head: GitHubBranch,
+    base: GitHubBranch,
+}
+
+/// GitHub and Gitea name a pull request's branches alike; GitHub gives the repository as an
+/// object (`null` when a fork was deleted), Gitea also as `repo_id`.
+#[derive(Deserialize)]
+struct GitHubBranch {
+    #[serde(rename = "ref")]
+    branch: String,
+    sha: String,
+    repo: Option<RepositoryId>,
+    repo_id: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct RepositoryId {
+    id: u64,
+}
+
+impl GitHubBranch {
+    fn repository(&self) -> Option<u64> {
+        self.repo_id.filter(|id| *id != 0).or(self.repo.as_ref().map(|repo| repo.id))
+    }
+}
+
+#[derive(Deserialize)]
+struct GitLabMergeRequestPayload {
+    object_attributes: GitLabMergeRequest,
+}
+
+#[derive(Deserialize)]
+struct GitLabMergeRequest {
+    iid: u32,
+    #[serde(default)]
+    action: String,
+    source_branch: String,
+    target_branch: String,
+    source_project_id: u64,
+    target_project_id: u64,
+    last_commit: GitLabCommit,
+}
+
+#[derive(Deserialize)]
+struct GitLabCommit {
+    id: String,
+}
+
+impl PullRequest {
+    pub fn parse(provider: GitProvider, body: &[u8]) -> Result<Self, PushError> {
+        let invalid = |error: serde_json::Error| PushError(error.to_string());
+        let request = match provider {
+            GitProvider::GitHub | GitProvider::Gitea => {
+                let payload: GitHubPullRequestPayload = serde_json::from_slice(body).map_err(invalid)?;
+                let action = match payload.action.as_str() {
+                    "opened" | "reopened" | "synchronize" | "synchronized" => PullRequestAction::Updated,
+                    "closed" => PullRequestAction::Closed,
+                    _ => PullRequestAction::Other,
+                };
+                let (head, base) = (payload.pull_request.head, payload.pull_request.base);
+                let from_fork = head.repository().is_none() || head.repository() != base.repository();
+                Self {
+                    number: payload.number,
+                    action,
+                    head_branch: head.branch,
+                    head_commit: head.sha,
+                    base_branch: base.branch,
+                    from_fork,
+                }
+            }
+            GitProvider::GitLab => {
+                let request = serde_json::from_slice::<GitLabMergeRequestPayload>(body).map_err(invalid)?.object_attributes;
+                let action = match request.action.as_str() {
+                    "open" | "reopen" | "update" => PullRequestAction::Updated,
+                    "close" | "merge" => PullRequestAction::Closed,
+                    _ => PullRequestAction::Other,
+                };
+                Self {
+                    number: request.iid,
+                    action,
+                    head_branch: request.source_branch,
+                    head_commit: request.last_commit.id,
+                    base_branch: request.target_branch,
+                    from_fork: request.source_project_id != request.target_project_id,
+                }
+            }
+        };
+        if !is_commit(&request.head_commit) {
+            return Err(PushError(format!("the head is not a commit: `{}`", request.head_commit)));
+        }
+        Ok(Self { head_commit: request.head_commit.to_ascii_lowercase(), ..request })
+    }
+}
+
 /// A full SHA-1 or SHA-256 commit ID.
 fn is_commit(sha: &str) -> bool {
     matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -292,6 +434,58 @@ mod tests {
         assert!(!web.touches(Some("apps/api")) && !web.touches(Some("apps/we")));
         assert!(push(&["apps/web"]).touches(Some("apps/web")));
         assert!(Push { changed_paths: None, ..web }.touches(Some("apps/api")));
+    }
+
+    #[test]
+    fn reads_pull_requests_from_each_provider() {
+        let branch = |name: &str, sha: &str, repo: u64| json!({ "ref": name, "sha": sha, "repo": { "id": repo } });
+        let github = |action: &str, head_repo: u64| {
+            json!({
+                "action": action, "number": 7,
+                "pull_request": { "head": branch("feature", AFTER, head_repo), "base": branch("main", BEFORE, 1) },
+            })
+        };
+        let read = |provider, payload: serde_json::Value| PullRequest::parse(provider, payload.to_string().as_bytes()).unwrap();
+        let gitea = json!({
+            "action": "synchronized", "number": 3,
+            "pull_request": {
+                "head": { "ref": "fix", "sha": AFTER, "repo_id": 5 }, "base": { "ref": "dev", "sha": BEFORE, "repo_id": 5 },
+            },
+        });
+        let gitlab = |action: &str, source: u64| {
+            json!({
+                "object_kind": "merge_request",
+                "object_attributes": {
+                    "iid": 12, "action": action, "source_branch": "topic", "target_branch": "main",
+                    "source_project_id": source, "target_project_id": 9, "last_commit": { "id": AFTER },
+                },
+            })
+        };
+
+        let opened = read(GitProvider::GitHub, github("opened", 1));
+        assert_eq!(
+            opened,
+            PullRequest {
+                number: 7,
+                action: PullRequestAction::Updated,
+                head_branch: "feature".to_string(),
+                head_commit: AFTER.to_string(),
+                base_branch: "main".to_string(),
+                from_fork: false,
+            }
+        );
+        assert_eq!(read(GitProvider::GitHub, github("closed", 1)).action, PullRequestAction::Closed);
+        assert_eq!(read(GitProvider::GitHub, github("labeled", 1)).action, PullRequestAction::Other);
+        assert!(read(GitProvider::GitHub, github("synchronize", 2)).from_fork);
+        let gitea = read(GitProvider::Gitea, gitea);
+        assert_eq!((gitea.number, gitea.action, gitea.from_fork), (3, PullRequestAction::Updated, false));
+        assert_eq!((gitea.head_branch.as_str(), gitea.base_branch.as_str()), ("fix", "dev"));
+        let merged = read(GitProvider::GitLab, gitlab("merge", 9));
+        assert_eq!((merged.number, merged.action, merged.from_fork), (12, PullRequestAction::Closed, false));
+        assert_eq!(read(GitProvider::GitLab, gitlab("update", 9)).action, PullRequestAction::Updated);
+        assert!(read(GitProvider::GitLab, gitlab("open", 4)).from_fork);
+        assert!(PullRequest::parse(GitProvider::GitHub, b"{}").is_err());
+        assert!(GitProvider::GitLab.is_pull_request("Merge Request Hook") && GitProvider::Gitea.is_pull_request("pull_request"));
     }
 
     #[test]

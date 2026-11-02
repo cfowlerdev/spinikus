@@ -451,6 +451,15 @@ impl ContainerRuntime for DockerRuntime {
         }
     }
 
+    async fn remove_volume(&self, name: &str) -> Result<(), RuntimeError> {
+        // Never forced: a volume a container mounts stays.
+        match self.client()?.remove_volume(name, None::<bollard::query_parameters::RemoveVolumeOptions>).await {
+            Ok(()) => Ok(()),
+            Err(Error::DockerResponseServerError { status_code: 409, .. }) => Err(RuntimeError::InUse),
+            Err(error) => Err(runtime_error(error)),
+        }
+    }
+
     async fn start(&self, container_id: &str) -> Result<(), RuntimeError> {
         self.client()?.start_container(container_id, None).await.map_err(runtime_error)
     }

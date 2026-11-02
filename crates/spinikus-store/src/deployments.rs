@@ -564,7 +564,7 @@ mod tests {
         let server = store.create_server(ServerFields { name: "web-1".to_string() }).await.unwrap().id;
         let project = ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() };
         let project_id = store.create_project(project).await.unwrap().id;
-        let env = EnvironmentFields { name: "Staging".to_string(), slug: "staging".parse().unwrap() };
+        let env = EnvironmentFields { name: "Staging".to_string(), slug: "staging".parse().unwrap(), previews: false };
         let env_id = store.create_environment(project_id, EnvironmentKind::Staging, env).await.unwrap().id;
         let service =
             ServiceFields { name: "Web".to_string(), slug: "web".parse().unwrap(), config: Map::new(), server_id: None };

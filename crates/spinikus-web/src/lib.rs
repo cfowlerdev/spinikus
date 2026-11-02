@@ -50,6 +50,7 @@ pub fn router(control: Control) -> Router {
         .route("/projects/{id}/environments/new", get(pages::manage::new_environment))
         .route("/environments/{id}", get(pages::projects::environment))
         .route("/environments/{id}/settings", get(pages::manage::environment_settings).post(pages::manage::update_environment))
+        .route("/environments/{id}/settings/previews", post(pages::manage::update_previews))
         .route("/environments/{id}/delete", post(pages::manage::delete_environment))
         .route(
             "/environments/{id}/variables",

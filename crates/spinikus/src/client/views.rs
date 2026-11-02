@@ -25,6 +25,23 @@ pub struct Environment {
     pub name: String,
     pub slug: String,
     pub kind: String,
+    #[serde(default)]
+    pub pr_number: Option<u32>,
+    #[serde(default)]
+    pub previews: bool,
+    #[serde(default)]
+    pub revision: i64,
+}
+
+impl Environment {
+    /// The kind as tables show it: `preview #7`, or `staging (previews)` when it has them.
+    pub fn described_kind(&self) -> String {
+        match (self.pr_number, self.previews) {
+            (Some(number), _) => format!("{} #{number}", self.kind),
+            (None, true) => format!("{} (previews)", self.kind),
+            (None, false) => self.kind.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

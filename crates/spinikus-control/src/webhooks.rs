@@ -1,4 +1,5 @@
-//! Services' Git webhooks, which deploy each push to the service's branch. Developers turn
+//! Services' Git webhooks, which deploy each push to the service's branch, and keep the
+//! previews of pull requests to it (`previews.rs`). Developers turn
 //! one on (and get its secret, shown once) and off; viewers see it and what its last delivery
 //! did. Deliveries come in without a principal: the signature is the only proof, and a
 //! deployment they start has the webhook as its actor.
@@ -12,8 +13,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use spinikus_core::{
     actor::Actor,
-    audit::NewAuditEntry,
     deployment::{Deployment, DeploymentStatus, DeploymentTrigger},
+    environment::Environment,
     id::{ServiceId, WebhookId},
     membership::Role,
     secret::Secret,
@@ -48,6 +49,13 @@ pub enum PushOutcome {
     /// GitHub checking that the webhook works.
     Pong,
     Deployed(Box<Deployment>),
+    /// A pull request's preview, made or updated, and what it deploys.
+    Previewed {
+        environment: Box<Environment>,
+        deployments: Vec<Deployment>,
+    },
+    /// A closed pull request's preview, deleted.
+    PreviewRemoved(Box<Environment>),
     /// Nothing to deploy, and why.
     Ignored(String),
 }
@@ -109,6 +117,11 @@ impl Control {
         let result = match &outcome {
             Ok(PushOutcome::Pong) => "ping".to_string(),
             Ok(PushOutcome::Deployed(deployment)) => format!("deployed {}", deployment.id),
+            Ok(PushOutcome::Previewed { environment, deployments }) => {
+                let ids: Vec<String> = deployments.iter().map(|deployment| deployment.id.to_string()).collect();
+                format!("preview {}: deployed {}", environment.slug, ids.join(", "))
+            }
+            Ok(PushOutcome::PreviewRemoved(environment)) => format!("removed preview {}", environment.slug),
             Ok(PushOutcome::Ignored(why)) => format!("ignored: {why}"),
             Err(ControlError::Internal(_)) => "failed: internal error".to_string(),
             Err(error) => format!("failed: {error}"),
@@ -130,8 +143,11 @@ impl Control {
         if provider.is_ping(event) {
             return Ok(PushOutcome::Pong);
         }
+        if provider.is_pull_request(event) {
+            return self.handle_pull_request(provider, webhook, delivery.body).await;
+        }
         if !provider.is_push(event) {
-            return Ok(PushOutcome::Ignored(format!("`{event}` events do not deploy; send push events only")));
+            return Ok(PushOutcome::Ignored(format!("`{event}` events do not deploy; send push and pull request events")));
         }
         let push =
             Push::parse(delivery.body).map_err(|error| ControlError::Invalid { field: "body", problem: error.to_string() })?;
@@ -157,33 +173,28 @@ impl Control {
             let root = git.root_directory.unwrap_or_default();
             return Ok(PushOutcome::Ignored(format!("nothing under `{root}` changed")));
         }
-        let recent = self.store().list_deployments(service.id, None, RECENT_DEPLOYMENTS).await?;
-        if let Some(same) = recent.iter().find(|deployment| {
-            deployment.commit_sha.as_deref() == Some(commit.as_str())
-                && (deployment.status.is_in_progress() || deployment.status == DeploymentStatus::Live)
-        }) {
+        if let Some(same) = self.deploying_commit(service.id, &commit).await? {
             return Ok(PushOutcome::Ignored(format!("{} is in deployment {} already", short(&commit), same.id)));
         }
 
         let actor = Actor::Webhook(webhook.id);
         let deployment = self.queue_deployment(&service, DeploymentTrigger::GitPush, Some(commit.clone()), actor).await?;
         let environment = self.store().get_environment(service.environment_id).await?;
-        let details = json!({
-            "service_id": service.id.to_string(),
-            "server_id": deployment.server_id.to_string(),
-            "commit_sha": commit,
-        });
-        self.audit(NewAuditEntry {
-            actor,
-            token_id: None,
-            action: "deployment.create".parse().expect("valid audit action"),
-            target_id: Some(deployment.id.to_string()),
-            project_id: Some(environment.project_id),
-            details: details.as_object().cloned().unwrap_or_default(),
-        })
-        .await?;
+        self.audit_deployment(actor, &deployment, environment.project_id).await?;
         tracing::info!(webhook = %webhook.id, deployment = %deployment.id, commit, "deploying a push");
         Ok(PushOutcome::Deployed(Box::new(deployment)))
+    }
+}
+
+impl Control {
+    /// A recent deployment of `commit` to the service that is in progress or live, if there
+    /// is one: providers deliver again on timeouts, and several webhooks see a pull request.
+    pub(crate) async fn deploying_commit(&self, service: ServiceId, commit: &str) -> Result<Option<Deployment>, ControlError> {
+        let recent = self.store().list_deployments(service, None, RECENT_DEPLOYMENTS).await?;
+        Ok(recent.into_iter().find(|deployment| {
+            deployment.commit_sha.as_deref() == Some(commit)
+                && (deployment.status.is_in_progress() || deployment.status == DeploymentStatus::Live)
+        }))
     }
 }
 

@@ -163,7 +163,7 @@ mod tests {
         for name in ["one", "two", "three", "four"] {
             projects.push(control.create_project(&admin, new(name)).await.unwrap());
         }
-        let staging = NewEnvironment { name: "Staging".to_string(), slug: None, kind: EnvironmentKind::Staging };
+        let staging = NewEnvironment { name: "Staging".to_string(), slug: None, kind: EnvironmentKind::Staging, previews: false };
         let environment = control.create_environment(&admin, projects[2].id, staging).await.unwrap();
         grant(&control, &member, MembershipScope::Project(projects[0].id), Role::Viewer).await;
         grant(&control, &member, MembershipScope::Project(projects[1].id), Role::Viewer).await;
@@ -209,7 +209,8 @@ mod tests {
         assert_eq!(audit[0].action.as_str(), "project.update");
         assert_eq!(audit[0].details["changed"], serde_json::json!(["name"]));
 
-        let environment = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
+        let environment =
+            NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production, previews: false };
         let environment = control.create_environment(&owner, project.id, environment).await.unwrap();
         let with_children = control.delete_project(&owner, project.id).await;
         control.delete_environment(&owner, environment.id).await.unwrap();

@@ -193,6 +193,10 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// a container uses the image or an ID still has other references.
     async fn remove_image(&self, image: &str) -> Result<(), RuntimeError>;
 
+    /// Removes a named volume and its data. `NotFound` if there is none, `InUse` if a
+    /// container, running or not, mounts it.
+    async fn remove_volume(&self, name: &str) -> Result<(), RuntimeError>;
+
     /// Creates a container, without starting it, and returns its ID. Its network is created
     /// first if it does not exist.
     async fn create(&self, spec: &ContainerSpec) -> Result<String, RuntimeError>;

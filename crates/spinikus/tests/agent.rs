@@ -747,6 +747,87 @@ async fn a_push_deploys_its_own_commit_even_if_the_branch_moved_on() {
 }
 
 #[tokio::test]
+async fn a_pull_request_preview_goes_live_and_closing_it_removes_its_containers_and_volumes() {
+    use spinikus_control::{EnvironmentChanges, NewVolume};
+
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("Dockerfile"), "FROM scratch\nLABEL version=main\n").unwrap();
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["add", "--all"]);
+    git(&repo, &["commit", "--quiet", "--message", "first"]);
+    git(&repo, &["checkout", "--quiet", "-b", "feature"]);
+    std::fs::write(repo.join("Dockerfile"), "FROM scratch\nLABEL version=feature\n").unwrap();
+    git(&repo, &["commit", "--quiet", "--all", "--message", "feature"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let runtime = Arc::new(MemoryRuntime::new());
+    let (_stop, _agent) = start_agent_with(&files, runtime.clone(), None);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let service = control_plane.service(server, "unused:1", json!({ "healthcheck": { "start_period": "0s" } })).await;
+    let (control, admin) = (&control_plane.control, &control_plane.admin);
+    let https = SourceSpec::Git(GitSource {
+        repo_url: "https://example.com/acme/web.git".to_string(),
+        branch: "main".to_string(),
+        root_directory: None,
+    });
+    let source = control.replace_source(admin, service, 1, https).await.unwrap();
+    let hook = control.create_webhook(admin, service).await.unwrap();
+    let local = SourceSpec::Git(GitSource {
+        repo_url: repo.to_string_lossy().into_owned(),
+        branch: "main".to_string(),
+        root_directory: None,
+    });
+    control.store().update_source(service, source.revision, local).await.unwrap();
+    control.create_volume(admin, service, NewVolume { name: "data".to_string(), mount_path: "/data".to_string() }).await.unwrap();
+    let environment = control.get_service(admin, service).await.unwrap().environment_id;
+    let on = EnvironmentChanges { previews: Some(true), ..Default::default() };
+    control.update_environment(admin, environment, 1, on).await.unwrap();
+    let deliver = |action: &str| {
+        let body = json!({
+            "action": action, "number": 4,
+            "pull_request": {
+                "head": { "ref": "feature", "sha": head, "repo_id": 1 },
+                "base": { "ref": "main", "sha": head, "repo_id": 1 },
+            },
+        })
+        .to_string();
+        use hmac::{Hmac, KeyInit, Mac};
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(hook.secret.expose().as_bytes()).unwrap();
+        mac.update(body.as_bytes());
+        let signature = mac.finalize().into_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        async move {
+            let delivery = PushDelivery { event: Some("pull_request"), signature: Some(&signature), body: body.as_bytes() };
+            control.receive_push(GitProvider::Gitea, hook.webhook.id, delivery).await.unwrap()
+        }
+    };
+
+    let outcome = deliver("opened").await;
+    let PushOutcome::Previewed { environment: preview, deployments } = outcome else { panic!("{outcome:?}") };
+    control_plane.wait_for_deployment(deployments[0].id, DeploymentStatus::Live, Duration::from_secs(20)).await;
+    let (_, dockerfile) = runtime.builds().pop().unwrap();
+    let copy = deployments[0].service_id;
+    let volume = control.list_volumes(admin, copy).await.unwrap()[0].id.to_string();
+    let closed = deliver("closed").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while runtime.removed_volumes().is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "the preview's volume was never removed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(preview.slug.as_str(), "pr-4");
+    assert_eq!(dockerfile, "FROM scratch\nLABEL version=feature\n");
+    assert!(matches!(closed, PushOutcome::PreviewRemoved(_)), "{closed:?}");
+    let live = control.store().get_deployment(deployments[0].id).await.unwrap();
+    assert!(live.cleaned_at.is_some(), "{live:?}");
+    assert_eq!(runtime.removed_volumes(), [volume]);
+    assert!(runtime.list().await.unwrap().iter().all(|instance| instance.service_id != copy));
+}
+
+#[tokio::test]
 async fn runtime_logs_come_from_the_agent_and_stop_when_nobody_reads() {
     use spinikus_control::service_logs::{ContainerLogUpdate, LogQuery};
     use tokio_stream::StreamExt;

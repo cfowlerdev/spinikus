@@ -25,6 +25,9 @@ pub struct Create {
     kind: String,
     /// Required for `preview` environments only.
     pr_number: Option<u32>,
+    /// Whether pull requests get previews of the environment.
+    #[serde(default)]
+    previews: bool,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +35,8 @@ pub struct Create {
 pub struct Update {
     name: Option<String>,
     slug: Option<String>,
+    /// Turning previews on or off needs the admin role in the project.
+    previews: Option<bool>,
 }
 
 pub async fn list(
@@ -51,7 +56,7 @@ pub async fn create(
     Body(body): Body<Create>,
 ) -> Result<Response, ApiError> {
     let kind = EnvironmentKind::from_parts(&body.kind, body.pr_number).map_err(|error| ApiError::invalid("kind", error))?;
-    let new = NewEnvironment { name: body.name, slug: body.slug, kind };
+    let new = NewEnvironment { name: body.name, slug: body.slug, kind, previews: body.previews };
     let environment = control.create_environment(&principal, project_id, new).await?;
     Ok(created(format!("/api/v1/environments/{}", environment.id), environment.revision, environment))
 }
@@ -72,7 +77,7 @@ pub async fn update(
     IfMatch(revision): IfMatch,
     Body(body): Body<Update>,
 ) -> Result<Response, ApiError> {
-    let changes = EnvironmentChanges { name: body.name, slug: body.slug };
+    let changes = EnvironmentChanges { name: body.name, slug: body.slug, previews: body.previews };
     let environment = control.update_environment(&principal, id, revision, changes).await?;
     Ok(tagged(environment.revision, environment))
 }

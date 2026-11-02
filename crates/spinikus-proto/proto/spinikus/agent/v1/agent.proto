@@ -371,11 +371,13 @@ message StopDeployment {
 }
 
 // Removes what a finished deployment left on the server: its containers, stopped or not,
-// and the given image references, once no container uses them. Images in use and images
-// already gone are skipped, so repeating it succeeds.
+// the given image references, once no container uses them, and the given volumes (by ID,
+// with their data: a preview's, when it goes). Images and volumes in use and those already
+// gone are skipped, so repeating it succeeds.
 message RemoveDeployment {
   string deployment_id = 1;
   repeated string images = 2;
+  repeated string volumes = 3;
 }
 
 // Dump a database by running `command` in its container and upload what it writes to stdout

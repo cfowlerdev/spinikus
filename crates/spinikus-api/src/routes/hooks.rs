@@ -20,8 +20,8 @@ use crate::{error::ApiError, extract::Path};
 /// more commits than Spinikus needs.
 pub const MAX_DELIVERY_SIZE: usize = 5 * 1024 * 1024;
 
-/// Deploys a push, answering `202 Accepted` with the deployment, or `200 OK` with why it did
-/// not deploy.
+/// Deploys a push or a pull request's preview, answering `202 Accepted` with what it
+/// deploys, or `200 OK` with why it deployed nothing or with the preview it removed.
 pub async fn receive(
     State(control): State<Control>,
     Path((provider, id)): Path<(String, WebhookId)>,
@@ -42,6 +42,14 @@ pub async fn receive(
         PushOutcome::Ignored(reason) => Json(json!({ "result": "ignored", "reason": reason })).into_response(),
         PushOutcome::Deployed(deployment) => {
             (StatusCode::ACCEPTED, Json(json!({ "result": "deployed", "deployment_id": deployment.id }))).into_response()
+        }
+        PushOutcome::Previewed { environment, deployments } => {
+            let ids: Vec<_> = deployments.iter().map(|deployment| deployment.id).collect();
+            let body = json!({ "result": "previewed", "environment_id": environment.id, "deployment_ids": ids });
+            (StatusCode::ACCEPTED, Json(body)).into_response()
+        }
+        PushOutcome::PreviewRemoved(environment) => {
+            Json(json!({ "result": "preview_removed", "environment_id": environment.id })).into_response()
         }
     })
 }

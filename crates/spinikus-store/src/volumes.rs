@@ -19,6 +19,10 @@ pub trait VolumeRepository: Send + Sync {
     /// The service's volumes, by name.
     async fn list_volumes(&self, service_id: ServiceId) -> Result<Vec<Volume>, StoreError>;
 
+    /// The volumes of a deleted service of a preview environment, whose data goes with the
+    /// preview. Empty for any other service.
+    async fn list_disposable_volumes(&self, service_id: ServiceId) -> Result<Vec<Volume>, StoreError>;
+
     /// Replaces the volume's fields if it is still at `revision`. The data stays where it is.
     async fn update_volume(&self, id: VolumeId, revision: i64, fields: VolumeFields) -> Result<Volume, StoreError>;
 
@@ -120,6 +124,22 @@ impl VolumeRepository for SqliteStore {
         rows.into_iter().map(Volume::try_from).collect()
     }
 
+    async fn list_disposable_volumes(&self, service_id: ServiceId) -> Result<Vec<Volume>, StoreError> {
+        let rows: Vec<VolumeRow> = sqlx::query_as(
+            "SELECT volumes.id, volumes.service_id, volumes.name, volumes.mount_path, volumes.revision,
+                    volumes.created_at, volumes.updated_at
+             FROM volumes
+             JOIN services ON services.id = volumes.service_id
+             JOIN environments ON environments.id = services.environment_id
+             WHERE volumes.service_id = ? AND services.deleted_at IS NOT NULL AND environments.kind = 'preview'
+             ORDER BY volumes.name",
+        )
+        .bind(service_id.to_string())
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(Volume::try_from).collect()
+    }
+
     async fn update_volume(&self, id: VolumeId, revision: i64, fields: VolumeFields) -> Result<Volume, StoreError> {
         let row: Option<VolumeRow> = sqlx::query_as(concat!(
             "UPDATE volumes
@@ -176,7 +196,7 @@ mod tests {
     async fn service(store: &SqliteStore) -> ServiceId {
         let project = ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() };
         let project_id = store.create_project(project).await.unwrap().id;
-        let env = EnvironmentFields { name: "Production".to_string(), slug: "production".parse().unwrap() };
+        let env = EnvironmentFields { name: "Production".to_string(), slug: "production".parse().unwrap(), previews: false };
         let env_id = store.create_environment(project_id, EnvironmentKind::Production, env).await.unwrap().id;
         let service = ServiceFields { name: "DB".to_string(), slug: "db".parse().unwrap(), config: Map::new(), server_id: None };
         store.create_service(env_id, ServiceKind::Database, service).await.unwrap().id
@@ -198,6 +218,27 @@ mod tests {
         assert_eq!(backups.mount_path.as_str(), "/backups");
         let listed: Vec<_> = store.list_volumes(service_id).await.unwrap().into_iter().map(|v| v.id).collect();
         assert_eq!(listed, vec![backups.id, data.id]);
+    }
+
+    #[tokio::test]
+    async fn only_deleted_preview_services_have_disposable_volumes() {
+        let (_dir, store) = store().await;
+        let kept = service(&store).await;
+        let base = store.get_service(kept).await.unwrap().environment_id;
+        let fields_of = |slug: &str| EnvironmentFields { name: slug.to_string(), slug: slug.parse().unwrap(), previews: false };
+        let preview = store.create_preview_environment(base, 3, fields_of("pr-3")).await.unwrap();
+        let service = ServiceFields { name: "DB".to_string(), slug: "db".parse().unwrap(), config: Map::new(), server_id: None };
+        let copy = store.create_service(preview.id, ServiceKind::Database, service).await.unwrap().id;
+        store.create_volume(kept, fields("data", "/data")).await.unwrap();
+        let data = store.create_volume(copy, fields("data", "/data")).await.unwrap();
+
+        let while_active = store.list_disposable_volumes(copy).await.unwrap();
+        store.delete_service(copy).await.unwrap();
+        store.delete_service(kept).await.unwrap();
+
+        assert_eq!(while_active, []);
+        assert_eq!(store.list_disposable_volumes(copy).await.unwrap(), [data]);
+        assert_eq!(store.list_disposable_volumes(kept).await.unwrap(), [], "not a preview");
     }
 
     #[tokio::test]

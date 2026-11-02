@@ -296,7 +296,7 @@ mod tests {
     async fn services(store: &SqliteStore) -> (ServiceId, ServiceId) {
         let project = ProjectFields { name: "Web".to_string(), slug: "web".parse().unwrap() };
         let project_id = store.create_project(project).await.unwrap().id;
-        let env = EnvironmentFields { name: "Production".to_string(), slug: "production".parse().unwrap() };
+        let env = EnvironmentFields { name: "Production".to_string(), slug: "production".parse().unwrap(), previews: false };
         let env_id = store.create_environment(project_id, EnvironmentKind::Production, env).await.unwrap().id;
         let mut ids = Vec::new();
         for slug in ["app", "api"] {

@@ -1,4 +1,5 @@
-//! Environments. A project's admins create and delete them; an environment's admins rename it.
+//! Environments. A project's admins create and delete them and turn previews of pull
+//! requests on or off (`previews.rs`); an environment's admins rename it.
 
 use serde_json::json;
 use spinikus_core::{
@@ -21,6 +22,8 @@ pub struct NewEnvironment {
     /// Made from the name when not given.
     pub slug: Option<String>,
     pub kind: EnvironmentKind,
+    /// Whether pull requests get previews of it. Previews themselves can't.
+    pub previews: bool,
 }
 
 /// Changes to an environment. Fields left as `None` keep their current value. The kind is fixed.
@@ -28,6 +31,9 @@ pub struct NewEnvironment {
 pub struct EnvironmentChanges {
     pub name: Option<String>,
     pub slug: Option<String>,
+    /// Turning previews on or off needs the admin role in the project, since previews are
+    /// environments of the project.
+    pub previews: Option<bool>,
 }
 
 impl Control {
@@ -41,9 +47,16 @@ impl Control {
         self.access(principal).await?.check_project(&project, Role::Admin)?;
         let name = input::name(&new.name)?;
         let slug = input::slug(new.slug.as_deref(), &name)?;
-        let environment = self.store().create_environment(project_id, new.kind, EnvironmentFields { name, slug }).await?;
+        check_previews(new.kind, new.previews)?;
+        let fields = EnvironmentFields { name, slug, previews: new.previews };
+        let environment = self.store().create_environment(project_id, new.kind, fields).await?;
         let kind = environment.kind;
-        let details = json!({ "slug": environment.slug, "kind": kind.as_str(), "pr_number": kind.pr_number() });
+        let details = json!({
+            "slug": environment.slug,
+            "kind": kind.as_str(),
+            "pr_number": kind.pr_number(),
+            "previews": environment.previews,
+        });
         self.audit_by(principal, "environment.create", environment.id, Some(project_id), details).await?;
         Ok(environment)
     }
@@ -105,7 +118,13 @@ impl Control {
         changes: EnvironmentChanges,
     ) -> Result<Environment, ControlError> {
         let current = self.store().get_environment(id).await?;
-        self.access(principal).await?.check_environment(&current, Role::Admin)?;
+        let access = self.access(principal).await?;
+        access.check_environment(&current, Role::Admin)?;
+        let previews = changes.previews.unwrap_or(current.previews);
+        if previews != current.previews {
+            access.check_project(&self.store().get_project(current.project_id).await?, Role::Admin)?;
+            check_previews(current.kind, previews)?;
+        }
         let name = match &changes.name {
             Some(name) => input::name(name)?,
             None => current.name,
@@ -114,24 +133,40 @@ impl Control {
             Some(slug) => input::slug(Some(slug), &name)?,
             None => current.slug,
         };
-        let environment = self.store().update_environment(id, revision, EnvironmentFields { name, slug }).await?;
-        let changed = audit::changed(&[("name", changes.name.is_some()), ("slug", changes.slug.is_some())]);
+        let environment = self.store().update_environment(id, revision, EnvironmentFields { name, slug, previews }).await?;
+        let changed = audit::changed(&[
+            ("name", changes.name.is_some()),
+            ("slug", changes.slug.is_some()),
+            ("previews", changes.previews.is_some()),
+        ]);
         self.audit_by(principal, "environment.update", id, Some(current.project_id), changed).await?;
         Ok(environment)
     }
 
     /// Deletes the environment. Needs the admin role in the project, since that is where
-    /// environments are added, and fails while the environment has services.
+    /// environments are added, and fails while the environment has services, except for a
+    /// pull request's preview, which goes with its services (`previews.rs`).
     pub async fn delete_environment(&self, principal: &Principal, id: EnvironmentId) -> Result<(), ControlError> {
         let environment = self.store().get_environment(id).await?;
         let access = self.access(principal).await?;
         access.check_environment(&environment, Role::Viewer)?;
         let project = self.store().get_project(environment.project_id).await?;
         access.check_project(&project, Role::Admin)?;
+        if environment.base_environment_id.is_some() {
+            let _previews = self.previews.lock().await;
+            return self.remove_preview(&environment, principal.actor()).await;
+        }
         self.store().delete_environment(id).await?;
         let details = json!({ "slug": environment.slug });
         self.audit_by(principal, "environment.delete", id, Some(environment.project_id), details).await
     }
+}
+
+fn check_previews(kind: EnvironmentKind, previews: bool) -> Result<(), ControlError> {
+    if previews && matches!(kind, EnvironmentKind::Preview { .. }) {
+        return Err(ControlError::Invalid { field: "previews", problem: "a preview can't have previews".to_string() });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -145,7 +180,7 @@ mod tests {
     };
 
     fn new(name: &str, kind: EnvironmentKind) -> NewEnvironment {
-        NewEnvironment { name: name.to_string(), slug: None, kind }
+        NewEnvironment { name: name.to_string(), slug: None, kind, previews: false }
     }
 
     async fn project(control: &Control, admin: &Principal) -> Project {
@@ -168,6 +203,29 @@ mod tests {
         assert_eq!(production.unwrap().slug.as_str(), "production");
         assert!(matches!(by_developer, Err(ControlError::Forbidden)), "{by_developer:?}");
         assert_eq!(preview.unwrap().slug.as_str(), "pr-7");
+    }
+
+    #[tokio::test]
+    async fn project_admins_turn_previews_on() {
+        let (_dir, control) = control().await;
+        let admin = user(&control, "admin@example.com", true).await;
+        let env_admin = user(&control, "ada@example.com", false).await;
+        let project = project(&control, &admin).await;
+        let staging = control.create_environment(&admin, project.id, new("Staging", EnvironmentKind::Staging)).await.unwrap();
+        grant(&control, &env_admin, MembershipScope::Environment(staging.id), Role::Admin).await;
+        let on = EnvironmentChanges { previews: Some(true), ..Default::default() };
+
+        let by_env_admin = control.update_environment(&env_admin, staging.id, 1, on.clone()).await;
+        let turned_on = control.update_environment(&admin, staging.id, 1, on.clone()).await.unwrap();
+        let renamed = EnvironmentChanges { name: Some("QA".to_string()), previews: Some(true), ..Default::default() };
+        let renamed = control.update_environment(&env_admin, staging.id, 2, renamed).await.unwrap();
+        let preview = NewEnvironment { previews: true, ..new("PR 7", EnvironmentKind::Preview { pr_number: 7 }) };
+        let preview = control.create_environment(&admin, project.id, preview).await;
+
+        assert!(matches!(by_env_admin, Err(ControlError::Forbidden)), "{by_env_admin:?}");
+        assert!(turned_on.previews);
+        assert!(renamed.previews, "unchanged, so environment admins may send it");
+        assert!(matches!(preview, Err(ControlError::Invalid { field: "previews", .. })), "{preview:?}");
     }
 
     #[tokio::test]

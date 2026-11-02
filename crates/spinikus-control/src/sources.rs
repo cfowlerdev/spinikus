@@ -126,7 +126,8 @@ mod tests {
         let developer = user(&control, "ada@example.com", false).await;
         let viewer = user(&control, "vic@example.com", false).await;
         let project = control.create_project(&admin, NewProject { name: "Shop".to_string(), slug: None }).await.unwrap();
-        let new = NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production };
+        let new =
+            NewEnvironment { name: "Production".to_string(), slug: None, kind: EnvironmentKind::Production, previews: false };
         let environment = control.create_environment(&admin, project.id, new).await.unwrap();
         grant(&control, &developer, MembershipScope::Environment(environment.id), Role::Developer).await;
         grant(&control, &viewer, MembershipScope::Environment(environment.id), Role::Viewer).await;

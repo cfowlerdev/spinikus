@@ -17,6 +17,7 @@ mod input;
 pub mod members;
 pub mod page;
 pub mod password;
+mod previews;
 pub mod projects;
 pub mod servers;
 pub mod service_logs;
@@ -71,6 +72,9 @@ pub struct Control {
     logs: Arc<deployments::logs::DeploymentLogs>,
     sessions: Arc<service_logs::Sessions>,
     backups: Arc<backups::Backups>,
+    /// Held while a pull request's preview is made, updated or removed, since each service's
+    /// webhook gets the same events.
+    previews: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Control {
@@ -80,7 +84,17 @@ impl Control {
         let logs = Arc::new(deployments::logs::DeploymentLogs::new(None));
         let sessions = Arc::default();
         let backups = Arc::new(backups::Backups::new(BackupTimings::default(), Default::default()));
-        Self { store, agents: AgentHub::default(), authority: Arc::default(), runner, certificates, logs, sessions, backups }
+        Self {
+            store,
+            agents: AgentHub::default(),
+            authority: Arc::default(),
+            runner,
+            certificates,
+            logs,
+            sessions,
+            backups,
+            previews: Arc::default(),
+        }
     }
 
     /// Replaces the ACME client and the certificate manager's timings, such as to use a

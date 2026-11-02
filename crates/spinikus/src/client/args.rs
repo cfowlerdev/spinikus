@@ -101,10 +101,21 @@ pub enum EnvironmentCommand {
         slug: Option<String>,
         #[arg(long, value_parser = ["production", "staging"], default_value = "production")]
         kind: String,
+        /// Deploy a preview of each pull request to the branch its Git services deploy
+        #[arg(long)]
+        previews: bool,
     },
     /// Show an environment and its services
     Show { environment: Option<String> },
-    /// Delete an environment (it must have no services)
+    /// Turn previews of pull requests on or off: each gets a copy of the environment, deleted
+    /// with its data when the pull request closes
+    Previews {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+        /// The environment (default: the linked one)
+        environment: Option<String>,
+    },
+    /// Delete an environment (it must have no services, unless it is a pull request's preview)
     Delete {
         environment: String,
         #[arg(short, long)]

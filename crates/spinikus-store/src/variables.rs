@@ -359,7 +359,7 @@ mod tests {
             .create_environment(
                 project,
                 EnvironmentKind::Production,
-                EnvironmentFields { name: "Production".to_string(), slug: "production".parse().unwrap() },
+                EnvironmentFields { name: "Production".to_string(), slug: "production".parse().unwrap(), previews: false },
             )
             .await
             .unwrap()

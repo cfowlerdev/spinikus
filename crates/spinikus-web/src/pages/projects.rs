@@ -68,9 +68,16 @@ pub async fn environment(State(control): State<Control>, signed: Signed, Path(id
             a href={ "/environments/" (environment.id) "/services/new" } class=(BUTTON_PRIMARY) { "New service" }
         }
     };
+    let base = match environment.base_environment_id {
+        Some(base) => control.get_environment(&signed.principal, base).await.ok(),
+        None => None,
+    };
     let content = html! {
         (layout::header(&environment.name, Some(subtitle), actions))
         (environment_tabs(&environment, role, Tab::Main))
+        @if let Some(number) = environment.kind.pr_number() {
+            (layout::notice(&super::manage::preview_note(number, base.as_ref())))
+        }
         (service_list(&services.items, "No services in this environment yet."))
         (layout::next_page(services.has_more, services.items.last().map(|service| service.id.to_string())))
     };
