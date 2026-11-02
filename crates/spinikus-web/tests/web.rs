@@ -1509,3 +1509,71 @@ async fn admins_manage_members_and_read_the_audit_log() {
     assert_eq!(web.get("/settings/audit-log", Some(&dev)).await.status, StatusCode::FORBIDDEN);
     assert_eq!(web.get("/settings/audit-log?before=junk", Some(&ada)).await.status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn developers_turn_deploy_on_push_on_and_off() {
+    use spinikus_store::WebhookRepository;
+
+    let web = Web::new().await;
+    let (admin, _, _, service) = shop_with_team(&web).await;
+    let control = &web.control;
+    let settings = format!("/services/{}/settings", service.id);
+    let session = web.sign_in("dev%40example.com").await;
+
+    // An image service has no such card.
+    let page = web.get(&settings, Some(&session)).await;
+    assert!(!page.body.contains("Deploy on push"), "{}", page.body);
+    let git =
+        GitSource { repo_url: "https://github.com/acme/web.git".to_string(), branch: "main".to_string(), root_directory: None };
+    control.create_source(&admin, service.id, SourceSpec::Git(git)).await.unwrap();
+    let page = web.get(&settings, Some(&session)).await;
+    assert!(page.body.contains("Turn on deploy on push") && !page.body.contains("/hooks/git/"), "{}", page.body);
+
+    // Turning it on shows the URLs, what to send, and the secret, once.
+    let token = page.csrf();
+    let created = web.post(&format!("{settings}/webhook"), Some(&session), &form(&[("_csrf", &token)])).await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    assert_eq!(created.header("hx-replace-url"), Some(settings.as_str()));
+    let webhook = control.store().find_service_webhook(service.id).await.unwrap().unwrap();
+    let secret = control.store().webhook_secret(webhook.id).await.unwrap();
+    assert!(created.body.contains(secret.expose()), "{}", created.body);
+    for provider in ["github", "gitlab", "gitea"] {
+        let url = format!("http://spinikus.test/hooks/git/{provider}/{}", webhook.id);
+        assert!(created.body.contains(&url), "{url}: {}", created.body);
+    }
+    assert!(created.body.contains("Pull requests") && created.body.contains("Merge request events"));
+    assert!(created.body.contains("none yet"));
+    let page = web.get(&settings, Some(&session)).await;
+    assert!(page.body.contains(&webhook.paths.github) && !page.body.contains(secret.expose()), "{}", page.body);
+
+    // Behind a proxy that says it took HTTPS, the URLs are HTTPS.
+    let proxied = web.send(Method::GET, &settings, Some(&session), &[("x-forwarded-proto", "https")], None).await;
+    assert!(proxied.body.contains(&format!("https://spinikus.test{}", webhook.paths.github)), "{}", proxied.body);
+
+    // The last delivery is shown.
+    control.store().record_webhook_delivery(webhook.id, "ignored: a push to `other`").await.unwrap();
+    let page = web.get(&settings, Some(&session)).await;
+    assert!(page.body.contains("ignored: a push to `other`"), "{}", page.body);
+
+    // A new secret keeps the URL.
+    let renewed = web.post(&format!("{settings}/webhook"), Some(&session), &form(&[("_csrf", &token)])).await;
+    let new_secret = control.store().webhook_secret(webhook.id).await.unwrap();
+    assert_ne!(new_secret.expose(), secret.expose());
+    assert!(renewed.body.contains(new_secret.expose()) && renewed.body.contains(&webhook.paths.github));
+
+    // A viewer can't open the settings or change the webhook.
+    let viewer = web.sign_in("viewer%40example.com").await;
+    let viewer_page = web.get("/", Some(&viewer)).await;
+    assert_eq!(web.get(&settings, Some(&viewer)).await.status, StatusCode::FORBIDDEN);
+    let refused = web.post(&format!("{settings}/webhook/delete"), Some(&viewer), &form(&[("_csrf", &viewer_page.csrf())])).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert!(control.store().find_service_webhook(service.id).await.unwrap().is_some());
+
+    // Turning it off.
+    let deleted = web.post(&format!("{settings}/webhook/delete"), Some(&session), &form(&[("_csrf", &token)])).await;
+    assert_eq!(deleted.status, StatusCode::SEE_OTHER, "{}", deleted.body);
+    assert_eq!(deleted.header("location"), Some(format!("{settings}?saved=webhook").as_str()));
+    assert!(control.store().find_service_webhook(service.id).await.unwrap().is_none());
+    let page = web.get(&format!("{settings}?saved=webhook"), Some(&session)).await;
+    assert!(page.body.contains("Turn on deploy on push") && page.body.contains("Saved."), "{}", page.body);
+}

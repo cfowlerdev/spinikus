@@ -66,6 +66,8 @@ pub fn router(control: Control) -> Router {
         .route("/services/{id}/settings/source", post(pages::service_settings::update_source))
         .route("/services/{id}/settings/runtime", post(pages::service_settings::update_runtime))
         .route("/services/{id}/settings/placement", post(pages::service_settings::update_placement))
+        .route("/services/{id}/settings/webhook", post(pages::service_settings::create_webhook))
+        .route("/services/{id}/settings/webhook/delete", post(pages::service_settings::delete_webhook))
         .route("/services/{id}/delete", post(pages::service_settings::delete))
         .route(
             "/services/{id}/variables",

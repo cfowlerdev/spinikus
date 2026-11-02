@@ -158,7 +158,7 @@ pub enum Notice<'a> {
 }
 
 impl Notice<'_> {
-    fn render(self) -> Markup {
+    pub(crate) fn render(self) -> Markup {
         html! {
             @match self {
                 Notice::None => {},

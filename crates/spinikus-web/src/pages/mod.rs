@@ -161,3 +161,11 @@ fn problem_message(error: ControlError) -> Result<String, WebError> {
     };
     message.ok_or_else(|| error.into())
 }
+
+/// The scheme and host the browser reached this instance at (`https` when a proxy in front
+/// says so), for absolute URLs given to other systems, such as webhook URLs.
+fn origin(headers: &HeaderMap) -> String {
+    let https = headers.get("x-forwarded-proto").is_some_and(|proto| proto.as_bytes().eq_ignore_ascii_case(b"https"));
+    let host = headers.get(axum::http::header::HOST).and_then(|value| value.to_str().ok()).unwrap_or("localhost");
+    format!("{}://{host}", if https { "https" } else { "http" })
+}
