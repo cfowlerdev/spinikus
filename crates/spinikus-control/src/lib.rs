@@ -53,6 +53,7 @@ pub use page::Page;
 pub use projects::{NewProject, ProjectChanges};
 pub use servers::{Enrolled, JoinToken, NewServer};
 pub use services::{NewService, ServiceChanges};
+use spinikus_core::secret::Secret;
 use spinikus_store::SqliteStore;
 pub use tokens::NewToken;
 use tokio::sync::OnceCell;
@@ -75,6 +76,8 @@ pub struct Control {
     /// Held while a pull request's preview is made, updated or removed, since each service's
     /// webhook gets the same events.
     previews: Arc<tokio::sync::Mutex<()>>,
+    /// What the setup page asks for before it creates the first admin, if anything.
+    setup_code: Option<Arc<Secret>>,
 }
 
 impl Control {
@@ -94,6 +97,7 @@ impl Control {
             sessions,
             backups,
             previews: Arc::default(),
+            setup_code: None,
         }
     }
 

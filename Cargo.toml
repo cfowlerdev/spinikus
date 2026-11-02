@@ -5,6 +5,11 @@ members = [
     "xtask",
 ]
 
+[workspace.package]
+# One version for every crate: the release's (`cargo xtask release --tag v<version>` checks it).
+version = "0.1.0"
+edition = "2024"
+
 [workspace.dependencies]
 anyhow = "1.0.104"
 argon2 = { version = "0.6.0", features = ["zeroize"] }
@@ -73,3 +78,10 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# Release binaries (`cargo xtask release`): smaller and faster than `--release`, slower to build.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

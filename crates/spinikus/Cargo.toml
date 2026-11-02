@@ -1,7 +1,7 @@
 [package]
 name = "spinikus"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -26,6 +26,10 @@ spinikus-control.workspace = true
 spinikus-core.workspace = true
 spinikus-store.workspace = true
 spinikus-web.workspace = true
+
+# musl's allocator is slow under many threads; release binaries are built for musl.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1.52", default-features = false }
 
 [dev-dependencies]
 anyhow.workspace = true

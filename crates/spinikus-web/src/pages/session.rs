@@ -65,15 +65,29 @@ pub async fn logout(State(control): State<Control>, signed: Signed, headers: Hea
     Ok(([(header::SET_COOKIE, auth::cleared_cookie(&headers))], redirect(&headers, "/login")).into_response())
 }
 
-pub async fn setup_page(State(control): State<Control>, headers: HeaderMap) -> Result<Response, WebError> {
+#[derive(Deserialize)]
+pub struct SetupQuery {
+    /// The setup code, from the URL the install script printed.
+    #[serde(default)]
+    code: String,
+}
+
+pub async fn setup_page(
+    State(control): State<Control>,
+    headers: HeaderMap,
+    Query(query): Query<SetupQuery>,
+) -> Result<Response, WebError> {
     if !control.needs_setup().await? {
         return Ok(redirect(&headers, "/login"));
     }
-    Ok(setup_form("", "", None).into_response())
+    let code = control.setup_code_required().then_some(query.code.as_str());
+    Ok(setup_form(code, "", "", None).into_response())
 }
 
 #[derive(Deserialize)]
 pub struct Setup {
+    #[serde(default)]
+    setup_code: String,
     name: String,
     email: String,
     password: Secret,
@@ -86,12 +100,13 @@ pub async fn setup(
     headers: HeaderMap,
     Form(setup): Form<Setup>,
 ) -> Result<Response, WebError> {
-    match control.create_first_admin(&setup.email, &setup.name, setup.password.clone()).await {
+    match control.set_up(&setup.setup_code, &setup.email, &setup.name, setup.password.clone()).await {
         Ok(_) => {}
         Err(ControlError::AlreadySetUp) => return Ok(redirect(&headers, "/login")),
         Err(ControlError::Invalid { problem, field }) => {
-            let message = format!("The {field} is not valid: {problem}.");
-            let form = setup_form(&setup.name, &setup.email, Some(&message));
+            let message = format!("The {} is not valid: {problem}.", field.replace('_', " "));
+            let code = control.setup_code_required().then_some(setup.setup_code.as_str());
+            let form = setup_form(code, &setup.name, &setup.email, Some(&message));
             return Ok((StatusCode::UNPROCESSABLE_ENTITY, form).into_response());
         }
         Err(error) => return Err(error.into()),
@@ -126,8 +141,13 @@ fn login_form(email: &str, next: Option<&str>, error: Option<&str>) -> Markup {
     auth_card("Sign in", "Sign in to Spinikus", "/login", error, content)
 }
 
-fn setup_form(name: &str, email: &str, error: Option<&str>) -> Markup {
+/// The setup form; `code` is the setup code field's value when one is needed.
+fn setup_form(code: Option<&str>, name: &str, email: &str, error: Option<&str>) -> Markup {
     let content = html! {
+        @if let Some(code) = code {
+            (field("setup_code", "Setup code", "text", "off", code))
+            p class="text-xs text-zinc-500 dark:text-zinc-400" { "The install script printed it, in the setup URL. It is also in the file setup-code in the data directory." }
+        }
         (field("name", "Your name", "text", "name", name))
         (field("email", "Email", "email", "username", email))
         (field("password", "Password", "password", "new-password", ""))

@@ -5,6 +5,10 @@
 //!   Tailwind standalone CLI. `--watch` rebuilds on changes, `--check` fails if the committed
 //!   file is out of date. The CLI is downloaded once into `target/xtask/`, pinned by version
 //!   and checked against its SHA-256.
+//! - `release`: static Linux binaries in `dist/`, as GitHub releases publish them (see
+//!   `release.rs`).
+
+mod release;
 
 use std::{
     env, fs,
@@ -36,8 +40,13 @@ fn main() -> anyhow::Result<()> {
         ["css"] => css(Mode::Build),
         ["css", "--watch"] => css(Mode::Watch),
         ["css", "--check"] => css(Mode::Check),
+        ["release", options @ ..] => release::release(release::Options::parse(options)?),
         [] | ["help" | "--help" | "-h"] => {
             println!("cargo xtask css [--watch | --check]   build the web UI's stylesheet with Tailwind");
+            println!(
+                "cargo xtask release [--target <target>]... [--tag v<version>] [--docker]\n    \
+                 build release archives of static Linux binaries into dist/"
+            );
             Ok(())
         }
         _ => bail!("unknown task {args:?}; see `cargo xtask help`"),

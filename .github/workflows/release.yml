@@ -1,0 +1,64 @@
+# Builds the release archives on every v* tag and publishes them, with SHA256SUMS and the
+# install script, as a GitHub release. Run it by hand to build the archives as workflow
+# artifacts without publishing anything.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install musl tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Add the target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: cargo xtask release --target ${{ matrix.target }} ${TAG:+--tag "$TAG"}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/spinikus-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum spinikus-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Versions with a suffix (v0.2.0-rc.1) are prereleases, which releases/latest skips.
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$TAG" dist/spinikus-*.tar.gz dist/SHA256SUMS install/install.sh \
+            --title "$TAG" --generate-notes $prerelease

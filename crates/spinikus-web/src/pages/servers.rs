@@ -261,7 +261,17 @@ fn server_page(signed: &Signed, server: &Server, join: Option<Join<'_>>) -> Mark
     layout::page(signed, &format!("{} · Servers", server.name), &[], content)
 }
 
+/// The install script of this version's release, which installs the agent of the same version.
+const INSTALL_SCRIPT: &str =
+    concat!("https://github.com/cfowlerdev/spinikus/releases/download/v", env!("CARGO_PKG_VERSION"), "/install.sh");
+
 fn join_card(server: &Server, join: Join<'_>) -> Markup {
+    let install = format!(
+        "curl -fsSL {INSTALL_SCRIPT} | sudo sh -s -- --join https://{}:{DEFAULT_AGENTS_PORT} --token {} --ca-fingerprint {}",
+        join.host,
+        join.token.secret.expose(),
+        join.token.ca_fingerprint,
+    );
     let command = format!(
         "SPINIKUS_JOIN_TOKEN={} spinikus agent join https://{}:{DEFAULT_AGENTS_PORT} --ca-fingerprint {}",
         join.token.secret.expose(),
@@ -274,17 +284,23 @@ fn join_card(server: &Server, join: Join<'_>) -> Markup {
             p role="status" class="mt-4 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400" {
                 "Here is a join token for " (server.name) ". It is shown only this once and works until " (layout::time(join.token.token.expires_at)) "."
             }
-            ol class="mt-4 list-decimal space-y-3 pl-5 text-sm" {
-                li {
-                    "On the server, in the directory with its " code class="font-mono" { "spinikus.toml" } ", enroll the agent:"
-                    pre class="mt-2 whitespace-pre-wrap break-all rounded-md bg-zinc-100 p-3 font-mono text-xs select-all dark:bg-zinc-800" { (command) }
-                    p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400" {
-                        "If the server reaches the control plane's agent listener (" code class="font-mono" { "[agents] listen" } ", port 8443 by default) at another address or port, use that."
+            p class="mt-4 text-sm" { "On the server, as a user who can use sudo, install Spinikus's agent and enroll it:" }
+            pre class="mt-2 whitespace-pre-wrap break-all rounded-md bg-zinc-100 p-3 font-mono text-xs select-all dark:bg-zinc-800" { (install) }
+            p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400" {
+                "It installs Docker, git and Railpack if they are missing, and runs the agent as the systemd service spinikus-agent. "
+                "If the server reaches the control plane's agent listener (" code class="font-mono" { "[agents] listen" } ", port 8443 by default) at another address or port, use that."
+            }
+            details class="mt-4 text-sm" {
+                summary class="cursor-pointer text-zinc-600 dark:text-zinc-300" { "Spinikus is already installed there" }
+                ol class="mt-3 list-decimal space-y-3 pl-5" {
+                    li {
+                        "Enroll the agent, with the server's " code class="font-mono" { "spinikus.toml" } " (or " code class="font-mono" { "--config" } "):"
+                        pre class="mt-2 whitespace-pre-wrap break-all rounded-md bg-zinc-100 p-3 font-mono text-xs select-all dark:bg-zinc-800" { (command) }
                     }
-                }
-                li {
-                    "Then run it:"
-                    pre class="mt-2 rounded-md bg-zinc-100 p-3 font-mono text-xs select-all dark:bg-zinc-800" { "spinikus agent run" }
+                    li {
+                        "Then run it:"
+                        pre class="mt-2 rounded-md bg-zinc-100 p-3 font-mono text-xs select-all dark:bg-zinc-800" { "spinikus agent run" }
+                    }
                 }
             }
         }

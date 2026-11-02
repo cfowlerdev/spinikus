@@ -1,7 +1,7 @@
 [package]
 name = "spinikus-agent"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [features]
 # The in-memory container runtime, for tests in other crates.

@@ -52,7 +52,7 @@ pub async fn run(config: &SpinikusConfig) -> anyhow::Result<()> {
         backups: Default::default(),
     };
     let shutdown = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
+        if let Err(error) = crate::shutdown::signal().await {
             tracing::error!(%error, "Failed to listen for the shutdown signal");
             std::future::pending::<()>().await;
         }

@@ -6,10 +6,19 @@ use std::{
 use serde::Deserialize;
 
 /// Logging settings from the `[logging]` table of `spinikus.toml`.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
+#[serde(default)]
 pub struct LoggingConfig {
+    /// A tracing filter, such as `info` or `spinikus=debug`. Defaults to `info`.
     pub level: String,
+    /// One JSON object per line instead of text.
     pub json: bool,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self { level: "info".to_string(), json: false }
+    }
 }
 
 /// Database settings from the `[database]` table of `spinikus.toml`.
@@ -116,6 +125,7 @@ pub struct SpinikusConfig {
     /// Directory for everything Spinikus stores on disk.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(default)]
     pub database: DatabaseConfig,

@@ -159,6 +159,24 @@ async fn setup_creates_the_first_admin_and_signs_them_in() {
 }
 
 #[tokio::test]
+async fn setup_needs_the_setup_code_when_there_is_one() {
+    let mut web = Web::new().await;
+    let code = Control::new_setup_code();
+    web.router = spinikus_web::router(web.control.clone().with_setup_code(Secret::new(code.expose())));
+
+    let form = web.get(&format!("/setup?code={}", code.expose()), None).await;
+    assert!(form.body.contains("Setup code") && form.body.contains(&format!(r#"value="{}""#, code.expose())), "{}", form.body);
+    let fields = "name=Ada&email=ada%40example.com&password=correct+horse+battery+staple";
+    let wrong = web.post("/setup", None, &format!("setup_code=nope&{fields}")).await;
+    assert_eq!(wrong.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(wrong.body.contains("The setup code is not valid"), "{}", wrong.body);
+    assert!(!wrong.body.contains(code.expose()), "the right code is never shown for a wrong one");
+    assert_eq!(web.post("/setup", None, fields).await.status, StatusCode::UNPROCESSABLE_ENTITY, "no code at all");
+    let created = web.post("/setup", None, &format!("setup_code={}&{fields}", code.expose())).await;
+    assert_eq!((created.status, created.header("location")), (StatusCode::SEE_OTHER, Some("/")));
+}
+
+#[tokio::test]
 async fn signs_in_and_out() {
     let web = Web::new().await;
     web.control.create_first_admin("ada@example.com", "Ada", Secret::new(PASSWORD)).await.unwrap();
@@ -1209,6 +1227,12 @@ async fn admins_add_servers_and_developers_place_services_on_them() {
     assert_eq!(join.header("hx-replace-url"), Some(format!("/settings/servers/{id}").as_str()));
     assert!(join.body.contains("SPINIKUS_JOIN_TOKEN=spj_"), "{}", join.body);
     assert!(join.body.contains("spinikus agent join https://spinikus.test:8443 --ca-fingerprint sha256:"));
+    let install = concat!(
+        "releases/download/v",
+        env!("CARGO_PKG_VERSION"),
+        "/install.sh | sudo sh -s -- --join https://spinikus.test:8443 --token spj_"
+    );
+    assert!(join.body.contains(install), "{}", join.body);
     assert!(!web.get(&format!("/settings/servers/{id}"), Some(&ada)).await.body.contains("spj_"), "shown only once");
 
     // Developers see the server among the choices, and place the service there.

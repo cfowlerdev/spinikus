@@ -99,7 +99,7 @@ async fn sets_up_the_first_admin_once() {
     let created = api.send(Method::POST, "/api/v1/setup", None, &[], Some(admin.clone())).await;
     let again = api.send(Method::POST, "/api/v1/setup", None, &[], Some(admin)).await;
 
-    assert_eq!(before.body, json!({ "needs_setup": true }));
+    assert_eq!(before.body, json!({ "needs_setup": true, "setup_code_required": false }));
     assert_eq!(created.status, StatusCode::CREATED);
     assert_eq!(created.body["email"], "ada@example.com");
     assert!(created.body.get("password").is_none());
@@ -107,6 +107,27 @@ async fn sets_up_the_first_admin_once() {
     assert_eq!(again.header(header::CONTENT_TYPE), "application/problem+json");
     assert_eq!(again.body["code"], "already_set_up");
     assert_eq!(again.body["status"], 409);
+}
+
+#[tokio::test]
+async fn setting_up_needs_the_setup_code_when_there_is_one() {
+    let mut api = Api::new().await;
+    let code = Control::new_setup_code();
+    api.router = spinikus_api::router(api.control.clone().with_setup_code(Secret::new(code.expose())));
+    let admin = |code: &str| json!({ "setup_code": code, "email": "ada@example.com", "name": "Ada", "password": PASSWORD });
+
+    let status = api.send(Method::GET, "/api/v1/setup", None, &[], None).await;
+    let wrong = api.send(Method::POST, "/api/v1/setup", None, &[], Some(admin("nope"))).await;
+    let created = api.send(Method::POST, "/api/v1/setup", None, &[], Some(admin(code.expose()))).await;
+
+    assert_eq!(status.body, json!({ "needs_setup": true, "setup_code_required": true }));
+    assert_eq!(
+        (wrong.status, wrong.body["code"].as_str()),
+        (StatusCode::UNPROCESSABLE_ENTITY, Some("invalid")),
+        "{:?}",
+        wrong.body
+    );
+    assert_eq!(created.status, StatusCode::CREATED);
 }
 
 #[tokio::test]

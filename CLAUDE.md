@@ -70,7 +70,7 @@ cargo check --workspace
 cargo test --workspace               # all tests
 cargo test -p spinikus-core          # one crate
 cargo test -p spinikus-core it_works # one test by name filter
-cargo run -- server run              # start the control plane (applies migrations, serves the API and the dashboard on [http] listen, default 127.0.0.1:8080, agents on [agents] listen, default 0.0.0.0:8443, and the embedded agent unless [agents] embedded = false, with its proxy on [proxy] listen and https_listen)
+cargo run -- server run              # start the control plane (the setup page needs the code in data/setup-code) (applies migrations, serves the API and the dashboard on [http] listen, default 127.0.0.1:8080, agents on [agents] listen, default 0.0.0.0:8443, and the embedded agent unless [agents] embedded = false, with its proxy on [proxy] listen and https_listen)
 cargo run -- server migrate          # apply pending migrations and exit
 cargo run -- admin create-user --email you@example.com --name You   # first admin; password from SPINIKUS_ADMIN_PASSWORD or a prompt
 SPINIKUS_JOIN_TOKEN=spj_… cargo run -- agent join https://host:8443 --ca-fingerprint sha256:…   # enroll this machine's agent (token and fingerprint from POST /api/v1/servers/{id}/enrollment-tokens)
@@ -78,15 +78,18 @@ cargo run -- agent run               # run the agent; state in <data_dir>/agent
 cargo run -- login localhost:8080    # the API client: sign in (then `link`, `deploy`, `logs -f`, `env set`, …; `--help` lists them)
 cargo clippy --workspace && cargo fmt
 cargo xtask css                      # rebuild the dashboard's stylesheet after changing Tailwind classes (downloads the pinned Tailwind CLI once); --watch, --check
+cargo xtask release --docker         # build dist/spinikus-<target>.tar.gz and SHA256SUMS (static musl, `dist` profile) in rust:<toolchain>-alpine; on Linux without --docker, with --target and --tag v<version> in CI
 ```
 
 Formatting is plain `cargo fmt` on stable, configured by `rustfmt.toml` (stable options only; don't add nightly-only ones such as `trailing_comma`).
 
-The binary loads `spinikus.toml` from the **current working directory** (required), overlaid by env vars with prefix `SPINIKUS` and `__` as the nesting separator (e.g. `SPINIKUS_LOGGING__LEVEL=info`). `RUST_LOG` overrides `logging.level` when set. Run it from the repo root. The database defaults to `<data_dir>/spinikus.db` (`data/` in dev, gitignored). The master encryption key comes from `SPINIKUS_SECRETS__MASTER_KEY` or `[secrets] master_key_file`; with neither, `<data_dir>/master.key` is generated on first start. `server run` refuses to start if the database's data keys were wrapped by a different master key.
+The server, admin and agent commands load the config file named by `--config`/`SPINIKUS_CONFIG_FILE`, else `spinikus.toml` in the **current working directory** (development), else `/etc/spinikus/spinikus.toml` (installs; `config::path`), overlaid by env vars with prefix `SPINIKUS` and `__` as the nesting separator (e.g. `SPINIKUS_LOGGING__LEVEL=info`). `RUST_LOG` overrides `logging.level` when set. Run it from the repo root. The database defaults to `<data_dir>/spinikus.db` (`data/` in dev, gitignored). The master encryption key comes from `SPINIKUS_SECRETS__MASTER_KEY` or `[secrets] master_key_file`; with neither, `<data_dir>/master.key` is generated on first start. `server run` refuses to start if the database's data keys were wrapped by a different master key. Until a user exists, `server run` keeps a setup code in `<data_dir>/setup-code` (0600; `with_setup_code`, removed once set up), and `Control::set_up` (the setup page and `POST /api/v1/setup`, field `setup_code`) checks it; `create_first_admin` (used by `admin create-user` and tests) doesn't. The server and agent stop on SIGINT or SIGTERM (`shutdown::signal`).
+
+Releases and installs: every crate has the workspace version (`[workspace.package]`); the toolchain is pinned in `rust-toolchain.toml`. `.github/workflows/ci.yml` runs fmt, clippy with `-D warnings`, `xtask css --check` and the tests; `release.yml` builds `cargo xtask release` on x86_64 and arm64 runners on `v*` tags and publishes the archives, `SHA256SUMS` and `install/install.sh` as a GitHub release. musl builds use mimalloc as the global allocator. `install/install.sh` (POSIX sh, keep it shellcheck-clean, everything inside `main`) installs or upgrades a control plane (`spinikus.service`) or, with `--join`/`--token`/`--ca-fingerprint`, an agent (`spinikus-agent.service`), as the `spinikus` user with `/etc/spinikus/spinikus.toml` and `/var/lib/spinikus`; `SPINIKUS_DOWNLOAD_URL` installs from another directory (`file:///…` for local tests). The servers page's join card shows the install command for `INSTALL_SCRIPT` (this version's release).
 
 Migrations live in `crates/spinikus-store/migrations/` as `NNNN_<name>.sql`, are embedded with `sqlx::migrate!`, and run automatically on startup. Tables are `STRICT`; timestamps are `TEXT` in UTC RFC 3339 with milliseconds (`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`).
 
-Planned but not yet present (per the design doc): `rust-toolchain.toml`, `deny.toml`, `[workspace.lints]`, cargo-nextest, and `xtask` tasks for OpenAPI generation and releases. Dev chores go in `xtask` (`cargo xtask …`, alias in `.cargo/config.toml`) rather than shell scripts.
+Planned but not yet present (per the design doc): `deny.toml`, `[workspace.lints]`, cargo-nextest, and an `xtask` task for OpenAPI generation. Dev chores go in `xtask` (`cargo xtask …`, alias in `.cargo/config.toml`) rather than shell scripts.
 
 ## Architecture
 

@@ -6,3 +6,4 @@ pub mod config;
 pub mod embedded;
 pub mod secrets;
 pub mod server;
+pub mod shutdown;

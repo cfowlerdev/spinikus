@@ -17,7 +17,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Run the control plane (reads spinikus.toml from the current directory)
+    /// Run the control plane
     Server(ServerArgs),
     /// Set up an instance from the server itself
     Admin(AdminArgs),
@@ -68,6 +68,8 @@ pub enum Commands {
 
 #[derive(clap::Args)]
 pub struct ServerArgs {
+    #[command(flatten)]
+    pub instance: InstanceArgs,
     #[command(subcommand)]
     pub command: ServerCommand,
 }
@@ -92,6 +94,8 @@ pub struct ServerRunArgs {
 
 #[derive(clap::Args)]
 pub struct AdminArgs {
+    #[command(flatten)]
+    pub instance: InstanceArgs,
     #[command(subcommand)]
     pub command: AdminCommand,
 }
@@ -112,6 +116,8 @@ pub struct CreateUserArgs {
 
 #[derive(clap::Args)]
 pub struct AgentArgs {
+    #[command(flatten)]
+    pub instance: InstanceArgs,
     #[command(subcommand)]
     pub command: AgentCommand,
 }
@@ -134,4 +140,13 @@ pub struct AgentJoinArgs {
     /// The control plane's CA fingerprint from the join command, such as sha256:9e38…
     #[arg(long)]
     pub ca_fingerprint: String,
+}
+
+/// Where the server, admin and agent commands find the instance's configuration.
+#[derive(clap::Args)]
+pub struct InstanceArgs {
+    /// The instance's config file. Without it: ./spinikus.toml if there is one, else
+    /// /etc/spinikus/spinikus.toml
+    #[arg(long, short = 'c', env = "SPINIKUS_CONFIG_FILE", value_name = "PATH")]
+    pub config: Option<std::path::PathBuf>,
 }

@@ -1,0 +1,4 @@
+# The toolchain CI and release builds use (`cargo xtask release --docker` uses the matching
+# rust:<channel>-alpine image). Raise it deliberately.
+[toolchain]
+channel = "1.99.1"

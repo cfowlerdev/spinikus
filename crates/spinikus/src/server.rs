@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use anyhow::Context;
 use spinikus_control::Control;
-use spinikus_core::config::SpinikusConfig;
+use spinikus_core::{config::SpinikusConfig, secret::Secret};
 use spinikus_store::SqliteStore;
 use sqlx::SqlitePool;
 use tokio::{net::TcpListener, sync::watch};
@@ -10,10 +10,7 @@ use tokio::{net::TcpListener, sync::watch};
 use crate::{cli::ServerRunArgs, secrets};
 
 pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result<()> {
-    let control = open_control(config).await?;
-    if control.needs_setup().await? {
-        tracing::warn!("No users yet: open the dashboard to create the first admin, or use `spinikus admin create-user`");
-    }
+    let control = with_setup_code(config, open_control(config).await?).await?;
 
     let http_address = args.listen.unwrap_or(config.http.listen);
     let agent_address = args.agent_listen.unwrap_or(config.agents.listen);
@@ -54,7 +51,7 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
         tokio::spawn(async move { control.run_backups(shutdown).await })
     };
     let agents = spinikus_control::agents::serve(control, agent_listener, until(stopped));
-    tracing::info!(dashboard = %format!("http://{http_address}/"), "Server started, press Ctrl+C to stop");
+    tracing::info!(dashboard = %format!("http://{http_address}/"), "Server started");
 
     let mut http = tokio::spawn(async move { http.await.context("HTTP server failed") });
     let mut agents =
@@ -62,7 +59,7 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
 
     // Run until Ctrl+C or until either listener stops, then stop both and wait for them.
     let first = tokio::select! {
-        signal = tokio::signal::ctrl_c() => Stopped::Signal(signal),
+        signal = crate::shutdown::signal() => Stopped::Signal(signal),
         result = &mut http => Stopped::Http(joined(result)),
         result = &mut agents => Stopped::Agents(joined(result)),
     };
@@ -102,6 +99,53 @@ async fn until(mut stopped: watch::Receiver<bool>) {
     let _ = stopped.wait_for(|stopped| *stopped).await;
 }
 
+/// The file with the setup code, in the data directory.
+pub const SETUP_CODE_FILE: &str = "setup-code";
+
+/// Until there is a user, the setup page needs the code in `<data_dir>/setup-code`, made on
+/// the first start (readable only by the instance's user) and printed by the install script.
+/// Once there are users the file is removed.
+async fn with_setup_code(config: &SpinikusConfig, control: Control) -> anyhow::Result<Control> {
+    let path = config.data_dir.join(SETUP_CODE_FILE);
+    if !control.needs_setup().await? {
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::info!(path = %path.display(), "Removed the setup code, since Spinikus is set up"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(path = %path.display(), %error, "Failed to remove the setup code"),
+        }
+        return Ok(control);
+    }
+    let code = match std::fs::read_to_string(&path) {
+        Ok(code) if !code.trim().is_empty() => Secret::new(code.trim().to_string()),
+        Ok(_) | Err(_) => {
+            let code = Control::new_setup_code();
+            write_private(&path, code.expose())
+                .with_context(|| format!("Failed to write the setup code to {}", path.display()))?;
+            code
+        }
+    };
+    tracing::warn!(
+        code_file = %path.display(),
+        "No users yet: open /setup in the dashboard with the setup code from the file, or use `spinikus admin create-user`"
+    );
+    Ok(control.with_setup_code(code))
+}
+
+/// Writes a file only its owner can read.
+fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    file.write_all(contents.as_bytes())?;
+    file.write_all(b"\n")
+}
+
 pub async fn migrate(config: &SpinikusConfig) -> anyhow::Result<()> {
     open_database(config).await?;
     Ok(())
@@ -124,4 +168,35 @@ async fn open_database(config: &SpinikusConfig) -> anyhow::Result<SqlitePool> {
     spinikus_store::migrate(&pool).await.context("Failed to apply database migrations")?;
     tracing::info!(path = %path.display(), "Database ready");
     Ok(pool)
+}
+
+#[cfg(test)]
+mod tests {
+    use spinikus_core::{config::SpinikusConfig, secret::Secret};
+
+    use super::{SETUP_CODE_FILE, open_control, with_setup_code};
+
+    #[tokio::test]
+    async fn keeps_a_setup_code_until_there_is_a_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SpinikusConfig { data_dir: dir.path().to_path_buf(), ..Default::default() };
+        let path = dir.path().join(SETUP_CODE_FILE);
+
+        let control = with_setup_code(&config, open_control(&config).await.unwrap()).await.unwrap();
+        assert!(control.setup_code_required());
+        let code = std::fs::read_to_string(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // A restart keeps the code the install script printed.
+        let control = with_setup_code(&config, open_control(&config).await.unwrap()).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), code);
+
+        control.set_up(code.trim(), "ada@example.com", "Ada", Secret::new("correct horse battery staple")).await.unwrap();
+        let control = with_setup_code(&config, open_control(&config).await.unwrap()).await.unwrap();
+        assert!(!control.setup_code_required());
+        assert!(!path.exists(), "removed once Spinikus is set up");
+    }
 }

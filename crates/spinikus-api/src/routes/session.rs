@@ -13,15 +13,20 @@ use crate::{
 #[derive(Serialize)]
 pub struct SetupStatus {
     needs_setup: bool,
+    /// Whether setting up needs the setup code the install script printed.
+    setup_code_required: bool,
 }
 
 pub async fn setup_status(State(control): State<Control>) -> Result<Json<SetupStatus>, ApiError> {
-    Ok(Json(SetupStatus { needs_setup: control.needs_setup().await? }))
+    Ok(Json(SetupStatus { needs_setup: control.needs_setup().await?, setup_code_required: control.setup_code_required() }))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Setup {
+    /// The setup code, when the instance has one.
+    #[serde(default)]
+    setup_code: String,
     email: String,
     name: String,
     password: Secret,
@@ -29,7 +34,7 @@ pub struct Setup {
 
 /// Creates the first admin. Unauthenticated, and refused once any user exists.
 pub async fn setup(State(control): State<Control>, Body(setup): Body<Setup>) -> Result<(StatusCode, Json<User>), ApiError> {
-    let user = control.create_first_admin(&setup.email, &setup.name, setup.password).await?;
+    let user = control.set_up(&setup.setup_code, &setup.email, &setup.name, setup.password).await?;
     Ok((StatusCode::CREATED, Json(user)))
 }
 
