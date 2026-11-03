@@ -2,6 +2,8 @@
 
 A self-hosted PaaS: deploy apps from Git or images, with HTTPS, databases and backups, on your own servers.
 
+The [user guide](https://cfowlerdev.github.io/spinikus/) covers installing and using it (its source is in [`docs/guide`](docs/guide/src/SUMMARY.md)).
+
 ## Install
 
 On a Linux server with systemd (x86_64 or arm64), as root:

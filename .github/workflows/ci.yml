@@ -1,5 +1,5 @@
-# Formatting, lints, the stylesheet and the tests on every push and pull request. Tests that
-# need Docker are #[ignore]d and don't run here.
+# Formatting, lints, the stylesheet, the guide's links and the tests on every push and pull
+# request. Tests that need Docker are #[ignore]d and don't run here.
 name: CI
 
 on:
@@ -20,4 +20,5 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo xtask css --check
+      - run: cargo xtask guide
       - run: cargo test --workspace --locked

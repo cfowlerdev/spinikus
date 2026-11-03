@@ -411,9 +411,10 @@ spinikus/
 ├── Cargo.toml              # workspace, shared dependency versions and lints
 ├── rust-toolchain.toml     # pinned stable toolchain
 ├── deny.toml               # cargo-deny: licenses and advisories
-├── xtask/                  # dev tasks: the stylesheet (`cargo xtask css`), the OpenAPI document (`cargo xtask openapi`), release archives (`cargo xtask release`)
+├── xtask/                  # dev tasks: the stylesheet (`cargo xtask css`), the OpenAPI document (`cargo xtask openapi`), the user guide (`cargo xtask guide`), release archives (`cargo xtask release`)
 ├── install/install.sh      # installs and upgrades a server (control plane or agent) with systemd
-├── .github/workflows/      # CI, and releases on v* tags
+├── docs/guide/             # the user guide (mdBook), published to GitHub Pages
+├── .github/workflows/      # CI, releases on v* tags, and the guide's publishing
 └── crates/
     ├── spinikus/           # the binary: CLI, client, wiring
     ├── spinikus-proto/

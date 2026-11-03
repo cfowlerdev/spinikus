@@ -1,0 +1,40 @@
+# Publishes the user guide (docs/guide, built by `cargo xtask guide`) to GitHub Pages on
+# every push to main that changes it. The repository's Pages source must be "GitHub
+# Actions" (Settings > Pages).
+name: Guide
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs/guide/**", "xtask/**", ".github/workflows/guide.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push replaces a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo xtask guide
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: target/guide
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

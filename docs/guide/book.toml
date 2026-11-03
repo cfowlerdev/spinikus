@@ -1,0 +1,20 @@
+[book]
+title = "Spinikus Guide"
+description = "Installing and using Spinikus, a self-hosted PaaS"
+authors = ["The Spinikus contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../../target/guide"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/cfowlerdev/spinikus"
+edit-url-template = "https://github.com/cfowlerdev/spinikus/edit/main/docs/guide/{path}"
+site-url = "/spinikus/"
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.search]
+enable = true
