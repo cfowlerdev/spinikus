@@ -68,6 +68,9 @@ pub fn router(control: Control) -> Router {
         .route("/services/{id}/settings/placement", post(pages::service_settings::update_placement))
         .route("/services/{id}/settings/webhook", post(pages::service_settings::create_webhook))
         .route("/services/{id}/settings/webhook/delete", post(pages::service_settings::delete_webhook))
+        .route("/services/{id}/settings/volumes", post(pages::service_settings::create_volume))
+        .route("/volumes/{id}", post(pages::service_settings::update_volume))
+        .route("/volumes/{id}/delete", post(pages::service_settings::delete_volume))
         .route("/services/{id}/delete", post(pages::service_settings::delete))
         .route(
             "/services/{id}/variables",

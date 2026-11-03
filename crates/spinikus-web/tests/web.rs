@@ -1601,3 +1601,94 @@ async fn developers_turn_deploy_on_push_on_and_off() {
     let page = web.get(&format!("{settings}?saved=webhook"), Some(&session)).await;
     assert!(page.body.contains("Turn on deploy on push") && page.body.contains("Saved."), "{}", page.body);
 }
+
+#[tokio::test]
+async fn developers_add_and_change_volumes_and_admins_remove_them() {
+    let web = Web::new().await;
+    let (admin, _, production, service) = shop_with_team(&web).await;
+    let control = &web.control;
+    let settings = format!("/services/{}/settings", service.id);
+    let session = web.sign_in("dev%40example.com").await;
+    let page = web.get(&settings, Some(&session)).await;
+    assert!(page.body.contains("Add volume") && page.body.contains("short downtime"), "{}", page.body);
+    let token = page.csrf();
+
+    // Adding one.
+    let fields = form(&[("_csrf", &token), ("name", "uploads"), ("mount_path", "/app/uploads/")]);
+    let added = web.post(&format!("{settings}/volumes"), Some(&session), &fields).await;
+    assert_eq!(added.status, StatusCode::SEE_OTHER, "{}", added.body);
+    assert_eq!(added.header("location"), Some(format!("{settings}?saved=volumes").as_str()));
+    let volumes = control.list_volumes(&admin, service.id).await.unwrap();
+    let uploads = &volumes[0];
+    assert_eq!((uploads.name.as_str(), uploads.mount_path.as_str()), ("uploads", "/app/uploads"));
+    let page = web.get(&format!("{settings}?saved=volumes"), Some(&session)).await;
+    assert!(page.body.contains("/app/uploads") && page.body.contains("Saved."), "{}", page.body);
+    // Developers don't get the Remove button.
+    assert!(!page.body.contains(&format!("/volumes/{}/delete", uploads.id)), "{}", page.body);
+
+    // A bad one is refused with what was typed.
+    let fields = form(&[("_csrf", &token), ("name", "cache"), ("mount_path", "relative/path")]);
+    let refused = web.post(&format!("{settings}/volumes"), Some(&session), &fields).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", refused.body);
+    assert!(refused.body.contains("must be absolute") && refused.body.contains("relative/path"), "{}", refused.body);
+
+    // Changing one; a refused change keeps what was typed in its row.
+    let url = format!("/volumes/{}", uploads.id);
+    let revision = uploads.revision.to_string();
+    let fields = form(&[("_csrf", &token), ("revision", &revision), ("name", "media"), ("mount_path", "/srv/media")]);
+    let changed = web.post(&url, Some(&session), &fields).await;
+    assert_eq!(changed.status, StatusCode::SEE_OTHER, "{}", changed.body);
+    let media = control.get_volume(&admin, uploads.id).await.unwrap();
+    assert_eq!((media.name.as_str(), media.mount_path.as_str()), ("media", "/srv/media"));
+    let fields =
+        form(&[("_csrf", &token), ("revision", &media.revision.to_string()), ("name", "Bad Name"), ("mount_path", "/srv/media")]);
+    let refused = web.post(&url, Some(&session), &fields).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", refused.body);
+    assert!(refused.body.contains("value=\"Bad Name\""), "{}", refused.body);
+    // A stale revision is explained.
+    let stale = web
+        .post(
+            &url,
+            Some(&session),
+            &form(&[("_csrf", &token), ("revision", &revision), ("name", "other"), ("mount_path", "/srv/media")]),
+        )
+        .await;
+    assert!(stale.body.contains("Someone changed this"), "{}", stale.body);
+
+    // A viewer can't change them; a developer can't remove them.
+    let viewer = web.sign_in("viewer%40example.com").await;
+    let viewer_token = web.get("/", Some(&viewer)).await.csrf();
+    let fields = form(&[("_csrf", &viewer_token), ("name", "x"), ("mount_path", "/x")]);
+    assert_eq!(web.post(&format!("{settings}/volumes"), Some(&viewer), &fields).await.status, StatusCode::FORBIDDEN);
+    let removed = web.post(&format!("{url}/delete"), Some(&session), &form(&[("_csrf", &token)])).await;
+    assert_eq!(removed.status, StatusCode::FORBIDDEN, "{}", removed.body);
+
+    // An admin removes it.
+    let admin_session = web.sign_in("ada%40example.com").await;
+    let page = web.get(&settings, Some(&admin_session)).await;
+    assert!(page.body.contains(&format!("{url}/delete")), "{}", page.body);
+    let removed = web.post(&format!("{url}/delete"), Some(&admin_session), &form(&[("_csrf", &page.csrf())])).await;
+    assert_eq!(removed.status, StatusCode::SEE_OTHER, "{}", removed.body);
+    assert!(control.list_volumes(&admin, service.id).await.unwrap().is_empty());
+
+    // A database's volume is shown, not edited.
+    use spinikus_core::server::ServerFields;
+    use spinikus_store::ServerRepository;
+    control.store().get_or_create_embedded_server(ServerFields { name: "this machine".to_string() }).await.unwrap();
+    let new = spinikus_control::NewDatabase {
+        name: "DB".to_string(),
+        slug: None,
+        engine: Some(spinikus_core::database::Engine::Postgres),
+        version: None,
+        server_id: None,
+        from_backup: None,
+    };
+    let database = control.create_database(&admin, production.id, new).await.unwrap();
+    let page = web.get(&format!("/services/{}/settings", database.service.id), Some(&admin_session)).await;
+    assert!(
+        page.body.contains("Where the database keeps its data") && page.body.contains("/var/lib/postgresql"),
+        "{}",
+        page.body
+    );
+    assert!(!page.body.contains("Add volume") && !page.body.contains("/volumes/vol_"), "{}", page.body);
+}

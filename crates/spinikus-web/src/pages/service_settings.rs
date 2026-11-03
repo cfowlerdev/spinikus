@@ -1,6 +1,6 @@
-//! Creating a service with its source, and its settings: name, source, runtime, deploy on
-//! push (the webhook), placement, and deleting it. Developers create and edit services; admins delete them. Changes apply at the
-//! next deployment.
+//! Creating a service with its source, and its settings: name, source, runtime, volumes,
+//! deploy on push (the webhook), placement, and deleting it. Developers create and edit
+//! services and their volumes; admins delete them. Changes apply at the next deployment.
 
 use axum::{
     Form,
@@ -11,14 +11,15 @@ use axum::{
 use maud::{Markup, html};
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use spinikus_control::{Control, ControlError, NewService, ServiceChanges, webhooks::NewWebhook};
+use spinikus_control::{Control, ControlError, NewService, NewVolume, ServiceChanges, VolumeChanges, webhooks::NewWebhook};
 use spinikus_core::{
     environment::Environment,
-    id::ServiceId,
+    id::{ServiceId, VolumeId},
     membership::Role,
     project::Project,
     service::{Service, ServiceConfig, ServiceKind},
     source::{DeployKey, GitSource, ImageSource, Source, SourceSpec},
+    volume::Volume,
     webhook::Webhook,
 };
 
@@ -27,7 +28,7 @@ use crate::{
     auth::Signed,
     error::WebError,
     forms::{self, Input, Notice},
-    layout::{self, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, LABEL},
+    layout::{self, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT, LABEL},
 };
 
 /// The source part of a form: an image, or a Git repository.
@@ -378,6 +379,7 @@ struct Context {
     origin: String,
     file: Option<FromFile>,
     servers: Servers,
+    volumes: Vec<Volume>,
 }
 
 async fn context(control: &Control, signed: &Signed, headers: &HeaderMap, id: ServiceId) -> Result<Context, ControlError> {
@@ -405,8 +407,9 @@ async fn context(control: &Control, signed: &Signed, headers: &HeaderMap, id: Se
         false => None,
     };
     let servers = servers::choices(control, signed, service.server_id).await?;
+    let volumes = control.list_volumes(principal, id).await?;
     let origin = origin(headers);
-    Ok(Context { service, environment, project, role, source, deploy_key, webhook, origin, file, servers })
+    Ok(Context { service, environment, project, role, source, deploy_key, webhook, origin, file, servers, volumes })
 }
 
 /// How many deployments to look through for the newest build.
@@ -448,6 +451,21 @@ struct Sections<'a> {
     webhook: Notice<'a>,
     /// A webhook secret just made, shown only now.
     secret: Option<&'a str>,
+    /// The new volume form, and what to say above the volumes.
+    volumes: (VolumeForm, Notice<'a>),
+    /// A volume whose changes were refused, with what was typed.
+    editing: Option<(VolumeId, VolumeForm)>,
+}
+
+/// A volume's fields, to add one or change one.
+#[derive(Deserialize, Default)]
+pub struct VolumeForm {
+    #[serde(default)]
+    revision: Option<i64>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    mount_path: String,
 }
 
 /// Which server the service runs on.
@@ -479,6 +497,8 @@ impl<'a> Sections<'a> {
             ),
             webhook: notice("webhook"),
             secret: None,
+            volumes: (VolumeForm::default(), notice("volumes")),
+            editing: None,
         }
     }
 }
@@ -623,6 +643,7 @@ fn settings_page(signed: &Signed, context: &Context, sections: Sections<'_>) -> 
                 }
             }
             (forms::card(signed, "Runtime", Some("How the app runs. Settings that the repository's spinikus.json sets can only be changed there."), &format!("{base}/runtime"), sections.runtime.1, sections.runtime.0.fields(context.file.as_ref()), "Save runtime"))
+            (volumes_card(signed, context, &sections))
             @if let Some(servers) = &context.servers {
                 @let (form, notice) = &sections.placement;
                 (forms::card(signed, "Placement", Some("The server the next deployments run on. Volumes' data stays on the server that wrote it."),
@@ -746,6 +767,149 @@ pub async fn delete_webhook(
         }
         Err(error) => problem(error, |message| {
             settings_page(&signed, &context, Sections { webhook: Notice::Problem(message), ..Sections::of(&context, None) })
+        }),
+    }
+}
+
+/// The "Volumes" card: each volume with its name and mount path, changed in place, removed by
+/// admins, and a form to add one. A database's volumes are shown but not edited here, since
+/// its image keeps its data at a fixed path.
+fn volumes_card(signed: &Signed, context: &Context, sections: &Sections<'_>) -> Markup {
+    let database = context.service.kind == ServiceKind::Database;
+    let (new, notice) = &sections.volumes;
+    let small = format!("{INPUT} py-1 font-mono");
+    html! {
+        section id="volumes" class={ (CARD) " p-6" } {
+            h2 class="font-semibold" { "Volumes" }
+            p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400" {
+                @if database {
+                    "Where the database keeps its data, on the server it runs on."
+                } @else {
+                    "Data kept across deployments, on the server the service runs on; anything else the app writes is lost when it is redeployed. "
+                    "A service with volumes is redeployed by stopping the old container before the new one starts, so each deployment has a short downtime."
+                }
+            }
+            (notice.render())
+            @if !context.volumes.is_empty() {
+                ul class="mt-5 divide-y divide-zinc-200 rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800" {
+                    @for volume in &context.volumes {
+                        li class="px-4 py-3" {
+                            @if database {
+                                div class="flex flex-wrap gap-x-4 text-sm" {
+                                    span class="font-mono" { (volume.name) }
+                                    span class="font-mono text-zinc-500 dark:text-zinc-400" { (volume.mount_path) }
+                                }
+                            } @else {
+                                @let typed = sections.editing.as_ref().filter(|(id, _)| *id == volume.id).map(|(_, form)| form);
+                                @let name = typed.map_or(volume.name.as_str(), |form| form.name.as_str());
+                                @let path = typed.map_or(volume.mount_path.as_str(), |form| form.mount_path.as_str());
+                                div class="flex flex-wrap items-end gap-2" {
+                                    form method="post" action={ "/volumes/" (volume.id) } class="flex flex-1 flex-wrap items-end gap-2" {
+                                        (layout::csrf_field(signed))
+                                        input type="hidden" name="revision" value=(volume.revision);
+                                        div class="w-36" {
+                                            label for={ "volume-name-" (volume.id) } class="sr-only" { "Name" }
+                                            input id={ "volume-name-" (volume.id) } name="name" type="text" value=(name) required autocomplete="off" class=(small);
+                                        }
+                                        div class="min-w-48 flex-1" {
+                                            label for={ "volume-path-" (volume.id) } class="sr-only" { "Mount path" }
+                                            input id={ "volume-path-" (volume.id) } name="mount_path" type="text" value=(path) required autocomplete="off" class=(small);
+                                        }
+                                        button type="submit" class={ (BUTTON_SECONDARY) " py-1" } { "Save" }
+                                    }
+                                    @if context.role >= Role::Admin {
+                                        form method="post" action={ "/volumes/" (volume.id) "/delete" }
+                                            hx-confirm={ "Remove the volume " (volume.name) "? The next deployments go without it. Its data stays on the server." } {
+                                            (layout::csrf_field(signed))
+                                            button type="submit" class={ (BUTTON_SECONDARY) " py-1 text-red-600 dark:text-red-400" } { "Remove" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            @if !database {
+                form method="post" action={ "/services/" (context.service.id) "/settings/volumes" } class="mt-5 space-y-4" {
+                    (layout::csrf_field(signed))
+                    div class="grid gap-4 sm:grid-cols-[1fr_2fr]" {
+                        (Input::text("volume-name", "name", "Name", &new.name).required().mono().placeholder("uploads")
+                            .hint("Lowercase letters, digits and hyphens.").render())
+                        (Input::text("volume-path", "mount_path", "Mount path", &new.mount_path).required().mono().placeholder("/app/uploads")
+                            .hint("Where it appears in the container. What the image has there is hidden.").render())
+                    }
+                    button type="submit" class=(BUTTON_PRIMARY) { "Add volume" }
+                }
+            }
+        }
+    }
+}
+
+pub async fn create_volume(
+    State(control): State<Control>,
+    signed: Signed,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<VolumeForm>,
+) -> Result<Response, WebError> {
+    let context = context(&control, &signed, &headers, parse_id(&id)?).await?;
+    let new = NewVolume { name: form.name.clone(), mount_path: form.mount_path.clone() };
+    match control.create_volume(&signed.principal, context.service.id, new).await {
+        Ok(_) => Ok(redirect(&headers, &format!("/services/{}/settings?saved=volumes", context.service.id))),
+        Err(error) => problem(error, |message| {
+            let sections = Sections { volumes: (form, Notice::Problem(message)), ..Sections::of(&context, None) };
+            settings_page(&signed, &context, sections)
+        }),
+    }
+}
+
+/// Renames a volume or moves where it is mounted. Its data stays.
+pub async fn update_volume(
+    State(control): State<Control>,
+    signed: Signed,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<VolumeForm>,
+) -> Result<Response, WebError> {
+    let volume = control.get_volume(&signed.principal, parse_id(&id)?).await?;
+    let context = context(&control, &signed, &headers, volume.service_id).await?;
+    let changed = |typed: &str, current: &str| Some(typed.trim().to_string()).filter(|typed| typed != current);
+    let changes = VolumeChanges {
+        name: changed(&form.name, volume.name.as_str()),
+        mount_path: changed(&form.mount_path, volume.mount_path.as_str()),
+    };
+    let updated = match changes == VolumeChanges::default() {
+        true => Ok(volume.clone()),
+        false => control.update_volume(&signed.principal, volume.id, form.revision.unwrap_or(-1), changes).await,
+    };
+    match updated {
+        Ok(_) => Ok(redirect(&headers, &format!("/services/{}/settings?saved=volumes", context.service.id))),
+        Err(error) => problem(error, |message| {
+            let sections = Sections {
+                volumes: (VolumeForm::default(), Notice::Problem(message)),
+                editing: Some((volume.id, form)),
+                ..Sections::of(&context, None)
+            };
+            settings_page(&signed, &context, sections)
+        }),
+    }
+}
+
+pub async fn delete_volume(
+    State(control): State<Control>,
+    signed: Signed,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, WebError> {
+    let volume = control.get_volume(&signed.principal, parse_id(&id)?).await?;
+    let context = context(&control, &signed, &headers, volume.service_id).await?;
+    match control.delete_volume(&signed.principal, volume.id).await {
+        Ok(()) => Ok(redirect(&headers, &format!("/services/{}/settings?saved=volumes", context.service.id))),
+        Err(error) => problem(error, |message| {
+            let sections =
+                Sections { volumes: (VolumeForm::default(), Notice::Problem(message)), ..Sections::of(&context, None) };
+            settings_page(&signed, &context, sections)
         }),
     }
 }
