@@ -42,6 +42,9 @@ pub enum RouteAction {
     Proxy(ProxyTarget),
     /// Redirect to another hostname, keeping the path and query.
     Redirect { to: Hostname },
+    /// Proxy requests to the control plane's dashboard and API. Only the embedded server's
+    /// agent knows where they listen; other agents answer that nothing is served here.
+    Dashboard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

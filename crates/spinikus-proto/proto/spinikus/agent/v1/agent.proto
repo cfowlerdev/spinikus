@@ -465,6 +465,9 @@ message Route {
     ProxyTarget proxy = 2;
     // Redirect to this hostname, keeping the path and query.
     string redirect_to = 3;
+    // Proxy to the control plane's dashboard and API, which only the embedded server's
+    // agent can reach (always true when set).
+    bool dashboard = 4;
   }
 }
 

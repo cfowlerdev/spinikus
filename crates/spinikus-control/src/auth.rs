@@ -1,5 +1,7 @@
 //! Signing in and out, and turning a session cookie or API token into a [`Principal`].
 
+use std::net::IpAddr;
+
 use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 use spinikus_core::{
@@ -74,6 +76,21 @@ impl Principal {
 pub struct ClientInfo {
     pub user_agent: Option<String>,
     pub ip_address: Option<String>,
+}
+
+impl ClientInfo {
+    /// What a request says about its client. The address is the peer's, unless the peer is
+    /// on this machine, such as the proxy in front of the dashboard: then it is the last
+    /// address in `X-Forwarded-For`, the one that proxy got the request from (earlier ones
+    /// are whatever the client sent).
+    pub fn from_request(user_agent: Option<&str>, peer: Option<IpAddr>, forwarded_for: Option<&str>) -> Self {
+        let forwarded = || forwarded_for?.rsplit(',').next()?.trim().parse::<IpAddr>().ok();
+        let ip_address = match peer {
+            Some(peer) if peer.is_loopback() => Some(forwarded().unwrap_or(peer)),
+            peer => peer,
+        };
+        Self { user_agent: user_agent.map(str::to_string), ip_address: ip_address.map(|ip| ip.to_string()) }
+    }
 }
 
 impl Control {
@@ -187,6 +204,21 @@ mod tests {
     use crate::test_support::control;
 
     const PASSWORD: &str = "correct horse battery staple";
+
+    #[test]
+    fn believes_forwarded_addresses_only_from_this_machine() {
+        let ip = |client: ClientInfo| client.ip_address;
+        let remote = Some("203.0.113.7".parse().unwrap());
+        let local = Some("127.0.0.1".parse().unwrap());
+        let forwarded = Some("10.0.0.1, 198.51.100.2");
+
+        assert_eq!(ip(ClientInfo::from_request(None, remote, forwarded)).as_deref(), Some("203.0.113.7"));
+        assert_eq!(ip(ClientInfo::from_request(None, local, forwarded)).as_deref(), Some("198.51.100.2"));
+        assert_eq!(ip(ClientInfo::from_request(None, local, Some("not an address"))).as_deref(), Some("127.0.0.1"));
+        assert_eq!(ip(ClientInfo::from_request(None, local, None)).as_deref(), Some("127.0.0.1"));
+        assert_eq!(ClientInfo::from_request(Some("Firefox"), None, forwarded).user_agent.as_deref(), Some("Firefox"));
+        assert_eq!(ip(ClientInfo::from_request(None, None, forwarded)), None);
+    }
 
     async fn user(control: &Control, email: &str, admin: bool) -> User {
         let fields = UserFields { email: email.parse().unwrap(), name: "Ada".to_string(), admin };

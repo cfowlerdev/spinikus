@@ -97,6 +97,7 @@ fn table(set: &pb::SetRoutes) -> Vec<(&str, String)> {
             let action = match &route.action {
                 Some(pb::route::Action::Proxy(target)) => format!("{}:{}", target.deployment_id, target.port),
                 Some(pb::route::Action::RedirectTo(to)) => format!("-> {to}"),
+                Some(pb::route::Action::Dashboard(_)) => "dashboard".to_string(),
                 None => String::new(),
             };
             (route.hostname.as_str(), action)
@@ -453,6 +454,45 @@ async fn routes_follow_live_deployments_domains_and_the_base_domain() {
     assert_eq!(table(&moved[0])[1], ("web-production-shop.apps.example.com", target));
     assert!(moved[0].revision > after.revision);
     assert_eq!(elsewhere.iter().map(|set| set.routes.len()).collect::<Vec<_>>(), [0]);
+}
+
+#[tokio::test]
+async fn the_embedded_server_serves_the_dashboard_on_its_domain() {
+    use crate::settings::{BASE_DOMAIN, DASHBOARD_DOMAIN};
+
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    let embedded = control.embedded_server("local").await.unwrap();
+    let mut local = connect(control, embedded.id);
+    let mut agent = connect(control, setup.server.id);
+    let taken = NewDomain { hostname: "shop.example.com".to_string(), redirect_to: None };
+    control.create_domain(&setup.admin, setup.service.id, taken).await.unwrap();
+
+    let wildcard = control.set_setting(&setup.admin, DASHBOARD_DOMAIN, 0, json!("*.example.com")).await;
+    let an_apps = control.set_setting(&setup.admin, DASHBOARD_DOMAIN, 0, json!("shop.example.com")).await;
+    control.set_setting(&setup.admin, BASE_DOMAIN, 0, json!("example.com")).await.unwrap();
+    // It may take a generated hostname's name, which then goes to the dashboard.
+    let set = control.set_setting(&setup.admin, DASHBOARD_DOMAIN, 0, json!("Web-Production-Shop.example.com")).await.unwrap();
+    let claimed = NewDomain { hostname: "spinikus.example.org".to_string(), redirect_to: None };
+    control.set_setting(&setup.admin, DASHBOARD_DOMAIN, set.revision, json!("spinikus.example.org")).await.unwrap();
+    let dashboards = control.create_domain(&setup.admin, setup.service.id, claimed).await;
+    control
+        .set_setting(&setup.admin, DASHBOARD_DOMAIN, set.revision + 1, json!("web-production-shop.example.com"))
+        .await
+        .unwrap();
+    let live = deploy(&setup, &mut agent).await;
+    control.advance_deployments().await;
+    let (_, local_routes) = received(&mut local);
+    let (_, app_routes) = received(&mut agent);
+
+    assert!(matches!(wildcard, Err(ControlError::Invalid { field: "value", .. })), "{wildcard:?}");
+    assert!(matches!(an_apps, Err(ControlError::Conflict { entity: "domain", .. })), "{an_apps:?}");
+    assert_eq!(set.value, json!("web-production-shop.example.com"));
+    assert!(matches!(dashboards, Err(ControlError::Invalid { field: "hostname", .. })), "{dashboards:?}");
+    assert_eq!(table(local_routes.last().unwrap()), [("web-production-shop.example.com", "dashboard".to_string())]);
+    assert_eq!(table(app_routes.last().unwrap()), [("shop.example.com", format!("{}:3000", live.id))]);
+    let hostnames: Vec<_> = control.build_routes().await.unwrap().into_values().flatten().map(|route| route.hostname).collect();
+    assert_eq!(hostnames.len(), 2, "{hostnames:?}");
 }
 
 #[tokio::test]

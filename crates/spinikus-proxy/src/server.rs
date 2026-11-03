@@ -148,10 +148,19 @@ impl Proxy {
                 let port = host_str.strip_prefix(name).unwrap_or("");
                 return redirect(&format!("{}://{to}{port}", scheme.as_str()), &request);
             }
-            Some(RouteAction::Proxy(target)) => target.clone(),
+            Some(RouteAction::Proxy(target)) => Some(target.clone()),
+            Some(RouteAction::Dashboard) => None,
         };
-        let Some(upstream) = self.upstreams.resolve(&target).await else {
-            return text(StatusCode::SERVICE_UNAVAILABLE, "the app is not running");
+        drop(routes);
+        let upstream = match &target {
+            Some(target) => match self.upstreams.resolve(target).await {
+                Some(upstream) => upstream,
+                None => return text(StatusCode::SERVICE_UNAVAILABLE, "the app is not running"),
+            },
+            None => match self.upstreams.dashboard() {
+                Some(upstream) => upstream,
+                None => return text(StatusCode::NOT_FOUND, &format!("the dashboard is not served at {name} on this server")),
+            },
         };
 
         let upgrade = is_upgrade(request.headers());
@@ -160,6 +169,10 @@ impl Proxy {
         let mut response = match self.client.request(request).await {
             Ok(response) => response,
             Err(error) => {
+                let Some(target) = target else {
+                    tracing::warn!(%error, %upstream, "the dashboard did not answer");
+                    return text(StatusCode::BAD_GATEWAY, "the dashboard is not reachable");
+                };
                 if error.is_connect() {
                     self.upstreams.failed(&target, upstream);
                 }

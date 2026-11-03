@@ -4,6 +4,8 @@
 //! ACME HTTP-01 challenges over HTTP, and redirects HTTP to HTTPS for hosts with a
 //! certificate.
 //!
+//! The control plane's own server also serves the dashboard on its domain, if one is set.
+//!
 //! The proxy knows routes, not containers: [`Upstreams`] tells it where a deployment's
 //! container listens, which the agent answers from the container runtime.
 
@@ -30,4 +32,10 @@ pub trait Upstreams: Send + Sync + 'static {
     /// Connecting to `address` for the target failed, so it may have moved, such as after
     /// the container restarted.
     fn failed(&self, target: &ProxyTarget, address: SocketAddr);
+
+    /// Where the control plane's dashboard listens, for dashboard routes: only on the
+    /// control plane's own server.
+    fn dashboard(&self) -> Option<SocketAddr> {
+        None
+    }
 }

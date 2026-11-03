@@ -7,6 +7,9 @@
 //! draining deployment is stopped only once its server's agent has applied a table that no
 //! longer routes to it, so no request reaches a stopping container. The certificates of the
 //! routed hostnames follow the same way ([`Control::sync_certificates`]).
+//!
+//! The `dashboard_domain` setting adds a route on the embedded server to the control
+//! plane's own dashboard and API, which gets its certificate like any other.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -58,6 +61,17 @@ impl Control {
             }
         }
 
+        // The dashboard's domain goes first and wins over any app's: only the embedded
+        // server's agent can reach the dashboard.
+        let mut claimed = HashSet::new();
+        if let Some(hostname) = self.dashboard_domain().await?
+            && let Some(server) = self.store().find_embedded_server().await?
+            && let Some(table) = tables.get_mut(&server.id)
+        {
+            claimed.insert(hostname.clone());
+            table.push(Route { hostname, action: RouteAction::Dashboard });
+        }
+
         let generated = self.generated_hostnames().await?;
         let mut domains: HashMap<ServiceId, Vec<_>> = HashMap::new();
         for domain in self.store().list_all_domains().await? {
@@ -65,7 +79,6 @@ impl Control {
         }
         // Domains are unique, but a domain added before the base domain changed can have a
         // generated hostname's name: the domain wins.
-        let mut claimed = HashSet::new();
         let mut live = Vec::new();
         for deployment in self.store().list_live_deployments().await? {
             let Some(port) = settings(&deployment).ok().and_then(|settings| settings.port) else {
@@ -83,8 +96,9 @@ impl Control {
                     },
                     None => RouteAction::Proxy(target.clone()),
                 };
-                claimed.insert(domain.hostname.clone());
-                table.push(Route { hostname: domain.hostname.clone(), action });
+                if claimed.insert(domain.hostname.clone()) {
+                    table.push(Route { hostname: domain.hostname.clone(), action });
+                }
             }
             live.push((deployment.server_id, target));
         }
@@ -153,6 +167,7 @@ fn set_routes(stored: &StoredRoutes) -> pb::ControlMessage {
                     port: target.port.into(),
                 }),
                 RouteAction::Redirect { to } => pb::route::Action::RedirectTo(to.to_string()),
+                RouteAction::Dashboard => pb::route::Action::Dashboard(true),
             }),
         })
         .collect();

@@ -1177,6 +1177,11 @@ async fn instance_admins_change_the_general_settings() {
     let bad_count = web.post("/settings/general/releases", Some(&ada), &releases("many")).await;
     let count = web.post("/settings/general/releases", Some(&ada), &releases("3")).await;
     let by_dev = web.post("/settings/general/domains", Some(&dev), &domains("x.example.com", "1")).await;
+    let dashboard = |domain: &str, revision: &str| {
+        form(&[("_csrf", &token), ("dashboard_domain", domain), ("dashboard_domain_revision", revision)])
+    };
+    let wildcard = web.post("/settings/general/dashboard", Some(&ada), &dashboard("*.example.com", "0")).await;
+    let dashboard_saved = web.post("/settings/general/dashboard", Some(&ada), &dashboard("spinikus.example.com", "0")).await;
 
     assert_eq!(saved.header("location"), Some("/settings/general?saved=domains"));
     assert_eq!(stale.status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -1186,7 +1191,11 @@ async fn instance_admins_change_the_general_settings() {
     assert_eq!(bad_count.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(count.status, StatusCode::SEE_OTHER);
     assert_eq!(by_dev.status, StatusCode::FORBIDDEN);
+    assert_eq!(wildcard.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(wildcard.body.contains("not a wildcard") && wildcard.body.contains("*.example.com"), "{}", wildcard.body);
+    assert_eq!(dashboard_saved.header("location"), Some("/settings/general?saved=dashboard"));
     let setting = |key| web.control.get_setting(&admin, key);
+    assert_eq!(setting("dashboard_domain").await.unwrap().value, "spinikus.example.com");
     assert_eq!(setting("base_domain").await.unwrap().value, "apps.example.com");
     assert_eq!(setting("releases_kept").await.unwrap().value, 3);
     // The directory was saved before the email was refused; the default it was given is no change.

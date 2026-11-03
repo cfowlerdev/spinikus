@@ -4,12 +4,15 @@ use std::net::SocketAddr;
 
 use axum::{
     extract::{ConnectInfo, FromRequest, FromRequestParts, Request, rejection::JsonRejection},
-    http::{StatusCode, header, request::Parts},
+    http::{HeaderName, HeaderValue, StatusCode, header, request::Parts},
 };
 use serde::de::DeserializeOwned;
 use spinikus_control::{ClientInfo, Control, ControlError, Principal};
 
 use crate::error::ApiError;
+
+/// Set by the proxy in front of Spinikus; believed only from this machine ([`ClientInfo::from_request`]).
+const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 
 /// A JSON request body.
 pub struct Body<T>(pub T);
@@ -132,8 +135,8 @@ impl<S: Send + Sync> FromRequestParts<S> for Client {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        let user_agent = parts.headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()).map(str::to_string);
-        let ip_address = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(address)| address.ip().to_string());
-        Ok(Self(ClientInfo { user_agent, ip_address }))
+        let header = |name: HeaderName| parts.headers.get(name).and_then(|value: &HeaderValue| value.to_str().ok());
+        let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(address)| address.ip());
+        Ok(Self(ClientInfo::from_request(header(header::USER_AGENT), peer, header(X_FORWARDED_FOR))))
     }
 }

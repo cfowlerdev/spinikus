@@ -2,8 +2,8 @@
 //! known keys exist, each with a default and its own validation.
 
 use serde_json::{Value, json};
-use spinikus_core::{route::BaseDomain, setting::Setting};
-use spinikus_store::SettingRepository;
+use spinikus_core::{domain::Hostname, route::BaseDomain, setting::Setting};
+use spinikus_store::{DomainRepository, SettingRepository};
 
 use crate::{Control, ControlError, Principal, access::not_found};
 
@@ -12,6 +12,11 @@ pub const BASE_DOMAIN: &str = "base_domain";
 
 /// `localhost` names resolve to this machine without any DNS, which suits a first start.
 pub const DEFAULT_BASE_DOMAIN: &str = "localhost";
+
+/// The hostname the control plane's own server serves the dashboard and API on, through
+/// its proxy, with a certificate like any routed hostname. `null`, the default, serves
+/// them only on `[http] listen`.
+pub const DASHBOARD_DOMAIN: &str = "dashboard_domain";
 
 /// The contact email for the ACME account that gets HTTPS certificates. Setting it agrees
 /// to the CA's terms of service; `null`, the default, turns getting certificates off.
@@ -35,6 +40,7 @@ pub const MAX_RELEASES_KEPT: u64 = 100;
 fn default(key: &str) -> Option<Value> {
     match key {
         BASE_DOMAIN => Some(json!(DEFAULT_BASE_DOMAIN)),
+        DASHBOARD_DOMAIN => Some(Value::Null),
         ACME_EMAIL => Some(Value::Null),
         ACME_DIRECTORY_URL => Some(json!(DEFAULT_ACME_DIRECTORY_URL)),
         RELEASES_KEPT => Some(json!(DEFAULT_RELEASES_KEPT)),
@@ -61,6 +67,18 @@ fn check(key: &str, value: Value) -> Result<Value, ControlError> {
                 Ok(json!(domain))
             }
             _ => Err(invalid("give a domain such as `apps.example.com`, or null".to_string())),
+        },
+        DASHBOARD_DOMAIN => match value {
+            Value::Null => Ok(Value::Null),
+            Value::String(name) => {
+                let hostname: Hostname =
+                    name.trim().parse().map_err(|error: spinikus_core::domain::HostnameError| invalid(error.to_string()))?;
+                if hostname.is_wildcard() {
+                    return Err(invalid("give one hostname, such as `spinikus.example.com`, not a wildcard".to_string()));
+                }
+                Ok(json!(hostname))
+            }
+            _ => Err(invalid("give a hostname such as `spinikus.example.com`, or null".to_string())),
         },
         ACME_EMAIL => match value {
             Value::Null => Ok(Value::Null),
@@ -105,10 +123,18 @@ impl Control {
         }
         default(key).ok_or_else(|| not_found("setting", key))?;
         let value = check(key, value)?;
+        if key == DASHBOARD_DOMAIN
+            && let Value::String(name) = &value
+        {
+            let hostname: Hostname = name.parse().map_err(|error| ControlError::internal("reading a checked hostname", error))?;
+            if self.store().find_domain_by_hostname(&hostname).await?.is_some() {
+                return Err(ControlError::Conflict { entity: "domain", field: "hostname", value: hostname.to_string() });
+            }
+        }
         let setting = self.store().put_setting(key, &value, revision).await?;
         self.audit_by(principal, "setting.update", key, None, json!({})).await?;
-        // The base domain changes generated hostnames, so the routes, and the ACME settings
-        // which certificates to get.
+        // The base and dashboard domains change the routes, and the ACME settings which
+        // certificates to get.
         self.wake_deployments();
         self.wake_certificates();
         Ok(setting)
@@ -144,6 +170,12 @@ impl Control {
             ControlError::internal("reading releases_kept", std::io::Error::other(format!("not a count: {value}")))
         })?;
         Ok(count as usize)
+    }
+
+    /// The dashboard's own hostname, or `None` if it has none.
+    pub(crate) async fn dashboard_domain(&self) -> Result<Option<Hostname>, ControlError> {
+        let value = self.setting(DASHBOARD_DOMAIN).await?.value;
+        serde_json::from_value(value).map_err(|error| ControlError::internal("reading the dashboard domain", error))
     }
 
     /// The base domain, or `None` if generated hostnames are off.

@@ -218,7 +218,8 @@ data_dir = "$DATA_DIR"
 level = "info"
 
 [http]
-# The dashboard and API. Put HTTPS in front of it, or reach it over a private network.
+# The dashboard and API, over plain HTTP. Set a dashboard domain in Settings > General to
+# serve them over HTTPS through the proxy, then this can be 127.0.0.1:8080.
 listen = "$http_listen"
 
 [agents]
@@ -340,6 +341,7 @@ EOF
         say "Spinikus is running: http://$host:$port/"
     fi
     echo "    Open ports 80 and 443 for apps, $port for the dashboard, and 8443 for other servers' agents."
+    echo "    For HTTPS, set a dashboard domain in Settings > General."
     echo "    Logs: journalctl -u $unit -f"
 }
 

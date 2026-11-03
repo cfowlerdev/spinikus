@@ -73,7 +73,8 @@ pub async fn proxy_listeners(config: &SpinikusConfig) -> anyhow::Result<Option<P
         })
     };
     let (http, https) = (config.proxy.listen, config.proxy.https_listen);
-    let listeners = ProxyListeners { http: bind(http, "listen").await?, https: Some(bind(https, "https_listen").await?) };
+    let listeners =
+        ProxyListeners { http: bind(http, "listen").await?, https: Some(bind(https, "https_listen").await?), dashboard: None };
     tracing::info!(%http, %https, "The proxy serves apps");
     Ok(Some(listeners))
 }

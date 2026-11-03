@@ -52,7 +52,7 @@ fn start_agent_with(
         facts: spinikus_agent::server_facts(),
         backoff: Backoff::new(Duration::from_millis(50), Duration::from_millis(200)),
         runtime,
-        proxy: proxy.map(|http| ProxyListeners { http, https: None }),
+        proxy: proxy.map(|http| ProxyListeners { http, https: None, dashboard: None }),
         local_repositories: true,
         backups: Default::default(),
     };

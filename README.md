@@ -12,6 +12,10 @@ curl -fsSL https://github.com/cfowlerdev/spinikus/releases/latest/download/insta
 
 It installs Docker, git and Railpack if they are missing, runs Spinikus as the `spinikus` systemd service, and prints the URL to create the first admin, with a one-time setup code. Run it again to upgrade. Other servers are added from the dashboard (Settings → Servers), which gives the command that installs and enrolls their agent. See the comments at the top of [`install/install.sh`](install/install.sh) for its options.
 
+### The dashboard on its own domain
+
+The dashboard starts on port 8080 over plain HTTP. To serve it over HTTPS, point a DNS record such as `spinikus.example.com` at the server, then in Settings → General set the dashboard domain, and an email under HTTPS certificates. The proxy gets a certificate for it and serves the dashboard and the API at `https://spinikus.example.com`. Then you can close port 8080, or set `[http] listen = "127.0.0.1:8080"` in `/etc/spinikus/spinikus.toml` and restart Spinikus.
+
 ### Back up and restore
 
 `spinikus admin backup` writes the database and the master key to one file encrypted with a passphrase (it asks for one, or reads `SPINIKUS_BACKUP_PASSPHRASE`). It works while Spinikus runs:

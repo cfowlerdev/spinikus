@@ -1,6 +1,7 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::Context;
+use spinikus_agent::ProxyListeners;
 use spinikus_control::Control;
 use spinikus_core::{config::SpinikusConfig, secret::Secret};
 use spinikus_store::SqliteStore;
@@ -9,6 +10,16 @@ use tokio::{net::TcpListener, sync::watch};
 
 use crate::{cli::ServerRunArgs, secrets};
 
+/// Where to connect to a listener on this machine: its own address, or loopback for one
+/// bound to every address.
+fn loopback(address: SocketAddr) -> SocketAddr {
+    match address.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => SocketAddr::from((Ipv4Addr::LOCALHOST, address.port())),
+        IpAddr::V6(ip) if ip.is_unspecified() => SocketAddr::from((Ipv6Addr::LOCALHOST, address.port())),
+        _ => address,
+    }
+}
+
 pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result<()> {
     let _lock = lock_instance(config)?;
     let control = with_setup_code(config, open_control(config).await?).await?;
@@ -16,6 +27,7 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
     let http_address = args.listen.unwrap_or(config.http.listen);
     let agent_address = args.agent_listen.unwrap_or(config.agents.listen);
     let http_listener = TcpListener::bind(http_address).await.with_context(|| format!("Failed to listen on {http_address}"))?;
+    let http_listener_address = http_listener.local_addr().context("Failed to read the HTTP listener's address")?;
     let agent_listener =
         TcpListener::bind(agent_address).await.with_context(|| format!("Failed to listen for agents on {agent_address}"))?;
 
@@ -26,7 +38,10 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
         .with_graceful_shutdown(until(stopped.clone()));
     let agent_address = agent_listener.local_addr().context("Failed to read the agent listener's address")?;
     let proxy = match config.agents.embedded {
-        true => crate::agent::proxy_listeners(config).await?,
+        // The embedded agent's proxy serves the dashboard on its domain, if one is set.
+        true => crate::agent::proxy_listeners(config)
+            .await?
+            .map(|listeners| ProxyListeners { dashboard: Some(loopback(http_listener_address)), ..listeners }),
         false => None,
     };
     let embedded = config.agents.embedded.then(|| {
@@ -208,7 +223,15 @@ pub(crate) async fn open_database(config: &SpinikusConfig) -> anyhow::Result<Sql
 mod tests {
     use spinikus_core::{config::SpinikusConfig, secret::Secret};
 
-    use super::{SETUP_CODE_FILE, open_control, with_setup_code};
+    use super::{SETUP_CODE_FILE, loopback, open_control, with_setup_code};
+
+    #[test]
+    fn connects_to_any_address_listeners_over_loopback() {
+        let address = |value: &str| value.parse::<std::net::SocketAddr>().unwrap();
+        assert_eq!(loopback(address("0.0.0.0:8080")), address("127.0.0.1:8080"));
+        assert_eq!(loopback(address("[::]:8080")), address("[::1]:8080"));
+        assert_eq!(loopback(address("10.0.0.5:8080")), address("10.0.0.5:8080"));
+    }
 
     #[tokio::test]
     async fn keeps_a_setup_code_until_there_is_a_user() {

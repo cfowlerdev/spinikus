@@ -30,6 +30,7 @@ use tokio::{
 struct FixedUpstreams {
     addresses: Mutex<HashMap<DeploymentId, SocketAddr>>,
     failed: Mutex<Vec<SocketAddr>>,
+    dashboard: Mutex<Option<SocketAddr>>,
 }
 
 #[async_trait]
@@ -40,6 +41,10 @@ impl Upstreams for FixedUpstreams {
 
     fn failed(&self, _: &ProxyTarget, address: SocketAddr) {
         self.failed.lock().unwrap().push(address);
+    }
+
+    fn dashboard(&self) -> Option<SocketAddr> {
+        *self.dashboard.lock().unwrap()
     }
 }
 
@@ -183,6 +188,26 @@ async fn forwards_by_host_with_forwarding_headers() {
     assert_eq!(status, 200);
     assert_eq!(body, "path=/a?b=c host=App.Example.com:8000 xff=127.0.0.1 xfh=App.Example.com:8000 xfp=http te=");
     assert!(!head.contains("keep-alive: timeout"), "{head}");
+}
+
+#[tokio::test]
+async fn forwards_the_dashboard_only_where_it_listens() {
+    let running = start().await;
+    let backend = backend().await;
+    let route = Route { hostname: "spinikus.example.com".parse().unwrap(), action: RouteAction::Dashboard };
+    running.proxy.set_routes(&[route]);
+
+    let (elsewhere, _, message) = get(running.address, "spinikus.example.com", "/", "").await;
+    *running.upstreams.dashboard.lock().unwrap() = Some(backend);
+    let (status, _, body) = get(running.address, "spinikus.example.com", "/login", "").await;
+    *running.upstreams.dashboard.lock().unwrap() = Some(TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap());
+    let (down, _, _) = get(running.address, "spinikus.example.com", "/", "").await;
+
+    assert_eq!((elsewhere, message.as_str()), (404, "the dashboard is not served at spinikus.example.com on this server\n"));
+    assert_eq!(status, 200);
+    assert_eq!(body, "path=/login host=spinikus.example.com xff=127.0.0.1 xfh=spinikus.example.com xfp=http te=");
+    assert_eq!(down, 502);
+    assert!(running.upstreams.failed.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

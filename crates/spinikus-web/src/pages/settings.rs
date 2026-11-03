@@ -12,7 +12,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use spinikus_control::{
     Control, ControlError,
-    settings::{ACME_DIRECTORY_URL, ACME_EMAIL, BASE_DOMAIN, DEFAULT_ACME_DIRECTORY_URL, MAX_RELEASES_KEPT, RELEASES_KEPT},
+    settings::{
+        ACME_DIRECTORY_URL, ACME_EMAIL, BASE_DOMAIN, DASHBOARD_DOMAIN, DEFAULT_ACME_DIRECTORY_URL, MAX_RELEASES_KEPT,
+        RELEASES_KEPT,
+    },
 };
 use spinikus_core::setting::Setting;
 
@@ -80,6 +83,10 @@ pub struct GeneralForm {
     #[serde(default)]
     base_domain_revision: i64,
     #[serde(default)]
+    dashboard_domain: String,
+    #[serde(default)]
+    dashboard_domain_revision: i64,
+    #[serde(default)]
     acme_email: String,
     #[serde(default)]
     acme_email_revision: i64,
@@ -113,11 +120,18 @@ fn or_null(value: &str) -> Value {
 impl GeneralForm {
     async fn load(control: &Control, signed: &Signed) -> Result<Self, ControlError> {
         let get = |key| control.get_setting(&signed.principal, key);
-        let (base_domain, acme_email, acme_directory_url, releases_kept) =
-            (get(BASE_DOMAIN).await?, get(ACME_EMAIL).await?, get(ACME_DIRECTORY_URL).await?, get(RELEASES_KEPT).await?);
+        let (base_domain, dashboard_domain, acme_email, acme_directory_url, releases_kept) = (
+            get(BASE_DOMAIN).await?,
+            get(DASHBOARD_DOMAIN).await?,
+            get(ACME_EMAIL).await?,
+            get(ACME_DIRECTORY_URL).await?,
+            get(RELEASES_KEPT).await?,
+        );
         Ok(Self {
             base_domain: text(&base_domain),
             base_domain_revision: base_domain.revision,
+            dashboard_domain: text(&dashboard_domain),
+            dashboard_domain_revision: dashboard_domain.revision,
             acme_email: text(&acme_email),
             acme_email_revision: acme_email.revision,
             acme_directory_url: text(&acme_directory_url),
@@ -131,6 +145,7 @@ impl GeneralForm {
     fn section(&self, section: Section) -> Result<Vec<(&'static str, i64, Value)>, ControlError> {
         Ok(match section {
             Section::Domains => vec![(BASE_DOMAIN, self.base_domain_revision, or_null(&self.base_domain))],
+            Section::Dashboard => vec![(DASHBOARD_DOMAIN, self.dashboard_domain_revision, or_null(&self.dashboard_domain))],
             Section::Https => {
                 let directory = match self.acme_directory_url.trim() {
                     "" => json!(DEFAULT_ACME_DIRECTORY_URL),
@@ -159,6 +174,14 @@ impl GeneralForm {
         }
     }
 
+    fn dashboard_fields(&self) -> Markup {
+        html! {
+            (Input::text("settings-dashboard-domain", "dashboard_domain", "Domain", &self.dashboard_domain).mono().placeholder("spinikus.example.com")
+                .hint("Point its DNS at the server Spinikus runs on. Leave it empty to serve the dashboard only at the address Spinikus listens on.").render())
+            input type="hidden" name="dashboard_domain_revision" value=(self.dashboard_domain_revision);
+        }
+    }
+
     fn https_fields(&self) -> Markup {
         html! {
             (Input::text("settings-acme-email", "acme_email", "Email", &self.acme_email).kind("email").placeholder("ops@example.com")
@@ -183,6 +206,7 @@ impl GeneralForm {
 #[serde(rename_all = "snake_case")]
 pub enum Section {
     Domains,
+    Dashboard,
     Https,
     Releases,
 }
@@ -191,6 +215,7 @@ impl Section {
     fn as_str(self) -> &'static str {
         match self {
             Section::Domains => "domains",
+            Section::Dashboard => "dashboard",
             Section::Https => "https",
             Section::Releases => "releases",
         }
@@ -210,7 +235,11 @@ pub async fn general(
     require_admin(&signed)?;
     let form = GeneralForm::load(&control, &signed).await?;
     let notice = |section: Section| if saved.as_deref() == Some(section.as_str()) { Notice::Saved } else { Notice::None };
-    Ok(general_page(&signed, &form, [notice(Section::Domains), notice(Section::Https), notice(Section::Releases)]))
+    Ok(general_page(
+        &signed,
+        &form,
+        [notice(Section::Domains), notice(Section::Dashboard), notice(Section::Https), notice(Section::Releases)],
+    ))
 }
 
 pub async fn update_general(
@@ -235,6 +264,7 @@ pub async fn update_general(
             let mut shown = GeneralForm::load(&control, &signed).await?;
             match section {
                 Section::Domains => shown.base_domain = form.base_domain.clone(),
+                Section::Dashboard => shown.dashboard_domain = form.dashboard_domain.clone(),
                 Section::Https => {
                     shown.acme_email = form.acme_email.clone();
                     shown.acme_directory_url = form.acme_directory_url.clone();
@@ -243,17 +273,23 @@ pub async fn update_general(
             }
             problem(error, |message| {
                 let notice = |of| if of == section { Notice::Problem(message) } else { Notice::None };
-                general_page(&signed, &shown, [notice(Section::Domains), notice(Section::Https), notice(Section::Releases)])
+                general_page(
+                    &signed,
+                    &shown,
+                    [notice(Section::Domains), notice(Section::Dashboard), notice(Section::Https), notice(Section::Releases)],
+                )
             })
         }
     }
 }
 
-fn general_page(signed: &Signed, form: &GeneralForm, [domains, https, releases]: [Notice<'_>; 3]) -> Markup {
+fn general_page(signed: &Signed, form: &GeneralForm, [domains, dashboard, https, releases]: [Notice<'_>; 4]) -> Markup {
     let content = html! {
         (tabs(signed, SettingsTab::General))
         div class="max-w-2xl space-y-6" {
             (forms::card(signed, "Generated hostnames", None, "/settings/general/domains", domains, form.domains_fields(), "Save"))
+            (forms::card(signed, "Dashboard domain", Some("Serves this dashboard and the API on their own domain, through the proxy on the server Spinikus runs on, with HTTPS once certificates are on."),
+                "/settings/general/dashboard", dashboard, form.dashboard_fields(), "Save"))
             (forms::card(signed, "HTTPS certificates", Some("Certificates from an ACME certificate authority for every public hostname, renewed automatically."),
                 "/settings/general/https", https, form.https_fields(), "Save"))
             (forms::card(signed, "Old releases", None, "/settings/general/releases", releases, form.releases_fields(), "Save"))

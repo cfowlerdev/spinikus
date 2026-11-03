@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use axum::{
     body::{Body, to_bytes},
     extract::{ConnectInfo, FromRequestParts, Request},
-    http::{HeaderMap, HeaderValue, Method, header, request::Parts},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -19,6 +19,9 @@ use sha2::{Digest, Sha256};
 use spinikus_control::{ClientInfo, Control, ControlError, Principal, auth::SESSION_LIFETIME};
 
 use crate::error::WebError;
+
+/// Set by the proxy in front of Spinikus; believed only from this machine ([`ClientInfo::from_request`]).
+const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 
 pub const SESSION_COOKIE: &str = "spinikus_session";
 /// The form field that carries the CSRF token.
@@ -105,9 +108,9 @@ impl<S: Send + Sync> FromRequestParts<S> for Client {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        let user_agent = parts.headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()).map(str::to_string);
-        let ip_address = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(address)| address.ip().to_string());
-        Ok(Self(ClientInfo { user_agent, ip_address }))
+        let header = |name: HeaderName| parts.headers.get(name).and_then(|value: &HeaderValue| value.to_str().ok());
+        let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(address)| address.ip());
+        Ok(Self(ClientInfo::from_request(header(header::USER_AGENT), peer, header(X_FORWARDED_FOR))))
     }
 }
 

@@ -7,7 +7,7 @@
 //! serves for the agent's whole run, from the saved routes and certificates until new
 //! ones arrive.
 
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 
 use jiff::Timestamp;
 use rcgen::{CertificateParams, KeyPair};
@@ -65,6 +65,9 @@ pub struct ProxyListeners {
     pub http: TcpListener,
     /// Where HTTPS is served, or `None` for plain HTTP only.
     pub https: Option<TcpListener>,
+    /// Where the control plane's dashboard listens, for its domain's route: only the
+    /// embedded agent, beside the control plane, has one.
+    pub dashboard: Option<SocketAddr>,
 }
 
 /// Keeps the agent connected until `shutdown` resolves. Returns an error only for what
@@ -82,9 +85,9 @@ pub async fn run(files: &AgentFiles, options: RunOptions, shutdown: impl Future<
     };
     let mut serving = vec![tokio::spawn(crate::housekeeping::run(runtime.clone(), stopped()))];
     let mut served = None;
-    if let Some(ProxyListeners { http, https }) = proxy {
+    if let Some(ProxyListeners { http, https, dashboard }) = proxy {
         let https_port = https.as_ref().and_then(|listener| listener.local_addr().ok()).map(|address| address.port());
-        let proxy = spinikus_proxy::Proxy::new(Arc::new(RuntimeUpstreams::new(runtime.clone())), https_port);
+        let proxy = spinikus_proxy::Proxy::new(Arc::new(RuntimeUpstreams::new(runtime.clone(), dashboard)), https_port);
         serving.push(tokio::spawn(spinikus_proxy::serve(proxy.clone(), http, stopped())));
         if let Some(https) = https {
             serving.push(tokio::spawn(spinikus_proxy::serve_tls(proxy.clone(), https, stopped())));

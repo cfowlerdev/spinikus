@@ -138,6 +138,7 @@ fn route(route: pb::Route) -> Option<Route> {
                 return None;
             }
         },
+        Some(pb::route::Action::Dashboard(_)) => RouteAction::Dashboard,
         None => {
             skip("no action");
             return None;
@@ -148,14 +149,16 @@ fn route(route: pb::Route) -> Option<Route> {
 
 /// Finds a deployment's running container and the loopback port its app port is
 /// published on, remembering it until connecting there fails.
+/// The dashboard is at a fixed address, if this agent runs beside the control plane.
 pub(crate) struct RuntimeUpstreams {
     runtime: Arc<dyn ContainerRuntime>,
     known: std::sync::Mutex<HashMap<DeploymentId, SocketAddr>>,
+    dashboard: Option<SocketAddr>,
 }
 
 impl RuntimeUpstreams {
-    pub(crate) fn new(runtime: Arc<dyn ContainerRuntime>) -> Self {
-        Self { runtime, known: Default::default() }
+    pub(crate) fn new(runtime: Arc<dyn ContainerRuntime>, dashboard: Option<SocketAddr>) -> Self {
+        Self { runtime, known: Default::default(), dashboard }
     }
 
     fn known(&self) -> std::sync::MutexGuard<'_, HashMap<DeploymentId, SocketAddr>> {
@@ -189,6 +192,10 @@ impl Upstreams for RuntimeUpstreams {
         if known.get(&target.deployment_id) == Some(&address) {
             known.remove(&target.deployment_id);
         }
+    }
+
+    fn dashboard(&self) -> Option<SocketAddr> {
+        self.dashboard
     }
 }
 
@@ -282,7 +289,7 @@ mod tests {
         let container = runtime.create(&spec).await.unwrap();
         let address: SocketAddr = "127.0.0.1:49152".parse().unwrap();
         runtime.set_endpoint(address);
-        let upstreams = RuntimeUpstreams::new(runtime.clone());
+        let upstreams = RuntimeUpstreams::new(runtime.clone(), None);
         let target = ProxyTarget { service_id: service, deployment_id: deployment, port: 3000 };
 
         let before_start = upstreams.resolve(&target).await;
