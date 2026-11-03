@@ -98,6 +98,16 @@ pub async fn rollback(
     Ok(located(format!("/api/v1/deployments/{}", deployment.id), deployment))
 }
 
+/// Restarts the service's live container, answering with its live deployment once the
+/// agent has.
+pub async fn restart(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+) -> Result<Json<Deployment>, ApiError> {
+    Ok(Json(control.restart_service(&principal, service_id).await?))
+}
+
 /// Follows the deployment as server-sent events: `log` events (a line each, with the byte
 /// offset after it as the event ID), a `status` event first and on every change, and `end`
 /// (with the final status) once it is live or has finished. `Last-Event-ID` resumes after that offset.

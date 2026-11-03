@@ -200,6 +200,8 @@ async fn handle(control: &Control, server: ServerId, message: AgentMessage) -> R
         agent_message::Message::CommandResult(result) => {
             if crate::backups::is_backup_command(&result.command_id) {
                 control.backup_result(server, result).await;
+            } else if crate::restarts::is_restart_command(&result.command_id) {
+                control.restart_result(server, result);
             } else {
                 control.deployment_result(server, result).await;
             }

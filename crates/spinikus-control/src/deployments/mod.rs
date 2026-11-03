@@ -7,7 +7,7 @@
 //! replaced), and the server it runs on (the service's placement, or the embedded server). Later edits to the service never change it.
 
 mod cleanup;
-mod commands;
+pub(crate) mod commands;
 pub(crate) mod logs;
 mod routes;
 mod runner;

@@ -19,6 +19,7 @@ pub mod page;
 pub mod password;
 mod previews;
 pub mod projects;
+pub mod restarts;
 pub mod servers;
 pub mod service_logs;
 pub mod services;
@@ -75,6 +76,7 @@ pub struct Control {
     certificates: Arc<certificates::Certificates>,
     logs: Arc<deployments::logs::DeploymentLogs>,
     sessions: Arc<service_logs::Sessions>,
+    restarts: Arc<restarts::Restarts>,
     backups: Arc<backups::Backups>,
     /// Held while a pull request's preview is made, updated or removed, since each service's
     /// webhook gets the same events.
@@ -99,6 +101,7 @@ impl Control {
             certificates,
             logs,
             sessions,
+            restarts: Arc::default(),
             backups,
             previews: Arc::default(),
             setup_code: None,

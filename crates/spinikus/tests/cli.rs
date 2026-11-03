@@ -220,6 +220,15 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
     );
     assert_eq!(failed.stdout, "");
 
+    // Restarting what runs, through the agent; one with nothing live is refused.
+    let restarted = cli(&["restart"]).await;
+    assert_eq!(restarted.code, 0, "{}", restarted.stderr);
+    assert!(restarted.stderr.contains("Restarting shop/production/web"), "{}", restarted.stderr);
+    assert!(restarted.stdout.starts_with("web restarted (dep_"), "{}", restarted.stdout);
+    let not_live = cli(&["restart", "production/broken"]).await;
+    assert_eq!(not_live.code, 6, "{}", not_live.stderr);
+    assert!(not_live.stderr.contains("nothing live to restart"), "{}", not_live.stderr);
+
     // Domains.
     assert_eq!(cli(&["domain", "add", "www.example.com"]).await.code, 0);
     let domains = cli(&["domain", "list"]).await.stdout;

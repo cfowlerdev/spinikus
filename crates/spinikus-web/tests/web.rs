@@ -441,6 +441,18 @@ async fn deploys_follows_cancels_and_rolls_back() {
     assert!(rollback.body.contains("Rolls back to") && rollback.body.contains(&first.id.to_string()), "{}", rollback.body);
     assert_eq!(no_target.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(no_target.body.contains("The service has no earlier deployment to roll back to."), "{}", no_target.body);
+
+    // Restarting what runs: offered only with something live. Here no agent has reported a
+    // container for it, so the restart is refused; the control plane's tests restart one.
+    let restart = web.post(&format!("{service_url}/restart"), Some(&session), &form).await;
+    let restarted = web.get(&format!("{service_url}?restarted=1"), Some(&session)).await;
+    let nothing_live = web.get(&format!("/services/{}", sourceless.id), Some(&session)).await;
+
+    assert!(history.body.contains(&format!(r#"action="{service_url}/restart""#)), "{}", history.body);
+    assert_eq!(restart.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(restart.body.contains("no container on its server"), "{}", restart.body);
+    assert!(restarted.body.contains("Restarted."), "{}", restarted.body);
+    assert!(!nothing_live.body.contains("/restart"), "{}", nothing_live.body);
 }
 
 /// A form body from its fields.

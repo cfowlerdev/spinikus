@@ -416,8 +416,10 @@ message StorageDestination {
   string secret_access_key = 6;
 }
 
+// Restarts one container in place, stopping it with this grace period first.
 message RestartInstance {
   string container_id = 1;
+  google.protobuf.Duration grace_period = 2;
 }
 
 // Open a session stream (`AgentService.OpenSession`) tagged with `session_id`.

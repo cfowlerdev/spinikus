@@ -185,6 +185,11 @@ pub struct RollbackArgs {
     pub detach: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct RestartArgs {
+    pub service: Option<String>,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum DeploymentCommand {
     /// List a service's deployments, newest first

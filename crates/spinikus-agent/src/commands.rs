@@ -354,7 +354,7 @@ async fn restart_instance(runtime: &dyn ContainerRuntime, restart: pb::RestartIn
     if runtime.inspect(&restart.container_id).await?.is_none() {
         return Err(unknown());
     }
-    match runtime.restart(&restart.container_id, DEFAULT_GRACE).await {
+    match runtime.restart(&restart.container_id, grace(restart.grace_period)).await {
         Err(RuntimeError::NotFound) => Err(unknown()),
         outcome => Ok(outcome?),
     }
@@ -530,7 +530,7 @@ mod tests {
         runtime.put(exited);
         let mut commands = Commands::new(runtime.clone(), builds(), BackupStores::default());
 
-        let restart = |id: &str| Kind::RestartInstance(pb::RestartInstance { container_id: id.to_string() });
+        let restart = |id: &str| Kind::RestartInstance(pb::RestartInstance { container_id: id.to_string(), grace_period: None });
         commands.start(command("cmd-1", restart("c")));
         commands.start(command("cmd-2", restart("missing")));
         let mut results = [finish(&mut commands).await, finish(&mut commands).await];

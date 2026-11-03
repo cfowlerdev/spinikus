@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use super::{
     Session,
-    args::{DeployArgs, DeploymentCommand, LogsArgs, RollbackArgs},
+    args::{DeployArgs, DeploymentCommand, LogsArgs, RestartArgs, RollbackArgs},
     error::{Exit, fail},
     output::{Style, ago, status_style},
     resources::Page,
@@ -35,6 +35,20 @@ pub async fn rollback(session: &Session, args: RollbackArgs) -> anyhow::Result<(
     let target = deployment.rollback_of.as_deref().unwrap_or("the previous deployment");
     session.out.info(&format!("Rolling {path} back to {target} ({})", deployment.id));
     finish(session, &service, created, args.detach).await
+}
+
+/// Restarts the service's running container. The control plane answers once the agent has
+/// restarted it, so there is nothing to follow.
+pub async fn restart(session: &Session, args: RestartArgs) -> anyhow::Result<()> {
+    let service = session.service(args.service.as_deref()).await?;
+    let path = session.service_path(&service).await?;
+    session.out.info(&format!("Restarting {path}"));
+    let live: Value = session.api.post_empty(&format!("/services/{}/restart", service.id)).await?;
+    if session.out.json() {
+        return session.out.print_json(&live);
+    }
+    let deployment: Deployment = views::read(&live)?;
+    session.out.done(&format!("{} restarted ({}).", service.slug, deployment.id))
 }
 
 /// Prints the deployment right away with `detach`, else follows it to the end: its log on

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 use crate::client::args::{
     ContextCommand, DbCommand, DeployArgs, DeploymentCommand, DomainCommand, EnvCommand, EnvironmentCommand, Global, LinkArgs,
-    LoginArgs, LogsArgs, ProjectCommand, RollbackArgs, ServiceCommand, TokenCommand,
+    LoginArgs, LogsArgs, ProjectCommand, RestartArgs, RollbackArgs, ServiceCommand, TokenCommand,
 };
 
 #[derive(Parser)]
@@ -47,6 +47,8 @@ pub enum Commands {
     Deploy(DeployArgs),
     /// Go back to an earlier deployment
     Rollback(RollbackArgs),
+    /// Restart a service's running container, keeping its deployment
+    Restart(RestartArgs),
     /// A service's deployments
     #[command(subcommand)]
     Deployment(DeploymentCommand),

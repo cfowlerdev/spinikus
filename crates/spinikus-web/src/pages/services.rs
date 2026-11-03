@@ -1,4 +1,4 @@
-//! A service: what runs now, its deployments, and deploying or rolling it back.
+//! A service: what runs now, its deployments, and deploying, restarting or rolling it back.
 
 use axum::{
     Form,
@@ -33,16 +33,19 @@ const POLL_EVERY: &str = "every 2s";
 #[derive(Deserialize)]
 pub struct After {
     after: Option<String>,
+    /// Set after a restart, to say it happened.
+    restarted: Option<String>,
 }
 
 pub async fn service(
     State(control): State<Control>,
     signed: Signed,
     Path(id): Path<String>,
-    Query(After { after }): Query<After>,
+    Query(After { after, restarted }): Query<After>,
 ) -> Result<Response, WebError> {
     let after = after.as_deref().map(parse_id).transpose()?;
-    Ok(service_page(&control, &signed, parse_id(&id)?, after, None).await?.into_response())
+    let shown = restarted.is_some().then_some(Shown::Notice("Restarted."));
+    Ok(service_page(&control, &signed, parse_id(&id)?, after, shown).await?.into_response())
 }
 
 /// The history alone, for refreshing it while a deployment runs.
@@ -66,7 +69,7 @@ pub async fn deploy(
         Ok(deployment) => Ok(redirect(&headers, &format!("/deployments/{}", deployment.id))),
         Err(error) => match refused(&error) {
             Some(message) => {
-                let page = service_page(&control, &signed, service_id, None, Some(&message)).await?;
+                let page = service_page(&control, &signed, service_id, None, Some(Shown::Alert(&message))).await?;
                 Ok((StatusCode::UNPROCESSABLE_ENTITY, page).into_response())
             }
             None => Err(error.into()),
@@ -94,7 +97,7 @@ pub async fn rollback(
         Ok(deployment) => Ok(redirect(&headers, &format!("/deployments/{}", deployment.id))),
         Err(error) => match refused(&error) {
             Some(message) => {
-                let page = service_page(&control, &signed, service_id, None, Some(&message)).await?;
+                let page = service_page(&control, &signed, service_id, None, Some(Shown::Alert(&message))).await?;
                 Ok((StatusCode::UNPROCESSABLE_ENTITY, page).into_response())
             }
             None => Err(error.into()),
@@ -102,12 +105,39 @@ pub async fn rollback(
     }
 }
 
+/// Restarts the service's running container, then shows the service.
+pub async fn restart(
+    State(control): State<Control>,
+    signed: Signed,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, WebError> {
+    let service_id = parse_id(&id)?;
+    match control.restart_service(&signed.principal, service_id).await {
+        Ok(_) => Ok(redirect(&headers, &format!("/services/{service_id}?restarted=1"))),
+        Err(error) => match refused(&error) {
+            Some(message) => {
+                let page = service_page(&control, &signed, service_id, None, Some(Shown::Alert(&message))).await?;
+                Ok((StatusCode::UNPROCESSABLE_ENTITY, page).into_response())
+            }
+            None => Err(error.into()),
+        },
+    }
+}
+
+/// A message above the service page.
+#[derive(Clone, Copy)]
+enum Shown<'a> {
+    Alert(&'a str),
+    Notice(&'a str),
+}
+
 async fn service_page(
     control: &Control,
     signed: &Signed,
     id: ServiceId,
     after: Option<DeploymentId>,
-    alert: Option<&str>,
+    shown: Option<Shown<'_>>,
 ) -> Result<Markup, ControlError> {
     let principal = &signed.principal;
     let service = control.get_service(principal, id).await?;
@@ -131,16 +161,29 @@ async fn service_page(
         None => html! { "This machine (the embedded server)" },
     };
     let content = html! {
-        @if let Some(alert) = alert { (layout::alert(alert)) }
+        @match shown {
+            Some(Shown::Alert(message)) => (layout::alert(message)),
+            Some(Shown::Notice(message)) => (layout::notice(message)),
+            None => {}
+        }
         div class="mb-6 flex flex-wrap items-start gap-4" {
             div {
                 h1 class="flex items-center gap-3 text-2xl font-semibold tracking-tight" { (service.name) (service_badge(service.kind)) }
                 p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400" { (source_summary(source.as_ref())) }
             }
             @if can_deploy {
-                form method="post" action={ "/services/" (service.id) "/deploy" } class="ml-auto" {
-                    (csrf_field(signed))
-                    button type="submit" class=(BUTTON_PRIMARY) disabled[source.is_none()] { "Deploy" }
+                div class="ml-auto flex gap-2" {
+                    @if live.is_some() {
+                        form method="post" action={ "/services/" (service.id) "/restart" }
+                            hx-confirm="Restart the running container? Requests to it fail until it is back up." {
+                            (csrf_field(signed))
+                            button type="submit" class=(BUTTON_SECONDARY) { "Restart" }
+                        }
+                    }
+                    form method="post" action={ "/services/" (service.id) "/deploy" } {
+                        (csrf_field(signed))
+                        button type="submit" class=(BUTTON_PRIMARY) disabled[source.is_none()] { "Deploy" }
+                    }
                 }
             }
         }

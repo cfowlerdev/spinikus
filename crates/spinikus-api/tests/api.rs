@@ -398,6 +398,12 @@ async fn sets_a_source_and_deploys_it() {
     assert!(to_canceled.body["detail"].as_str().unwrap().contains("is canceled"), "{:?}", to_canceled.body);
     assert_eq!((typo.status, &typo.body["code"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("invalid_body")));
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+
+    // A restart needs something live; the control plane's tests cover the rest.
+    let restart = format!("/api/v1/services/{}/restart", service.body["id"].as_str().unwrap());
+    let nothing_live = api.send(Method::POST, &restart, token, &[], None).await;
+    assert_eq!(nothing_live.status, StatusCode::CONFLICT);
+    assert!(nothing_live.body["detail"].as_str().unwrap().contains("nothing live to restart"), "{:?}", nothing_live.body);
 }
 
 #[tokio::test]

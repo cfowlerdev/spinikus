@@ -143,7 +143,7 @@ async fn an_agent_connects_reports_and_disconnects() {
 
     let restart = pb::Command {
         command_id: "cmd_1".to_string(),
-        kind: Some(pb::command::Kind::RestartInstance(pb::RestartInstance { container_id: "b".to_string() })),
+        kind: Some(pb::command::Kind::RestartInstance(pb::RestartInstance { container_id: "b".to_string(), grace_period: None })),
     };
     control
         .agents()

@@ -59,6 +59,7 @@ pub fn v1() -> Router<Control> {
         )
         .route("/services/{id}/deployments", get(deployments::list).post(deployments::create))
         .route("/services/{id}/rollback", post(deployments::rollback))
+        .route("/services/{id}/restart", post(deployments::restart))
         .route("/services/{id}/logs", get(service_logs::show))
         .route("/deployments/{id}", get(deployments::show))
         .route("/deployments/{id}/events", get(deployments::events))
