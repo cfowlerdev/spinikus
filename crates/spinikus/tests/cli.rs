@@ -239,6 +239,26 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
     assert!(domains.lines().any(|line| line.starts_with("www.example.com ") && line.contains("the app")), "{domains}");
     assert_eq!(cli(&["domain", "remove", "www.example.com"]).await.code, 0);
 
+    // Volumes.
+    let added = cli(&["volume", "add", "uploads", "/app/uploads"]).await;
+    assert_eq!(added.code, 0, "{}", added.stderr);
+    assert!(added.stdout.contains("Added uploads at /app/uploads; deploy web to mount it."), "{}", added.stdout);
+    assert_eq!(cli(&["volume", "add", "bad name", "/data"]).await.code, 6, "names are slugs");
+    assert_eq!(cli(&["volume", "add", "data", "relative"]).await.code, 6, "mount paths are absolute");
+    assert_eq!(cli(&["volume", "update", "uploads"]).await.code, 2, "nothing to change");
+    let moved = cli(&["volume", "update", "uploads", "--mount-path", "/srv/uploads"]).await;
+    assert!(moved.stdout.contains("Updated uploads at /srv/uploads"), "{}", moved.stdout);
+    let volumes = cli(&["volume", "list"]).await.stdout;
+    assert!(
+        volumes.starts_with("NAME") && volumes.lines().nth(1).unwrap().starts_with("uploads  /srv/uploads  vol_"),
+        "{volumes}"
+    );
+    assert_eq!(cli(&["volume", "list", "-o", "json"]).await.json()[0]["mount_path"], "/srv/uploads");
+    assert_eq!(cli(&["volume", "remove", "missing"]).await.code, 5);
+    let removed = cli(&["volume", "remove", "uploads"]).await;
+    assert!(removed.stdout.contains("its data stays on the server"), "{}", removed.stdout);
+    assert_eq!(cli(&["volume", "list"]).await.stdout, "NAME  MOUNT PATH  ID\n");
+
     // Databases (not waiting for this one to go live), and backups without a destination.
     let created =
         spinikus(&config, &work, &["db", "create", "Cache", "--engine", "redis", "--server-id", &server_id, "--detach"], None)

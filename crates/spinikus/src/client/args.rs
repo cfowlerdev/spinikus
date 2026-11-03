@@ -330,6 +330,42 @@ pub enum DomainCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum VolumeCommand {
+    /// List a service's volumes
+    List {
+        #[arg(short, long)]
+        service: Option<String>,
+    },
+    /// Add a volume, mounted from the service's next deployment
+    Add {
+        /// A slug, such as `uploads`
+        name: String,
+        /// Where it is mounted in the container, such as `/app/uploads`
+        mount_path: String,
+        #[arg(short, long)]
+        service: Option<String>,
+    },
+    /// Rename a volume or move where it is mounted, from the next deployment; its data stays
+    Update {
+        /// The volume's name or ID
+        volume: String,
+        #[arg(long, required_unless_present = "mount_path")]
+        name: Option<String>,
+        #[arg(long, required_unless_present = "name")]
+        mount_path: Option<String>,
+        #[arg(short, long)]
+        service: Option<String>,
+    },
+    /// Stop mounting a volume from the next deployment; its data stays on the server
+    Remove {
+        /// The volume's name or ID
+        volume: String,
+        #[arg(short, long)]
+        service: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum Engine {
     Postgres,

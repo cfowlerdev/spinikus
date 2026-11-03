@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 use crate::client::args::{
     ContextCommand, DbCommand, DeployArgs, DeploymentCommand, DomainCommand, EnvCommand, EnvironmentCommand, Global, LinkArgs,
-    LoginArgs, LogsArgs, ProjectCommand, RestartArgs, RollbackArgs, ServiceCommand, TokenCommand,
+    LoginArgs, LogsArgs, ProjectCommand, RestartArgs, RollbackArgs, ServiceCommand, TokenCommand, VolumeCommand,
 };
 
 #[derive(Parser)]
@@ -60,6 +60,9 @@ pub enum Commands {
     /// A service's domains
     #[command(subcommand)]
     Domain(DomainCommand),
+    /// A service's volumes: data kept across deployments
+    #[command(subcommand)]
+    Volume(VolumeCommand),
     /// Databases, backups and restores
     #[command(subcommand)]
     Db(DbCommand),

@@ -67,6 +67,7 @@ async fn run_with(session: &Session, command: Commands) -> anyhow::Result<()> {
         Commands::Logs(args) => deploy::logs(session, args).await,
         Commands::Env(command) => variables::env(session, command).await,
         Commands::Domain(command) => resources::domain(session, command).await,
+        Commands::Volume(command) => resources::volume(session, command).await,
         Commands::Db(command) => storage::db(session, command).await,
         Commands::Token(command) => access::token(session, command).await,
         _ => unreachable!("handled by `run`"),

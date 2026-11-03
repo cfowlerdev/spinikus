@@ -140,6 +140,14 @@ pub struct Domain {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct Volume {
+    pub id: String,
+    pub name: String,
+    pub mount_path: String,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct HostnameCertificate {
     pub hostname: String,
     #[serde(default)]

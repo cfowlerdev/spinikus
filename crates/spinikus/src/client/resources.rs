@@ -1,15 +1,15 @@
-//! Projects, environments, services and domains.
+//! Projects, environments, services, domains and volumes.
 
 use serde_json::{Map, Value, json};
 use spinikus_core::domain::Hostname;
 
 use super::{
     Session,
-    args::{DomainCommand, EnvironmentCommand, ProjectCommand, ServiceCommand, ServiceCreateArgs},
+    args::{DomainCommand, EnvironmentCommand, ProjectCommand, ServiceCommand, ServiceCreateArgs, VolumeCommand},
     confirm,
     error::{Exit, fail},
     output::{Style, ago, status_style},
-    views::{self, Deployment, Environment, Project, Service, ServiceDomains},
+    views::{self, Deployment, Environment, Project, Service, ServiceDomains, Volume},
 };
 
 pub async fn project(session: &Session, command: ProjectCommand) -> anyhow::Result<()> {
@@ -301,6 +301,61 @@ pub async fn domain(session: &Session, command: DomainCommand) -> anyhow::Result
             out.done(&format!("Removed {hostname}."))
         }
     }
+}
+
+pub async fn volume(session: &Session, command: VolumeCommand) -> anyhow::Result<()> {
+    let (api, out) = (&session.api, &session.out);
+    match command {
+        VolumeCommand::List { service } => {
+            let service = session.service(service.as_deref()).await?;
+            let value: Value = api.get(&format!("/services/{}/volumes", service.id)).await?;
+            if out.json() {
+                return out.print_json(&value);
+            }
+            let volumes: Vec<Volume> = views::read(&value)?;
+            let rows: Vec<_> = volumes.into_iter().map(|volume| vec![volume.name, volume.mount_path, volume.id]).collect();
+            out.table(&["NAME", "MOUNT PATH", "ID"], &rows)
+        }
+        VolumeCommand::Add { name, mount_path, service } => {
+            let service = session.service(service.as_deref()).await?;
+            let body = json!({ "name": name, "mount_path": mount_path });
+            let created: Value = api.post(&format!("/services/{}/volumes", service.id), &body).await?;
+            if out.json() {
+                return out.print_json(&created);
+            }
+            let volume: Volume = views::read(&created)?;
+            out.done(&format!("Added {} at {}; deploy {} to mount it.", volume.name, volume.mount_path, service.slug))
+        }
+        VolumeCommand::Update { volume, name, mount_path, service } => {
+            let service = session.service(service.as_deref()).await?;
+            let current = find_volume(session, &service, &volume).await?;
+            let body = json!({ "name": name, "mount_path": mount_path });
+            let updated: Value = api.patch(&format!("/volumes/{}", current.id), current.revision, &body).await?;
+            if out.json() {
+                return out.print_json(&updated);
+            }
+            let volume: Volume = views::read(&updated)?;
+            out.done(&format!("Updated {} at {}; deploy {} to apply it.", volume.name, volume.mount_path, service.slug))
+        }
+        VolumeCommand::Remove { volume, service } => {
+            let service = session.service(service.as_deref()).await?;
+            let current = find_volume(session, &service, &volume).await?;
+            api.delete(&format!("/volumes/{}", current.id)).await?;
+            out.done(&format!(
+                "Removed {}; its data stays on the server. Deploy {} to stop mounting it.",
+                current.name, service.slug
+            ))
+        }
+    }
+}
+
+/// The service's volume with this name (or ID).
+async fn find_volume(session: &Session, service: &Service, volume: &str) -> anyhow::Result<Volume> {
+    let volumes: Vec<Volume> = views::read(&session.api.get::<Value>(&format!("/services/{}/volumes", service.id)).await?)?;
+    volumes
+        .into_iter()
+        .find(|candidate| candidate.name == volume || candidate.id == volume)
+        .ok_or_else(|| fail(Exit::NotFound, format!("{} has no volume {volume}", service.slug)))
 }
 
 /// The ID of the service's domain with this hostname (or ID).
