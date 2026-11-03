@@ -4003,7 +4003,7 @@ checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "spinikus"
-version = "0.1.1"
+version = "0.2.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4041,7 +4041,7 @@ dependencies = [
 
 [[package]]
 name = "spinikus-agent"
-version = "0.1.1"
+version = "0.2.0-rc.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4080,7 +4080,7 @@ dependencies = [
 
 [[package]]
 name = "spinikus-api"
-version = "0.1.1"
+version = "0.2.0-rc.1"
 dependencies = [
  "axum",
  "http-body-util",
@@ -4103,7 +4103,7 @@ dependencies = [
 
 [[package]]
 name = "spinikus-control"
-version = "0.1.1"
+version = "0.2.0-rc.1"
 dependencies = [
  "argon2",
  "async-trait",
@@ -4137,7 +4137,7 @@ dependencies = [
 
 [[package]]
 name = "spinikus-core"
-version = "0.1.1"
+version = "0.2.0-rc.1"
 dependencies = [
  "jiff",
  "serde",
@@ -4150,7 +4150,7 @@ dependencies = [
 
 [[package]]
 name = "spinikus-proto"
-version = "0.1.1"
+version = "0.2.0-rc.1"
 dependencies = [
  "prost",
  "prost-types",
@@ -4164,7 +4164,7 @@ dependencies = [
 
 [[package]]
 name = "spinikus-proxy"
-version = "0.1.1"
+version = "0.2.0-rc.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4181,7 +4181,7 @@ dependencies = [
 
 [[package]]
 name = "spinikus-store"
-version = "0.1.1"
+version = "0.2.0-rc.1"
 dependencies = [
  "age",
  "async-trait",
@@ -4204,7 +4204,7 @@ dependencies = [
 
 [[package]]
 name = "spinikus-web"
-version = "0.1.1"
+version = "0.2.0-rc.1"
 dependencies = [
  "axum",
  "http-body-util",
@@ -5570,7 +5570,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.1"
+version = "0.2.0-rc.1"
 dependencies = [
  "anyhow",
  "flate2",
