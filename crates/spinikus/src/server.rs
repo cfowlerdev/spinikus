@@ -10,6 +10,7 @@ use tokio::{net::TcpListener, sync::watch};
 use crate::{cli::ServerRunArgs, secrets};
 
 pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result<()> {
+    let _lock = lock_instance(config)?;
     let control = with_setup_code(config, open_control(config).await?).await?;
 
     let http_address = args.listen.unwrap_or(config.http.listen);
@@ -99,6 +100,33 @@ async fn until(mut stopped: watch::Receiver<bool>) {
     let _ = stopped.wait_for(|stopped| *stopped).await;
 }
 
+/// The file `server run` holds a lock on, in the data directory.
+pub const LOCK_FILE: &str = "spinikus.lock";
+
+/// Locks the instance's data directory for as long as the file returned is open: `server run`
+/// holds it, so `admin restore` never swaps the database out from under a running server.
+/// The lock goes with the process, however it ends.
+pub fn lock_instance(config: &SpinikusConfig) -> anyhow::Result<std::fs::File> {
+    let path = config.data_dir.join(LOCK_FILE);
+    std::fs::create_dir_all(&config.data_dir).with_context(|| format!("Failed to create {}", config.data_dir.display()))?;
+    // Opened for reading when it exists, so any user that can read it can lock it.
+    let file = match std::fs::File::open(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::OpenOptions::new().append(true).create(true).open(&path)
+        }
+        opened => opened,
+    }
+    .with_context(|| format!("Failed to open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+            "Spinikus is running with the data in {}; stop it first (sudo systemctl stop spinikus)",
+            config.data_dir.display()
+        ),
+        Err(std::fs::TryLockError::Error(error)) => Err(error).with_context(|| format!("Failed to lock {}", path.display())),
+    }
+}
+
 /// The file with the setup code, in the data directory.
 pub const SETUP_CODE_FILE: &str = "setup-code";
 
@@ -161,7 +189,7 @@ pub async fn open_control(config: &SpinikusConfig) -> anyhow::Result<Control> {
 }
 
 /// Connects to the database and applies any pending migrations.
-async fn open_database(config: &SpinikusConfig) -> anyhow::Result<SqlitePool> {
+pub(crate) async fn open_database(config: &SpinikusConfig) -> anyhow::Result<SqlitePool> {
     let path = config.database_path();
     let pool = spinikus_store::connect(&path).await.with_context(|| format!("Failed to open database at {}", path.display()))?;
 

@@ -11,6 +11,7 @@ version = "0.1.1"
 edition = "2024"
 
 [workspace.dependencies]
+age = "0.12.1"
 anyhow = "1.0.104"
 argon2 = { version = "0.6.0", features = ["zeroize"] }
 async-trait = "0.1.92"
@@ -25,6 +26,7 @@ http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "http2", "server-auto", "server-graceful", "tokio"] }
 instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
+flate2 = "1.1.10"
 croner = { version = "4.0.2", default-features = false, features = ["jiff"] }
 jiff = { version = "0.2.38", features = ["serde"] }
 maud = { version = "0.27.0", features = ["axum"] }
@@ -77,6 +79,10 @@ spinikus-web = { path = "crates/spinikus-web" }
 opt-level = 3
 
 [profile.dev.package.blake2]
+opt-level = 3
+
+# Instance backups are encrypted with a passphrase through scrypt, which is slow by design too.
+[profile.dev.package.scrypt]
 opt-level = 3
 
 # Release binaries (`cargo xtask release`): smaller and faster than `--release`, slower to build.

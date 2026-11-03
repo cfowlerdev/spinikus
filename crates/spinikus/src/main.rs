@@ -5,7 +5,7 @@ use clap::Parser;
 use spinikus::{
     admin, agent,
     cli::{AdminCommand, AgentCommand, Cli, Commands, ServerCommand},
-    client, config, server,
+    client, config, instance_backup, server,
 };
 use spinikus_core::config::SpinikusConfig;
 
@@ -17,6 +17,8 @@ async fn run_command(command: Commands, config: &SpinikusConfig) -> anyhow::Resu
     match command {
         Commands::Admin(args) => match args.command {
             AdminCommand::CreateUser(args) => admin::create_user(config, args).await?,
+            AdminCommand::Backup(args) => instance_backup::backup(config, args).await?,
+            AdminCommand::Restore(args) => instance_backup::restore(config, args).await?,
         },
         Commands::Agent(args) => match args.command {
             AgentCommand::Join(args) => agent::join(config, args).await?,

@@ -104,6 +104,22 @@ pub struct AdminArgs {
 pub enum AdminCommand {
     /// Create the first admin account. Reads the password from SPINIKUS_ADMIN_PASSWORD, or prompts for it
     CreateUser(CreateUserArgs),
+    /// Back up this instance (its database and master key) to a file encrypted with a passphrase. Works while the server runs. Reads the passphrase from SPINIKUS_BACKUP_PASSPHRASE, or prompts for it
+    Backup(BackupArgs),
+    /// Restore this instance from a backup file, keeping the current database and master key beside it. The server must be stopped. Reads the passphrase from SPINIKUS_BACKUP_PASSPHRASE, or prompts for it
+    Restore(RestoreArgs),
+}
+
+#[derive(clap::Args)]
+pub struct BackupArgs {
+    /// Where to write the backup (default: spinikus-backup-<time>.tar.gz.age in the current directory). It must not exist
+    pub file: Option<std::path::PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct RestoreArgs {
+    /// The backup file, from `spinikus admin backup`
+    pub file: std::path::PathBuf,
 }
 
 #[derive(clap::Args)]

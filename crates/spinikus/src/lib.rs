@@ -4,6 +4,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod embedded;
+pub mod instance_backup;
 pub mod secrets;
 pub mod server;
 pub mod shutdown;

@@ -10,6 +10,16 @@ use spinikus_store::MasterKey;
 /// exist yet. A key file configured explicitly is never generated: a missing one is an error,
 /// since a fresh key could not decrypt anything already in the database.
 pub fn load_master_key(config: &SpinikusConfig) -> anyhow::Result<MasterKey> {
+    read_master_key(config, true)
+}
+
+/// Loads the master key like [`load_master_key`], but never generates one: for commands that
+/// need the key of a database that already exists.
+pub fn existing_master_key(config: &SpinikusConfig) -> anyhow::Result<MasterKey> {
+    read_master_key(config, false)
+}
+
+fn read_master_key(config: &SpinikusConfig, generate: bool) -> anyhow::Result<MasterKey> {
     if let Some(encoded) = &config.secrets.master_key {
         return MasterKey::from_base64(encoded.trim()).context("Invalid secrets.master_key");
     }
@@ -20,7 +30,7 @@ pub fn load_master_key(config: &SpinikusConfig) -> anyhow::Result<MasterKey> {
             warn_if_readable_by_others(&path);
             MasterKey::from_base64(encoded.trim()).with_context(|| format!("Invalid master key in {}", path.display()))
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound && config.secrets.master_key_file.is_none() => {
+        Err(error) if error.kind() == io::ErrorKind::NotFound && generate && config.secrets.master_key_file.is_none() => {
             generate_key_file(&path)
         }
         Err(error) => Err(error).with_context(|| format!("Failed to read master key from {}", path.display())),
@@ -44,7 +54,7 @@ fn generate_key_file(path: &Path) -> anyhow::Result<MasterKey> {
     tracing::warn!(
         path = %path.display(),
         master_key = key.id(),
-        "Generated a new master key. Back it up separately from the database: secrets in a backup cannot be decrypted without it"
+        "Generated a new master key. Secrets in the database cannot be decrypted without it: `spinikus admin backup` backs up both"
     );
     Ok(key)
 }

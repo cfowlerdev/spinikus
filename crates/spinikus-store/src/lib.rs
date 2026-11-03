@@ -8,6 +8,7 @@ pub mod domains;
 pub mod enrollment;
 pub mod environments;
 pub mod error;
+pub mod instance_backup;
 pub mod instances;
 pub mod jobs;
 pub mod memberships;

@@ -12,6 +12,24 @@ curl -fsSL https://github.com/cfowlerdev/spinikus/releases/latest/download/insta
 
 It installs Docker, git and Railpack if they are missing, runs Spinikus as the `spinikus` systemd service, and prints the URL to create the first admin, with a one-time setup code. Run it again to upgrade. Other servers are added from the dashboard (Settings → Servers), which gives the command that installs and enrolls their agent. See the comments at the top of [`install/install.sh`](install/install.sh) for its options.
 
+### Back up and restore
+
+`spinikus admin backup` writes the database and the master key to one file encrypted with a passphrase (it asks for one, or reads `SPINIKUS_BACKUP_PASSPHRASE`). It works while Spinikus runs:
+
+```sh
+sudo spinikus admin backup /root/spinikus-backup.tar.gz.age
+```
+
+Keep the file and the passphrase somewhere other than the server. To restore, on the same or a new server with Spinikus installed:
+
+```sh
+sudo systemctl stop spinikus
+sudo spinikus admin restore spinikus-backup.tar.gz.age
+sudo systemctl start spinikus
+```
+
+The restore keeps the database and key it replaces beside them, as `*.before-restore-<time>`. A backup restores into the version of Spinikus that made it or a newer one.
+
 ## Develop
 
 ```sh
