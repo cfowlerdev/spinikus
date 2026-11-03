@@ -51,6 +51,10 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
         let (control, shutdown) = (control.clone(), until(stopped.clone()));
         tokio::spawn(async move { control.run_backups(shutdown).await })
     };
+    let instance_backups = {
+        let (control, shutdown) = (control.clone(), until(stopped.clone()));
+        tokio::spawn(async move { control.run_instance_backups(shutdown).await })
+    };
     let agents = spinikus_control::agents::serve(control, agent_listener, until(stopped));
     tracing::info!(dashboard = %format!("http://{http_address}/"), "Server started");
 
@@ -77,6 +81,7 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
     let _ = deployments.await;
     let _ = certificates.await;
     let _ = backups.await;
+    let _ = instance_backups.await;
     if let Some(embedded) = embedded {
         let _ = embedded.await;
     }
@@ -185,7 +190,8 @@ pub async fn open_control(config: &SpinikusConfig) -> anyhow::Result<Control> {
     let master_key = secrets::load_master_key(config)?;
     let store = SqliteStore::open(pool, &master_key).await.context("Failed to load the secrets keyring")?;
     tracing::info!(master_key = master_key.id(), "Secrets keyring ready");
-    Ok(Control::new(store).with_log_dir(config.data_dir.join("logs")))
+    // Instance backups are written in the data directory, which has room for the database.
+    Ok(Control::new(store).with_log_dir(config.data_dir.join("logs")).with_instance_backups(master_key, config.data_dir.clone()))
 }
 
 /// Connects to the database and applies any pending migrations.

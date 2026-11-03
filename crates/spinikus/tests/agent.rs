@@ -1374,3 +1374,62 @@ async fn backs_up_and_restores_redis_through_s3() {
     assert!(restarted.status.success(), "{restarted:?}");
     assert_eq!(later, "x");
 }
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon; pulls rustfs/rustfs and amazon/aws-cli"]
+async fn backs_up_the_instance_to_s3_and_restores_it() {
+    use spinikus_control::{InstanceBackupScheduleInput, NewStorageDestination};
+    use spinikus_core::{backup::BackupStatus, config::SpinikusConfig, secret::Secret};
+
+    let s3 = S3Server::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = SpinikusConfig { data_dir: dir.path().join("data"), ..Default::default() };
+    let control = spinikus::server::open_control(&config).await.unwrap();
+    let password = "correct horse battery staple";
+    control.create_first_admin("ada@example.com", "Ada", Secret::new(password)).await.unwrap();
+    let (_, session) = control.sign_in("ada@example.com", Secret::new(password), Default::default()).await.unwrap();
+    let admin = control.authenticate_session(session.expose()).await.unwrap();
+    let new = NewStorageDestination {
+        name: "RustFS".to_string(),
+        endpoint: Some(format!("http://127.0.0.1:{}", s3.port)),
+        region: None,
+        bucket: "backups".to_string(),
+        path_prefix: Some("spinikus".to_string()),
+        path_style: true,
+        access_key_id: S3_ACCESS_KEY.to_string(),
+        secret_access_key: Secret::new(S3_SECRET_KEY),
+    };
+    let destination = control.create_storage_destination(&admin, new).await.unwrap();
+    let passphrase = "a long enough passphrase";
+    let schedule = InstanceBackupScheduleInput {
+        destination_id: destination.id,
+        cron: "0 3 * * *".to_string(),
+        keep_last: Some(3),
+        enabled: true,
+        passphrase: Some(Secret::new(passphrase)),
+    };
+    control.set_instance_backup_schedule(&admin, 0, schedule).await.unwrap();
+
+    let backup = control.back_up_instance(&admin).await.unwrap();
+    control.advance_instance_backups().await;
+    let backup = control.get_instance_backup(&admin, backup.id).await.unwrap();
+    assert_eq!(backup.status, BackupStatus::Succeeded, "{:?}", backup.error);
+    assert!(backup.object_key.starts_with("spinikus/instance/"), "{}", backup.object_key);
+
+    // Downloaded with any S3 client, it restores a new instance with `spinikus admin restore`.
+    let downloaded = s3.aws(&["s3", "cp", &format!("s3://backups/{}", backup.object_key), "-"]);
+    assert!(downloaded.status.success(), "{downloaded:?}");
+    assert_eq!(downloaded.stdout.len() as u64, backup.size_bytes.unwrap());
+    let file = dir.path().join("backup.tar.gz.age");
+    std::fs::write(&file, &downloaded.stdout).unwrap();
+    let restored = SpinikusConfig { data_dir: dir.path().join("restored"), ..Default::default() };
+    spinikus::instance_backup::restore_from(&restored, &file, &Secret::new(passphrase)).await.unwrap();
+    let copy = spinikus::server::open_control(&restored).await.unwrap();
+    assert!(!copy.needs_setup().await.unwrap());
+    copy.sign_in("ada@example.com", Secret::new(password), Default::default()).await.unwrap();
+
+    // Deleting it deletes the file.
+    control.delete_instance_backup(&admin, backup.id).await.unwrap();
+    let listed = s3.aws(&["s3", "ls", "--recursive", "s3://backups/"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).trim().is_empty(), "{listed:?}");
+}

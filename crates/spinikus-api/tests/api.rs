@@ -775,3 +775,76 @@ async fn admins_manage_users_members_and_read_the_audit_log() {
         .await;
     assert_eq!(reset.status, StatusCode::NO_CONTENT);
 }
+
+#[tokio::test]
+async fn instance_admins_schedule_backups_of_the_instance() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+    let schedule = "/api/v1/instance-backup-schedule";
+
+    let none = api.send(Method::GET, schedule, token, &[], None).await;
+    let early = api.send(Method::POST, "/api/v1/instance-backups", token, &[], None).await;
+    let new = json!({ "name": "Offsite", "bucket": "backups", "access_key_id": "key", "secret_access_key": "s3cret" });
+    let destination = api.send(Method::POST, "/api/v1/storage-destinations", token, &[], Some(new)).await;
+    let id = destination.body["id"].clone();
+    let body = |passphrase: Option<&str>| {
+        let mut body = json!({ "destination_id": id, "cron": "0 3 * * *", "keep_last": 14 });
+        if let Some(passphrase) = passphrase {
+            body["passphrase"] = json!(passphrase);
+        }
+        Some(body)
+    };
+    let unconditional = api.send(Method::PUT, schedule, token, &[], body(Some("a long enough passphrase"))).await;
+    let no_passphrase = api.send(Method::PUT, schedule, token, &[(header::IF_MATCH, "\"0\"")], body(None)).await;
+    let set =
+        api.send(Method::PUT, schedule, token, &[(header::IF_MATCH, "\"0\"")], body(Some("a long enough passphrase"))).await;
+    let kept = api.send(Method::PUT, schedule, token, &[(header::IF_MATCH, "\"1\"")], body(None)).await;
+    let shown = api.send(Method::GET, schedule, token, &[], None).await;
+    let backup = api.send(Method::POST, "/api/v1/instance-backups", token, &[], None).await;
+    let listed = api.send(Method::GET, "/api/v1/instance-backups", token, &[], None).await;
+    let running = api.send(Method::DELETE, backup.header(header::LOCATION), token, &[], None).await;
+
+    assert_eq!(none.status, StatusCode::NOT_FOUND);
+    assert_eq!((early.status, &early.body["code"]), (StatusCode::CONFLICT, &json!("rejected")));
+    assert_eq!(unconditional.status, StatusCode::PRECONDITION_REQUIRED);
+    assert_eq!((no_passphrase.status, &no_passphrase.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("passphrase")));
+    assert_eq!((set.status, set.header(header::ETAG)), (StatusCode::OK, "\"1\""), "{}", set.body);
+    assert_eq!((&set.body["keep_last"], &set.body["enabled"]), (&json!(14), &json!(true)));
+    assert!(set.body["next_run_at"].as_str().unwrap().ends_with("03:00:00Z"), "{}", set.body);
+    assert!(set.body.get("passphrase").is_none(), "write-only: {}", set.body);
+    assert_eq!(kept.header(header::ETAG), "\"2\"");
+    assert_eq!(shown.body["destination_id"], id);
+    assert_eq!(
+        (backup.status, &backup.body["status"], &backup.body["scheduled"]),
+        (StatusCode::CREATED, &json!("queued"), &json!(false))
+    );
+    assert!(backup.body["object_key"].as_str().unwrap().starts_with("instance/ibk_"), "{}", backup.body);
+    assert_eq!(listed.body["items"][0]["id"], backup.body["id"]);
+    assert_eq!((running.status, &running.body["code"]), (StatusCode::CONFLICT, &json!("rejected")));
+    // The destination is in use.
+    let in_use = api.send(Method::DELETE, destination.header(header::LOCATION), token, &[], None).await;
+    assert_eq!(in_use.status, StatusCode::CONFLICT);
+
+    // Not for anyone else.
+    api.send(
+        Method::POST,
+        "/api/v1/users",
+        token,
+        &[],
+        Some(json!({ "email": "grace@example.com", "name": "Grace", "password": "an initial password" })),
+    )
+    .await;
+    let login = api
+        .send(
+            Method::POST,
+            "/api/v1/login",
+            None,
+            &[],
+            Some(json!({ "email": "grace@example.com", "password": "an initial password" })),
+        )
+        .await;
+    let grace = login.body["token"].as_str().unwrap().to_string();
+    let denied = api.send(Method::GET, "/api/v1/instance-backups", Some(&grace), &[], None).await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+}

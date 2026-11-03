@@ -38,7 +38,10 @@ use std::sync::Arc;
 use agents::AgentHub;
 pub use audit::AuditPage;
 pub use auth::{ClientInfo, Credential, Principal};
-pub use backups::{BackupScheduleChanges, BackupTimings, NewBackupSchedule, NewStorageDestination, StorageDestinationChanges};
+pub use backups::{
+    BackupScheduleChanges, BackupTimings, NewBackupSchedule, NewStorageDestination, StorageDestinationChanges,
+    instance::InstanceBackupScheduleInput,
+};
 pub use certificates::{
     CertificateTimings,
     acme::{AcmeClient, InstantAcme},
@@ -78,6 +81,7 @@ pub struct Control {
     previews: Arc<tokio::sync::Mutex<()>>,
     /// What the setup page asks for before it creates the first admin, if anything.
     setup_code: Option<Arc<Secret>>,
+    instance_backups: Arc<backups::instance::InstanceBackups>,
 }
 
 impl Control {
@@ -98,7 +102,16 @@ impl Control {
             backups,
             previews: Arc::default(),
             setup_code: None,
+            instance_backups: Arc::default(),
         }
+    }
+
+    /// Lets the control plane back up the instance: the master key goes into each backup
+    /// (with the database), and each is written in `work_dir` before it is uploaded. Without
+    /// this, instance backups fail. Call it before the instance backup runner starts.
+    pub fn with_instance_backups(mut self, master_key: spinikus_store::MasterKey, work_dir: std::path::PathBuf) -> Self {
+        self.instance_backups = Arc::new(backups::instance::InstanceBackups::new(Some(master_key), work_dir));
+        self
     }
 
     /// Replaces the ACME client and the certificate manager's timings, such as to use a

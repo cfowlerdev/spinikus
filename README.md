@@ -30,6 +30,8 @@ sudo systemctl start spinikus
 
 The restore keeps the database and key it replaces beside them, as `*.before-restore-<time>`. A backup restores into the version of Spinikus that made it or a newer one.
 
+To back up on a schedule, add a storage destination (Settings → Storage), then set the schedule and its passphrase in Settings → Backups. Each backup is the same file, uploaded to `<prefix>instance/` in the bucket; download one with any S3 client to restore it.
+
 ## Develop
 
 ```sh

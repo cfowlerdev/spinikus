@@ -11,6 +11,7 @@ pub mod domain;
 pub mod enrollment;
 pub mod environment;
 pub mod id;
+pub mod instance_backup;
 pub mod job;
 pub mod membership;
 pub mod project;

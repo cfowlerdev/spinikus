@@ -5,6 +5,7 @@ pub mod backups;
 pub mod databases;
 pub mod deployments;
 pub mod domains;
+pub mod instance_backups;
 pub mod logs;
 pub mod manage;
 pub mod members;

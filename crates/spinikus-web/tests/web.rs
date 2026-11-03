@@ -1692,3 +1692,99 @@ async fn developers_add_and_change_volumes_and_admins_remove_them() {
     );
     assert!(!page.body.contains("Add volume") && !page.body.contains("/volumes/vol_"), "{}", page.body);
 }
+
+#[tokio::test]
+async fn instance_admins_schedule_backups_of_spinikus() {
+    use spinikus_store::InstanceBackupRepository;
+
+    let web = Web::new().await;
+    shop_with_team(&web).await;
+    let control = &web.control;
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+    assert_eq!(web.get("/settings/backups", Some(&dev)).await.status, StatusCode::FORBIDDEN);
+
+    // Without a destination, the tab says to add one.
+    let page = web.get("/settings/backups", Some(&ada)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(
+        page.body.contains(r#"href="/settings/backups""#) && page.body.contains("Add a storage destination"),
+        "{}",
+        page.body
+    );
+    let token = page.csrf();
+    let admin = control.store().find_user_by_email(&"ada@example.com".parse().unwrap()).await.unwrap().unwrap();
+    let principal = spinikus_control::Principal {
+        user: admin,
+        credential: spinikus_control::Credential::Session(spinikus_core::id::SessionId::new()),
+    };
+    let new = spinikus_control::NewStorageDestination {
+        name: "Offsite".to_string(),
+        endpoint: None,
+        region: None,
+        bucket: "backups".to_string(),
+        path_prefix: None,
+        path_style: false,
+        access_key_id: "AKIA".to_string(),
+        secret_access_key: Secret::new("s3cret"),
+    };
+    let destination = control.create_storage_destination(&principal, new).await.unwrap();
+
+    // Setting the schedule: the passphrase is required, and never shown again.
+    let page = web.get("/settings/backups", Some(&ada)).await;
+    assert!(
+        page.body.contains("Offsite") && page.body.contains("Save schedule") && !page.body.contains("Back up now"),
+        "{}",
+        page.body
+    );
+    let schedule = |revision: &str, passphrase: &str| {
+        form(&[
+            ("_csrf", &token),
+            ("revision", revision),
+            ("destination_id", &destination.id.to_string()),
+            ("cron", "15 2 * * *"),
+            ("keep_last", "5"),
+            ("enabled", "on"),
+            ("passphrase", passphrase),
+        ])
+    };
+    let refused = web.post("/settings/backups/schedule", Some(&ada), &schedule("0", "")).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", refused.body);
+    assert!(refused.body.contains("passphrase") && refused.body.contains("15 2 * * *"), "keeps what was typed: {}", refused.body);
+    let saved = web.post("/settings/backups/schedule", Some(&ada), &schedule("0", "a long enough passphrase")).await;
+    assert_eq!(saved.status, StatusCode::SEE_OTHER, "{}", saved.body);
+    let page = web.get("/settings/backups?saved=schedule", Some(&ada)).await;
+    assert!(
+        page.body.contains("Saved.") && page.body.contains("Next scheduled backup") && page.body.contains("Back up now"),
+        "{}",
+        page.body
+    );
+    assert!(!page.body.contains("a long enough passphrase"));
+    assert_eq!(control.store().instance_backup_passphrase().await.unwrap().expose(), "a long enough passphrase");
+    // An empty passphrase keeps it.
+    let kept = web.post("/settings/backups/schedule", Some(&ada), &schedule("1", "")).await;
+    assert_eq!(kept.status, StatusCode::SEE_OTHER, "{}", kept.body);
+    assert_eq!(control.store().instance_backup_passphrase().await.unwrap().expose(), "a long enough passphrase");
+
+    // Backing up now queues one, which the page follows until it finishes; it can't be deleted yet.
+    let queued = web.post("/settings/backups", Some(&ada), &form(&[("_csrf", &token)])).await;
+    assert_eq!(queued.status, StatusCode::SEE_OTHER, "{}", queued.body);
+    let page = web.get("/settings/backups", Some(&ada)).await;
+    assert!(page.body.contains("queued") && page.body.contains(r#"hx-get="/settings/backups/activity""#), "{}", page.body);
+    let backup = control.list_instance_backups(&principal, None, 1).await.unwrap().items.remove(0);
+    let refused = web.post(&format!("/settings/backups/{}/delete", backup.id), Some(&ada), &form(&[("_csrf", &token)])).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", refused.body);
+    assert!(refused.body.contains("hasn&#39;t finished") || refused.body.contains("hasn't finished"), "{}", refused.body);
+    assert_eq!(refused.header("hx-replace-url"), Some("/settings/backups"));
+    // Without a master key this control plane can't make it: it fails, and then it can go.
+    control.advance_instance_backups().await;
+    let activity = web.get("/settings/backups/activity", Some(&ada)).await;
+    assert!(
+        activity.body.contains("failed") && activity.body.contains("no master key") && !activity.body.contains("hx-get"),
+        "{}",
+        activity.body
+    );
+    let deleted = web.post(&format!("/settings/backups/{}/delete", backup.id), Some(&ada), &form(&[("_csrf", &token)])).await;
+    assert_eq!(deleted.status, StatusCode::SEE_OTHER, "{}", deleted.body);
+    assert!(web.get("/settings/backups", Some(&ada)).await.body.contains("No backups yet."));
+}

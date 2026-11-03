@@ -13,6 +13,7 @@
 //! how many of its own successful backups to keep); developers make a backup by hand, viewers
 //! list them, and admins delete them, the object included.
 
+pub mod instance;
 mod restores;
 mod runner;
 pub(crate) mod storage;
@@ -434,7 +435,7 @@ impl Control {
     }
 }
 
-fn require_instance_admin(principal: &Principal) -> Result<(), ControlError> {
+pub(crate) fn require_instance_admin(principal: &Principal) -> Result<(), ControlError> {
     if principal.is_instance_admin() { Ok(()) } else { Err(ControlError::Forbidden) }
 }
 
@@ -463,7 +464,7 @@ pub(crate) fn next_run(cron: &Cron, after: Timestamp) -> Option<Timestamp> {
     cron.find_next_occurrence(&after, false).ok().map(|next| next.timestamp())
 }
 
-fn keep_last(value: u32) -> Result<u32, ControlError> {
+pub(crate) fn keep_last(value: u32) -> Result<u32, ControlError> {
     match value {
         1..=MAX_KEEP_LAST => Ok(value),
         _ => Err(ControlError::Invalid { field: "keep_last", problem: format!("must be between 1 and {MAX_KEEP_LAST}") }),

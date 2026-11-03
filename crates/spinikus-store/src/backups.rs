@@ -384,6 +384,16 @@ impl StorageDestinationRepository for SqliteStore {
         .bind(id.to_string())
         .fetch_optional(&mut *tx)
         .await?;
+        // The instance's schedule uses it even while disabled: it has nowhere else to go.
+        let used = match used {
+            Some(used) => Some(used),
+            None => {
+                sqlx::query_scalar("SELECT 1 FROM instance_backup_schedule WHERE destination_id = ?")
+                    .bind(id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await?
+            }
+        };
         if used.is_some() {
             return Err(StoreError::HasChildren { entity: DESTINATION, id: id.to_string(), children: "backup schedules" });
         }

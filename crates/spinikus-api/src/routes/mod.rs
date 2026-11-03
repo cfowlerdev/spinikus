@@ -5,6 +5,7 @@ mod deployments;
 mod domains;
 mod environments;
 mod hooks;
+mod instance_backups;
 mod members;
 mod projects;
 mod servers;
@@ -89,6 +90,9 @@ pub fn v1() -> Router<Control> {
         .route("/backups/{id}/restore", post(backups::restore))
         .route("/services/{id}/restores", get(backups::list_restores))
         .route("/restores/{id}", get(backups::show_restore))
+        .route("/instance-backup-schedule", get(instance_backups::show_schedule).put(instance_backups::put_schedule))
+        .route("/instance-backups", get(instance_backups::list).post(instance_backups::create))
+        .route("/instance-backups/{id}", get(instance_backups::show).delete(instance_backups::delete))
         .route("/settings/{key}", get(settings::show).put(settings::put))
         .route("/servers", get(servers::list).post(servers::create))
         .route("/servers/{id}", get(servers::show))
