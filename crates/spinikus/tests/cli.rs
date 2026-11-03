@@ -268,6 +268,9 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
     let moved = cli(&["volume", "update", "data", "--mount-path", "/elsewhere", "--service", "production/cache"]).await;
     assert_eq!(moved.code, 6, "a database's data stays where its image keeps it: {}", moved.stderr);
     assert!(moved.stderr.contains("moving it would start the database empty"), "{}", moved.stderr);
+    let removed = cli(&["volume", "remove", "data", "--service", "production/cache"]).await;
+    assert_eq!(removed.code, 6, "{}", removed.stderr);
+    assert!(removed.stderr.contains("deleting it would start the database empty"), "{}", removed.stderr);
     assert_eq!(cli(&["db", "backups", "production/cache"]).await.stdout, "ID  STATUS  MADE  SIZE  CREATED\n");
     let no_destination = cli(&["db", "backup", "production/cache"]).await;
     assert!(no_destination.stderr.contains("there are no storage destinations"), "{}", no_destination.stderr);

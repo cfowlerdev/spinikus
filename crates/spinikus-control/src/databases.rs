@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_data_volume_can_be_renamed_but_not_moved() {
+    async fn the_data_volume_can_be_renamed_but_not_moved_or_deleted() {
         let setup = setup(DeploymentTimings::default()).await;
         let (control, admin) = (&setup.control, &setup.admin);
         let environment = setup.service.environment_id;
@@ -239,10 +239,14 @@ mod tests {
         let renamed = crate::VolumeChanges { name: Some("pgdata".to_string()), ..Default::default() };
         let renamed = control.update_volume(admin, data.id, same_path.revision, renamed).await.unwrap();
         let other_moved = control.update_volume(admin, other.id, other.revision, to("/tmp/scratch")).await.unwrap();
+        let deleted = control.delete_volume(admin, data.id).await;
+        control.delete_volume(admin, other.id).await.unwrap();
 
         assert!(matches!(&moved, Err(ControlError::Rejected { entity: "volume", .. })), "{moved:?}");
         assert_eq!((renamed.name.as_str(), renamed.mount_path.as_str()), ("pgdata", "/var/lib/postgresql"));
         assert_eq!(other_moved.mount_path.as_str(), "/tmp/scratch", "only the data volume is fixed");
+        assert!(matches!(&deleted, Err(ControlError::Rejected { entity: "volume", .. })), "{deleted:?}");
+        assert_eq!(control.list_volumes(admin, created.service.id).await.unwrap(), [renamed]);
     }
 
     #[tokio::test]

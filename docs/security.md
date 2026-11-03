@@ -71,9 +71,9 @@ Fixed:
   they are now refused when saved too, along with spaces and control characters.
 - **Mount paths with `:` or `,`** were accepted and only failed at deployment, since Docker
   reads them as separators. Now refused when saved.
-- **A database's data volume could be moved** through the API or CLI (only the dashboard
-  left it out), which started the database empty at its next deployment. Moving it is now
-  refused for every client.
+- **A database's data volume could be moved or deleted** through the API or CLI (only the
+  dashboard left them out), which started the database empty at its next deployment. Both
+  are now refused for every client.
 
 ## Accepted for now
 

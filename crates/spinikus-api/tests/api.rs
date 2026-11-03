@@ -633,7 +633,9 @@ async fn creates_a_database_with_its_parts() {
     let moved =
         api.send(Method::PATCH, &data, token, &[(header::IF_MATCH, &revision)], Some(json!({ "mount_path": "/x" }))).await;
 
+    let deleted = api.send(Method::DELETE, &data, token, &[], None).await;
     assert_eq!((moved.status, &moved.body["code"]), (StatusCode::CONFLICT, &json!("rejected")), "{:?}", moved.body);
+    assert_eq!((deleted.status, &deleted.body["code"]), (StatusCode::CONFLICT, &json!("rejected")), "{:?}", deleted.body);
     assert_eq!(created.status, StatusCode::CREATED);
     assert_eq!((&created.body["service"]["kind"], &created.body["service"]["slug"]), (&json!("database"), &json!("cache")));
     assert_eq!(created.body["service"]["config"]["database"], json!({ "engine": "redis", "version": "8" }));

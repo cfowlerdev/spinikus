@@ -3,8 +3,8 @@
 //! service's next deployment: a service with volumes is deployed with `recreate`, so two
 //! containers never share one.
 //!
-//! A database's data volume stays at the path its image keeps its data in: moving it would
-//! start the database empty, so that is refused (renaming it is fine).
+//! A database's data volume stays at the path its image keeps its data in: moving or
+//! deleting it would start the database empty, so both are refused (renaming it is fine).
 //!
 //! The data stays on the server, in a runtime volume named after the volume's ID, even once
 //! the volume is deleted; removing it from the servers comes later.
@@ -83,14 +83,7 @@ impl Control {
             },
         };
         if fields.mount_path != current.mount_path && holds_database_data(&service, &current) {
-            return Err(ControlError::Rejected {
-                entity: "volume",
-                id: id.to_string(),
-                problem: format!(
-                    "it holds the database's data, which its image keeps at {}; moving it would start the database empty",
-                    current.mount_path
-                ),
-            });
+            return Err(database_data(&current, "moving"));
         }
         let volume = self.store().update_volume(id, revision, fields).await?;
         let changed = audit::changed(&[("name", changes.name.is_some()), ("mount_path", changes.mount_path.is_some())]);
@@ -99,8 +92,12 @@ impl Control {
     }
 
     /// Deletes the volume. Needs the admin role, since later deployments go without its data.
+    /// A database's data volume is `Rejected`: delete the database instead.
     pub async fn delete_volume(&self, principal: &Principal, id: VolumeId) -> Result<(), ControlError> {
-        let (volume, _, environment) = self.volume_with_access(principal, id, Role::Admin).await?;
+        let (volume, service, environment) = self.volume_with_access(principal, id, Role::Admin).await?;
+        if holds_database_data(&service, &volume) {
+            return Err(database_data(&volume, "deleting"));
+        }
         self.store().delete_volume(id).await?;
         let details = json!({ "name": volume.name, "service_id": volume.service_id.to_string() });
         self.audit_by(principal, "volume.delete", id, Some(environment.project_id), details).await
@@ -118,6 +115,18 @@ impl Control {
             Err(error) => Err(error),
             Ok((service, environment)) => Ok((volume, service, environment)),
         }
+    }
+}
+
+/// The refusal to move or delete (`doing`) a database's data volume.
+fn database_data(volume: &Volume, doing: &str) -> ControlError {
+    ControlError::Rejected {
+        entity: "volume",
+        id: volume.id.to_string(),
+        problem: format!(
+            "it holds the database's data, which its image keeps at {}; {doing} it would start the database empty",
+            volume.mount_path
+        ),
     }
 }
 
