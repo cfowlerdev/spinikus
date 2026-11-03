@@ -19,93 +19,81 @@ mod users;
 mod variables;
 mod volumes;
 
-use axum::{
-    Router,
-    routing::{get, post},
-};
 use serde::{Deserialize, Deserializer};
 use spinikus_control::Control;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
-pub fn v1() -> Router<Control> {
-    Router::new()
-        .route("/setup", get(session::setup_status).post(session::setup))
-        .route("/login", post(session::login))
-        .route("/me", get(session::me))
-        .route("/me/password", axum::routing::put(users::change_password))
-        .route("/users", get(users::list).post(users::create))
-        .route("/users/{id}", get(users::show).patch(users::update))
-        .route("/users/{id}/disable", post(users::disable))
-        .route("/users/{id}/enable", post(users::enable))
-        .route("/users/{id}/password", axum::routing::put(users::reset_password))
-        .route("/users/{id}/tokens", get(users::tokens))
-        .route("/projects/{id}/members", get(members::list_project).post(members::add_project))
-        .route("/environments/{id}/members", get(members::list_environment).post(members::add_environment))
-        .route("/memberships/{id}", axum::routing::patch(members::update).delete(members::delete))
-        .route("/audit-log", get(audit::list))
-        .route("/tokens", get(tokens::list).post(tokens::create))
-        .route("/tokens/{id}", axum::routing::delete(tokens::revoke))
-        .route("/projects", get(projects::list).post(projects::create))
-        .route("/projects/{id}", get(projects::show).patch(projects::update).delete(projects::delete))
-        .route("/projects/{id}/environments", get(environments::list).post(environments::create))
-        .route("/environments/{id}", get(environments::show).patch(environments::update).delete(environments::delete))
-        .route("/environments/{id}/services", get(services::list).post(services::create))
-        .route("/environments/{id}/databases", post(databases::create))
-        .route("/services/{id}", get(services::show).patch(services::update).delete(services::delete))
-        .route("/services/{id}/source", get(sources::show).post(sources::create).put(sources::replace))
-        .route("/services/{id}/source/deploy-key", get(sources::show_deploy_key).post(sources::create_deploy_key))
-        .route(
-            "/services/{id}/source/webhook",
-            get(sources::show_webhook).post(sources::create_webhook).delete(sources::delete_webhook),
-        )
-        .route("/services/{id}/deployments", get(deployments::list).post(deployments::create))
-        .route("/services/{id}/rollback", post(deployments::rollback))
-        .route("/services/{id}/restart", post(deployments::restart))
-        .route("/services/{id}/logs", get(service_logs::show))
-        .route("/deployments/{id}", get(deployments::show))
-        .route("/deployments/{id}/events", get(deployments::events))
-        .route("/deployments/{id}/logs", get(deployments::logs))
-        .route("/deployments/{id}/stream", get(deployments::stream))
-        .route("/deployments/{id}/cancel", post(deployments::cancel))
-        .route("/services/{id}/domains", get(domains::list).post(domains::create))
-        .route("/domains/{id}", get(domains::show).patch(domains::update).delete(domains::delete))
-        .route("/projects/{id}/variables", get(variables::list_project).post(variables::create_project))
-        .route("/environments/{id}/variables", get(variables::list_environment).post(variables::create_environment))
-        .route("/services/{id}/variables", get(variables::list_service).post(variables::create_service))
-        .route("/variables/{id}", get(variables::show).patch(variables::update).delete(variables::delete))
-        .route("/variables/{id}/reveal", post(variables::reveal))
-        .route("/services/{id}/volumes", get(volumes::list).post(volumes::create))
-        .route("/volumes/{id}", get(volumes::show).patch(volumes::update).delete(volumes::delete))
-        .route("/storage-destinations", get(backups::list_destinations).post(backups::create_destination))
-        .route(
-            "/storage-destinations/{id}",
-            get(backups::show_destination).patch(backups::update_destination).delete(backups::delete_destination),
-        )
-        .route("/storage-destinations/{id}/test", post(backups::test_destination))
-        .route("/services/{id}/backup-schedules", get(backups::list_schedules).post(backups::create_schedule))
-        .route(
-            "/backup-schedules/{id}",
-            get(backups::show_schedule).patch(backups::update_schedule).delete(backups::delete_schedule),
-        )
-        .route("/services/{id}/backups", get(backups::list).post(backups::create))
-        .route("/backups/{id}", get(backups::show).delete(backups::delete))
-        .route("/backups/{id}/restore", post(backups::restore))
-        .route("/services/{id}/restores", get(backups::list_restores))
-        .route("/restores/{id}", get(backups::show_restore))
-        .route("/instance-backup-schedule", get(instance_backups::show_schedule).put(instance_backups::put_schedule))
-        .route("/instance-backups", get(instance_backups::list).post(instance_backups::create))
-        .route("/instance-backups/{id}", get(instance_backups::show).delete(instance_backups::delete))
-        .route("/settings/{key}", get(settings::show).put(settings::put))
-        .route("/servers", get(servers::list).post(servers::create))
-        .route("/servers/{id}", get(servers::show))
-        .route("/servers/{id}/revoke", post(servers::revoke))
-        .route("/servers/{id}/enrollment-tokens", post(servers::create_join_token))
+/// The API's routes, each with its OpenAPI operation.
+pub fn v1() -> OpenApiRouter<Control> {
+    OpenApiRouter::new()
+        .routes(routes!(crate::openapi::serve))
+        .routes(routes!(session::setup_status, session::setup))
+        .routes(routes!(session::login))
+        .routes(routes!(session::me))
+        .routes(routes!(users::change_password))
+        .routes(routes!(users::list, users::create))
+        .routes(routes!(users::show, users::update))
+        .routes(routes!(users::disable))
+        .routes(routes!(users::enable))
+        .routes(routes!(users::reset_password))
+        .routes(routes!(users::tokens))
+        .routes(routes!(members::list_project, members::add_project))
+        .routes(routes!(members::list_environment, members::add_environment))
+        .routes(routes!(members::update, members::delete))
+        .routes(routes!(audit::list))
+        .routes(routes!(tokens::list, tokens::create))
+        .routes(routes!(tokens::revoke))
+        .routes(routes!(projects::list, projects::create))
+        .routes(routes!(projects::show, projects::update, projects::delete))
+        .routes(routes!(environments::list, environments::create))
+        .routes(routes!(environments::show, environments::update, environments::delete))
+        .routes(routes!(services::list, services::create))
+        .routes(routes!(databases::create))
+        .routes(routes!(services::show, services::update, services::delete))
+        .routes(routes!(sources::show, sources::create, sources::replace))
+        .routes(routes!(sources::show_deploy_key, sources::create_deploy_key))
+        .routes(routes!(sources::show_webhook, sources::create_webhook, sources::delete_webhook))
+        .routes(routes!(deployments::list, deployments::create))
+        .routes(routes!(deployments::rollback))
+        .routes(routes!(deployments::restart))
+        .routes(routes!(service_logs::show))
+        .routes(routes!(deployments::show))
+        .routes(routes!(deployments::events))
+        .routes(routes!(deployments::logs))
+        .routes(routes!(deployments::stream))
+        .routes(routes!(deployments::cancel))
+        .routes(routes!(domains::list, domains::create))
+        .routes(routes!(domains::show, domains::update, domains::delete))
+        .routes(routes!(variables::list_project, variables::create_project))
+        .routes(routes!(variables::list_environment, variables::create_environment))
+        .routes(routes!(variables::list_service, variables::create_service))
+        .routes(routes!(variables::show, variables::update, variables::delete))
+        .routes(routes!(variables::reveal))
+        .routes(routes!(volumes::list, volumes::create))
+        .routes(routes!(volumes::show, volumes::update, volumes::delete))
+        .routes(routes!(backups::list_destinations, backups::create_destination))
+        .routes(routes!(backups::show_destination, backups::update_destination, backups::delete_destination))
+        .routes(routes!(backups::test_destination))
+        .routes(routes!(backups::list_schedules, backups::create_schedule))
+        .routes(routes!(backups::show_schedule, backups::update_schedule, backups::delete_schedule))
+        .routes(routes!(backups::list, backups::create))
+        .routes(routes!(backups::show, backups::delete))
+        .routes(routes!(backups::restore))
+        .routes(routes!(backups::list_restores))
+        .routes(routes!(backups::show_restore))
+        .routes(routes!(instance_backups::show_schedule, instance_backups::put_schedule))
+        .routes(routes!(instance_backups::list, instance_backups::create))
+        .routes(routes!(instance_backups::show, instance_backups::delete))
+        .routes(routes!(settings::show, settings::put))
+        .routes(routes!(servers::list, servers::create))
+        .routes(routes!(servers::show))
+        .routes(routes!(servers::revoke))
+        .routes(routes!(servers::create_join_token))
 }
 
 /// Inbound webhooks, outside `/api/v1`.
-pub fn hooks() -> Router<Control> {
-    Router::new()
-        .route("/git/{provider}/{id}", post(hooks::receive))
-        .layer(axum::extract::DefaultBodyLimit::max(hooks::MAX_DELIVERY_SIZE))
+pub fn hooks() -> OpenApiRouter<Control> {
+    OpenApiRouter::new().routes(routes!(hooks::receive)).layer(axum::extract::DefaultBodyLimit::max(hooks::MAX_DELIVERY_SIZE))
 }
 
 /// Tells an explicit `null` (`Some(None)`) apart from a missing field (`None`, by default).

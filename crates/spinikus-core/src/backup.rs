@@ -20,6 +20,7 @@ use crate::{
 
 /// A bucket backups go to. The secret access key is never included: it is write-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct StorageDestination {
     pub id: StorageDestinationId,
     #[serde(flatten)]
@@ -31,6 +32,7 @@ pub struct StorageDestination {
 
 /// What a user sets on a destination, besides the secret access key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct StorageDestinationFields {
     pub name: String,
     /// The S3 API's URL, such as `https://<account>.r2.cloudflarestorage.com`; AWS if `None`.
@@ -46,6 +48,7 @@ pub struct StorageDestinationFields {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BackupSchedule {
     pub id: BackupScheduleId,
     pub service_id: ServiceId,
@@ -59,6 +62,7 @@ pub struct BackupSchedule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BackupScheduleFields {
     pub destination_id: StorageDestinationId,
     /// A five-field cron expression, in UTC, such as `0 3 * * *`.
@@ -73,6 +77,7 @@ pub const MAX_KEEP_LAST: u32 = 1000;
 
 /// One backup of a database service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Backup {
     pub id: BackupId,
     pub service_id: ServiceId,
@@ -105,6 +110,7 @@ pub struct NewBackup {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum BackupStatus {
     /// Waiting for the database's agent.
@@ -139,6 +145,7 @@ pub type RestoreStatus = BackupStatus;
 
 /// One restore of a backup into its database.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Restore {
     pub id: RestoreId,
     pub service_id: ServiceId,

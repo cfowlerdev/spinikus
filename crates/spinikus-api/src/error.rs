@@ -36,8 +36,9 @@ impl ApiError {
     }
 }
 
-#[derive(Serialize)]
-struct Problem<'a> {
+/// An RFC 9457 problem detail, the body of every error.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct Problem<'a> {
     r#type: &'static str,
     title: &'static str,
     status: u16,

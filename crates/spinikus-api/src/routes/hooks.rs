@@ -7,12 +7,15 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
-use serde_json::json;
+use serde::Serialize;
 use spinikus_control::{
     Control,
     webhooks::{PushDelivery, PushOutcome},
 };
-use spinikus_core::{id::WebhookId, webhook::GitProvider};
+use spinikus_core::{
+    id::{DeploymentId, EnvironmentId, WebhookId},
+    webhook::GitProvider,
+};
 
 use crate::{error::ApiError, extract::Path};
 
@@ -20,8 +23,43 @@ use crate::{error::ApiError, extract::Path};
 /// more commits than Spinikus needs.
 pub const MAX_DELIVERY_SIZE: usize = 5 * 1024 * 1024;
 
+/// What a delivery did.
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum HookResult {
+    /// A provider's test delivery.
+    Pong,
+    /// Nothing to deploy, and why.
+    Ignored {
+        reason: String,
+    },
+    Deployed {
+        deployment_id: DeploymentId,
+    },
+    /// A pull request's preview environment, with what it deploys.
+    Previewed {
+        environment_id: EnvironmentId,
+        deployment_ids: Vec<DeploymentId>,
+    },
+    /// A closed pull request's preview environment, now removed.
+    PreviewRemoved {
+        environment_id: EnvironmentId,
+    },
+}
+
 /// Deploys a push or a pull request's preview, answering `202 Accepted` with what it
 /// deploys, or `200 OK` with why it deployed nothing or with the preview it removed.
+#[utoipa::path(
+    post,
+    path = "/git/{provider}/{id}",
+    operation_id = "hooks_receive",
+    tag = "hooks",
+    params(
+        ("provider" = String, Path, description = "`github`, `gitlab`, `gitea` or `forgejo`."),
+        ("id" = WebhookId, Path),
+    ),
+    responses((status = 202, body = HookResult, description = "Deployed or previewed."), (status = 200, body = HookResult, description = "Nothing deployed, or a preview removed.")),
+)]
 pub async fn receive(
     State(control): State<Control>,
     Path((provider, id)): Path<(String, WebhookId)>,
@@ -37,19 +75,17 @@ pub async fn receive(
     let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
     let delivery =
         PushDelivery { event: header(provider.event_header()), signature: header(provider.signature_header()), body: &body };
-    Ok(match control.receive_push(provider, id, delivery).await? {
-        PushOutcome::Pong => Json(json!({ "result": "pong" })).into_response(),
-        PushOutcome::Ignored(reason) => Json(json!({ "result": "ignored", "reason": reason })).into_response(),
-        PushOutcome::Deployed(deployment) => {
-            (StatusCode::ACCEPTED, Json(json!({ "result": "deployed", "deployment_id": deployment.id }))).into_response()
-        }
+    let (status, result) = match control.receive_push(provider, id, delivery).await? {
+        PushOutcome::Pong => (StatusCode::OK, HookResult::Pong),
+        PushOutcome::Ignored(reason) => (StatusCode::OK, HookResult::Ignored { reason }),
+        PushOutcome::Deployed(deployment) => (StatusCode::ACCEPTED, HookResult::Deployed { deployment_id: deployment.id }),
         PushOutcome::Previewed { environment, deployments } => {
-            let ids: Vec<_> = deployments.iter().map(|deployment| deployment.id).collect();
-            let body = json!({ "result": "previewed", "environment_id": environment.id, "deployment_ids": ids });
-            (StatusCode::ACCEPTED, Json(body)).into_response()
+            let deployment_ids = deployments.iter().map(|deployment| deployment.id).collect();
+            (StatusCode::ACCEPTED, HookResult::Previewed { environment_id: environment.id, deployment_ids })
         }
         PushOutcome::PreviewRemoved(environment) => {
-            Json(json!({ "result": "preview_removed", "environment_id": environment.id })).into_response()
+            (StatusCode::OK, HookResult::PreviewRemoved { environment_id: environment.id })
         }
-    })
+    };
+    Ok((status, Json(result)).into_response())
 }

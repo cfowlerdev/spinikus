@@ -36,6 +36,10 @@ The restore keeps the database and key it replaces beside them, as `*.before-res
 
 To back up on a schedule, add a storage destination (Settings → Storage), then set the schedule and its passphrase in Settings → Backups. Each backup is the same file, uploaded to `<prefix>instance/` in the bucket; download one with any S3 client to restore it.
 
+## API
+
+Everything the dashboard does goes through the JSON API under `/api/v1`, which the `spinikus` CLI uses too. Its OpenAPI 3.1 document is served at `/api/v1/openapi.json` and committed as [`docs/openapi.json`](docs/openapi.json). Authenticate with an API token (`POST /api/v1/login`, or Settings → API tokens) as `Authorization: Bearer spk_…`.
+
 ## Security
 
 See [`docs/security.md`](docs/security.md) for the trust model, what protects what, and the risks Spinikus accepts for now.

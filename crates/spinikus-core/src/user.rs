@@ -13,6 +13,7 @@ use crate::id::UserId;
 pub const MAX_EMAIL_LEN: usize = 254;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct User {
     pub id: UserId,
     /// Unique among all users, disabled ones included.

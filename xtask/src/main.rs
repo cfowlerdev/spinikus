@@ -5,6 +5,9 @@
 //!   Tailwind standalone CLI. `--watch` rebuilds on changes, `--check` fails if the committed
 //!   file is out of date. The CLI is downloaded once into `target/xtask/`, pinned by version
 //!   and checked against its SHA-256.
+//! - `openapi`: writes the API's OpenAPI document to `docs/openapi.json` (from the handlers'
+//!   annotations, through `spinikus-api`'s `openapi` example). `--check` fails if the
+//!   committed file is out of date, as `spinikus-api`'s tests do.
 //! - `release`: static Linux binaries in `dist/`, as GitHub releases publish them (see
 //!   `release.rs`).
 
@@ -32,6 +35,7 @@ const TAILWIND_BINARIES: &[(&str, &str, &str, &str)] = &[
 
 const STYLES: &str = "crates/spinikus-web/styles/app.css";
 const STYLESHEET: &str = "crates/spinikus-web/assets/app.css";
+const OPENAPI: &str = "docs/openapi.json";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -40,9 +44,12 @@ fn main() -> anyhow::Result<()> {
         ["css"] => css(Mode::Build),
         ["css", "--watch"] => css(Mode::Watch),
         ["css", "--check"] => css(Mode::Check),
+        ["openapi"] => openapi(false),
+        ["openapi", "--check"] => openapi(true),
         ["release", options @ ..] => release::release(release::Options::parse(options)?),
         [] | ["help" | "--help" | "-h"] => {
             println!("cargo xtask css [--watch | --check]   build the web UI's stylesheet with Tailwind");
+            println!("cargo xtask openapi [--check]         write the API's OpenAPI document to {OPENAPI}");
             println!(
                 "cargo xtask release [--target <target>]... [--tag v<version>] [--docker]\n    \
                  build release archives of static Linux binaries into dist/"
@@ -82,6 +89,31 @@ fn css(mode: Mode) -> anyhow::Result<()> {
             bail!("{STYLESHEET} is out of date; run `cargo xtask css`");
         }
         println!("{STYLESHEET} is up to date");
+    }
+    Ok(())
+}
+
+fn openapi(check: bool) -> anyhow::Result<()> {
+    let root = workspace_root();
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .current_dir(&root)
+        .args(["run", "--quiet", "--package", "spinikus-api", "--example", "openapi"])
+        .output()
+        .context("Failed to run cargo")?;
+    if !output.status.success() {
+        bail!("building the document failed ({}):\n{}", output.status, String::from_utf8_lossy(&output.stderr));
+    }
+    let path = root.join(OPENAPI);
+    if check {
+        let committed = fs::read(&path).with_context(|| format!("Failed to read {OPENAPI}"))?;
+        if committed != output.stdout {
+            bail!("{OPENAPI} is out of date; run `cargo xtask openapi`");
+        }
+        println!("{OPENAPI} is up to date");
+    } else {
+        fs::write(&path, &output.stdout).with_context(|| format!("Failed to write {OPENAPI}"))?;
+        println!("Wrote {OPENAPI}");
     }
     Ok(())
 }

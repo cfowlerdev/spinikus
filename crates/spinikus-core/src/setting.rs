@@ -4,6 +4,7 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Setting {
     pub key: String,
     pub value: serde_json::Value,

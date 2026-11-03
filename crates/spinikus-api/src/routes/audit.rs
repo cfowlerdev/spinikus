@@ -14,8 +14,9 @@ use crate::{
     extract::{Authenticated, Query},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
 pub struct Params {
     project_id: Option<ProjectId>,
     /// The `next_cursor` of the previous page: entries older than it.
@@ -23,7 +24,8 @@ pub struct Params {
     limit: Option<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
+#[schema(as = AuditList)]
 pub struct List {
     items: Vec<AuditEntry>,
     /// Pass as `before` for older entries; `null` on the last page.
@@ -33,6 +35,14 @@ pub struct List {
 }
 
 /// Entries newest first.
+#[utoipa::path(
+    get,
+    path = "/audit-log",
+    operation_id = "audit_list",
+    tag = "audit-log",
+    params(Params),
+    responses((status = 200, body = List)),
+)]
 pub async fn list(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

@@ -9,6 +9,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Membership {
     pub id: MembershipId,
     pub user_id: UserId,
@@ -22,6 +23,7 @@ pub struct Membership {
 
 /// What a membership grants access to. A user has at most one membership per scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "scope", content = "scope_id", rename_all = "snake_case")]
 pub enum MembershipScope {
     /// The project and all of its environments.
@@ -32,6 +34,7 @@ pub enum MembershipScope {
 
 /// Roles, ordered from least to most access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// Reads everything except secret values.

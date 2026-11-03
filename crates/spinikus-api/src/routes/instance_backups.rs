@@ -20,8 +20,9 @@ use crate::{
     response::{PageBody, PageParams, located, tagged},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = InstanceBackupPutSchedule)]
 pub struct PutSchedule {
     destination_id: StorageDestinationId,
     cron: String,
@@ -32,6 +33,13 @@ pub struct PutSchedule {
 }
 
 /// The schedule, or 404 if it was never set.
+#[utoipa::path(
+    get,
+    path = "/instance-backup-schedule",
+    operation_id = "instance_backups_show_schedule",
+    tag = "instance-backups",
+    responses((status = 200, body = spinikus_core::instance_backup::InstanceBackupSchedule, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn show_schedule(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -43,6 +51,15 @@ pub async fn show_schedule(
 }
 
 /// Sets the schedule. `If-Match: "0"` sets one that was never set.
+#[utoipa::path(
+    put,
+    path = "/instance-backup-schedule",
+    operation_id = "instance_backups_put_schedule",
+    tag = "instance-backups",
+    params(crate::extract::IfMatch),
+    request_body = PutSchedule,
+    responses((status = 200, body = spinikus_core::instance_backup::InstanceBackupSchedule, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn put_schedule(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -60,6 +77,15 @@ pub async fn put_schedule(
     Ok(tagged(schedule.revision, schedule))
 }
 
+/// Lists the instance's backups.
+#[utoipa::path(
+    get,
+    path = "/instance-backups",
+    operation_id = "instance_backups_list",
+    tag = "instance-backups",
+    params(crate::response::PageQuery),
+    responses((status = 200, body = PageBody<InstanceBackup>)),
+)]
 pub async fn list(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -71,11 +97,27 @@ pub async fn list(
 
 /// Backs the instance up now, to the schedule's destination with its passphrase. The backup
 /// starts `queued`.
+#[utoipa::path(
+    post,
+    path = "/instance-backups",
+    operation_id = "instance_backups_create",
+    tag = "instance-backups",
+    responses((status = 201, body = InstanceBackup, headers(("Location" = String, description = "Where the new resource is.")))),
+)]
 pub async fn create(State(control): State<Control>, Authenticated(principal): Authenticated) -> Result<Response, ApiError> {
     let backup = control.back_up_instance(&principal).await?;
     Ok(located(format!("/api/v1/instance-backups/{}", backup.id), backup))
 }
 
+/// Gets an instance backup.
+#[utoipa::path(
+    get,
+    path = "/instance-backups/{id}",
+    operation_id = "instance_backups_show",
+    tag = "instance-backups",
+    params(("id" = InstanceBackupId, Path)),
+    responses((status = 200, body = InstanceBackup)),
+)]
 pub async fn show(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -85,6 +127,14 @@ pub async fn show(
 }
 
 /// Deletes a finished backup and its file.
+#[utoipa::path(
+    delete,
+    path = "/instance-backups/{id}",
+    operation_id = "instance_backups_delete",
+    tag = "instance-backups",
+    params(("id" = InstanceBackupId, Path)),
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn delete(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

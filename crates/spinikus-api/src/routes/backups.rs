@@ -21,7 +21,7 @@ use crate::{
     routes::present,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateDestination {
     name: String,
@@ -36,7 +36,7 @@ pub struct CreateDestination {
     secret_access_key: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateDestination {
     name: Option<String>,
@@ -51,7 +51,7 @@ pub struct UpdateDestination {
     secret_access_key: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateSchedule {
     destination_id: StorageDestinationId,
@@ -60,7 +60,7 @@ pub struct CreateSchedule {
     enabled: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateSchedule {
     destination_id: Option<StorageDestinationId>,
@@ -69,12 +69,20 @@ pub struct UpdateSchedule {
     enabled: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateBackup {
     destination_id: StorageDestinationId,
 }
 
+/// Lists the storage destinations.
+#[utoipa::path(
+    get,
+    path = "/storage-destinations",
+    operation_id = "backups_list_destinations",
+    tag = "backups",
+    responses((status = 200, body = Vec<StorageDestination>)),
+)]
 pub async fn list_destinations(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -82,6 +90,15 @@ pub async fn list_destinations(
     Ok(Json(control.list_storage_destinations(&principal).await?))
 }
 
+/// Creates a storage destination, for instance admins.
+#[utoipa::path(
+    post,
+    path = "/storage-destinations",
+    operation_id = "backups_create_destination",
+    tag = "backups",
+    request_body = CreateDestination,
+    responses((status = 201, body = StorageDestination, headers(("Location" = String, description = "Where the new resource is."), ("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn create_destination(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -101,6 +118,15 @@ pub async fn create_destination(
     Ok(created(format!("/api/v1/storage-destinations/{}", destination.id), destination.revision, destination))
 }
 
+/// Gets a storage destination.
+#[utoipa::path(
+    get,
+    path = "/storage-destinations/{id}",
+    operation_id = "backups_show_destination",
+    tag = "backups",
+    params(("id" = StorageDestinationId, Path)),
+    responses((status = 200, body = StorageDestination, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn show_destination(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -110,6 +136,16 @@ pub async fn show_destination(
     Ok(tagged(destination.revision, destination))
 }
 
+/// Updates a storage destination.
+#[utoipa::path(
+    patch,
+    path = "/storage-destinations/{id}",
+    operation_id = "backups_update_destination",
+    tag = "backups",
+    params(("id" = StorageDestinationId, Path), crate::extract::IfMatch),
+    request_body = UpdateDestination,
+    responses((status = 200, body = StorageDestination, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn update_destination(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -131,6 +167,15 @@ pub async fn update_destination(
     Ok(tagged(destination.revision, destination))
 }
 
+/// Deletes a storage destination no schedule uses.
+#[utoipa::path(
+    delete,
+    path = "/storage-destinations/{id}",
+    operation_id = "backups_delete_destination",
+    tag = "backups",
+    params(("id" = StorageDestinationId, Path)),
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn delete_destination(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -142,6 +187,14 @@ pub async fn delete_destination(
 
 /// Writes and deletes a small object, so a destination is known to work before a backup
 /// needs it. `204` if it does; a `rejected` problem says what the storage answered.
+#[utoipa::path(
+    post,
+    path = "/storage-destinations/{id}/test",
+    operation_id = "backups_test_destination",
+    tag = "backups",
+    params(("id" = StorageDestinationId, Path)),
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn test_destination(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -151,6 +204,15 @@ pub async fn test_destination(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Lists a database's backup schedules.
+#[utoipa::path(
+    get,
+    path = "/services/{id}/backup-schedules",
+    operation_id = "backups_list_schedules",
+    tag = "backups",
+    params(("id" = ServiceId, Path)),
+    responses((status = 200, body = Vec<BackupSchedule>)),
+)]
 pub async fn list_schedules(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -159,6 +221,16 @@ pub async fn list_schedules(
     Ok(Json(control.list_backup_schedules(&principal, service_id).await?))
 }
 
+/// Creates a backup schedule for a database.
+#[utoipa::path(
+    post,
+    path = "/services/{id}/backup-schedules",
+    operation_id = "backups_create_schedule",
+    tag = "backups",
+    params(("id" = ServiceId, Path)),
+    request_body = CreateSchedule,
+    responses((status = 201, body = BackupSchedule, headers(("Location" = String, description = "Where the new resource is."), ("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn create_schedule(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -175,6 +247,15 @@ pub async fn create_schedule(
     Ok(created(format!("/api/v1/backup-schedules/{}", schedule.id), schedule.revision, schedule))
 }
 
+/// Gets a backup schedule.
+#[utoipa::path(
+    get,
+    path = "/backup-schedules/{id}",
+    operation_id = "backups_show_schedule",
+    tag = "backups",
+    params(("id" = BackupScheduleId, Path)),
+    responses((status = 200, body = BackupSchedule, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn show_schedule(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -184,6 +265,16 @@ pub async fn show_schedule(
     Ok(tagged(schedule.revision, schedule))
 }
 
+/// Updates a backup schedule.
+#[utoipa::path(
+    patch,
+    path = "/backup-schedules/{id}",
+    operation_id = "backups_update_schedule",
+    tag = "backups",
+    params(("id" = BackupScheduleId, Path), crate::extract::IfMatch),
+    request_body = UpdateSchedule,
+    responses((status = 200, body = BackupSchedule, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn update_schedule(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -201,6 +292,15 @@ pub async fn update_schedule(
     Ok(tagged(schedule.revision, schedule))
 }
 
+/// Deletes a backup schedule.
+#[utoipa::path(
+    delete,
+    path = "/backup-schedules/{id}",
+    operation_id = "backups_delete_schedule",
+    tag = "backups",
+    params(("id" = BackupScheduleId, Path)),
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn delete_schedule(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -211,6 +311,14 @@ pub async fn delete_schedule(
 }
 
 /// The service's backups, newest first.
+#[utoipa::path(
+    get,
+    path = "/services/{id}/backups",
+    operation_id = "backups_list",
+    tag = "backups",
+    params(("id" = ServiceId, Path), crate::response::PageQuery),
+    responses((status = 200, body = PageBody<Backup>)),
+)]
 pub async fn list(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -222,6 +330,15 @@ pub async fn list(
 }
 
 /// Backs the database up now. The backup starts `queued`.
+#[utoipa::path(
+    post,
+    path = "/services/{id}/backups",
+    operation_id = "backups_create",
+    tag = "backups",
+    params(("id" = ServiceId, Path)),
+    request_body = CreateBackup,
+    responses((status = 201, body = Backup, headers(("Location" = String, description = "Where the new resource is.")))),
+)]
 pub async fn create(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -232,6 +349,15 @@ pub async fn create(
     Ok(located(format!("/api/v1/backups/{}", backup.id), backup))
 }
 
+/// Gets a backup.
+#[utoipa::path(
+    get,
+    path = "/backups/{id}",
+    operation_id = "backups_show",
+    tag = "backups",
+    params(("id" = BackupId, Path)),
+    responses((status = 200, body = Backup)),
+)]
 pub async fn show(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -241,6 +367,14 @@ pub async fn show(
 }
 
 /// Deletes a finished backup and its dump.
+#[utoipa::path(
+    delete,
+    path = "/backups/{id}",
+    operation_id = "backups_delete",
+    tag = "backups",
+    params(("id" = BackupId, Path)),
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn delete(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -252,6 +386,14 @@ pub async fn delete(
 
 /// Restores the backup into its database, replacing the data there, after a safety backup
 /// of it. The restore starts `queued`; it runs once the safety backup succeeded.
+#[utoipa::path(
+    post,
+    path = "/backups/{id}/restore",
+    operation_id = "backups_restore",
+    tag = "backups",
+    params(("id" = BackupId, Path)),
+    responses((status = 201, body = Restore, headers(("Location" = String, description = "Where the new resource is.")))),
+)]
 pub async fn restore(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -262,6 +404,14 @@ pub async fn restore(
 }
 
 /// The database's restores, newest first.
+#[utoipa::path(
+    get,
+    path = "/services/{id}/restores",
+    operation_id = "backups_list_restores",
+    tag = "backups",
+    params(("id" = ServiceId, Path), crate::response::PageQuery),
+    responses((status = 200, body = PageBody<Restore>)),
+)]
 pub async fn list_restores(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -272,6 +422,15 @@ pub async fn list_restores(
     Ok(PageBody::new(page, |restore| restore.id.to_string()))
 }
 
+/// Gets a restore.
+#[utoipa::path(
+    get,
+    path = "/restores/{id}",
+    operation_id = "backups_show_restore",
+    tag = "backups",
+    params(("id" = RestoreId, Path)),
+    responses((status = 200, body = Restore)),
+)]
 pub async fn show_restore(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

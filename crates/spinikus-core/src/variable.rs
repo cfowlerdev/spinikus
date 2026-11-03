@@ -22,6 +22,7 @@ pub const RESERVED_PREFIX: &str = "SPINIKUS_";
 /// A variable as users see it. The value of a secret is never included: secrets are
 /// write-only, and reading one back takes a separate, audited reveal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Variable {
     pub id: VariableId,
     #[serde(flatten)]
@@ -48,6 +49,7 @@ pub struct VariableFields {
 
 /// What a variable is set on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "scope", content = "scope_id", rename_all = "snake_case")]
 pub enum VariableScope {
     /// Shared by every service in the project.
@@ -69,6 +71,7 @@ impl VariableScope {
 
 /// Scope levels, ordered from least to most specific: a more specific level wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeLevel {
     Project,
@@ -90,6 +93,7 @@ impl ScopeLevel {
 
 /// When a variable is passed to the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum VariableAvailability {
     /// Set in the running container's environment.

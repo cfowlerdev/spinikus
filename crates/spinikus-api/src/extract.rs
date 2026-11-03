@@ -128,6 +128,23 @@ impl<S: Send + Sync> FromRequestParts<S> for IfMatch {
     }
 }
 
+impl utoipa::IntoParams for IfMatch {
+    fn into_params(_: impl Fn() -> Option<utoipa::openapi::path::ParameterIn>) -> Vec<utoipa::openapi::path::Parameter> {
+        use utoipa::openapi::{
+            Required,
+            path::{ParameterBuilder, ParameterIn},
+        };
+        let parameter = ParameterBuilder::new()
+            .name("If-Match")
+            .parameter_in(ParameterIn::Header)
+            .required(Required::True)
+            .description(Some("The revision this update expects, as the resource's `ETag` gave it, such as `\"3\"`."))
+            .schema(Some(<String as utoipa::PartialSchema>::schema()))
+            .build();
+        vec![parameter]
+    }
+}
+
 /// The client's user agent and address, for sessions and the audit log.
 pub struct Client(pub ClientInfo);
 

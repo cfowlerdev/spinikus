@@ -11,6 +11,7 @@ use crate::{
 /// A machine managed by Spinikus. Its name is set by users; everything under
 /// `agent` and `last_seen_at` is reported by the agent running on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Server {
     pub id: ServerId,
     pub name: String,
@@ -27,6 +28,7 @@ pub struct Server {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ServerStatus {
     /// No agent has connected yet.
@@ -70,6 +72,7 @@ pub struct ServerFields {
 
 /// Sent by the agent in `Hello` each time it connects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AgentInfo {
     pub agent_version: String,
     pub protocol_version: u32,
@@ -77,6 +80,7 @@ pub struct AgentInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ServerFacts {
     pub hostname: String,
     pub os: String,
@@ -88,6 +92,7 @@ pub struct ServerFacts {
 /// A container as last reported by the agent on its server. Observed state only:
 /// what should run comes from deployments, and the reconciler compares the two.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Instance {
     pub id: InstanceId,
     pub server_id: ServerId,
@@ -100,6 +105,7 @@ pub struct Instance {
 /// One container in an agent's `StateReport`. The service and deployment come from
 /// labels Spinikus puts on the containers it starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ObservedInstance {
     pub service_id: ServiceId,
     pub deployment_id: DeploymentId,
@@ -114,6 +120,7 @@ pub struct ObservedInstance {
 
 /// Container states, following Docker's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InstanceStatus {
     Created,
@@ -143,6 +150,7 @@ impl InstanceStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InstanceHealth {
     /// The container has no health check.

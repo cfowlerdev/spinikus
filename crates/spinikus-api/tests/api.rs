@@ -12,6 +12,8 @@ use spinikus_core::secret::Secret;
 use spinikus_store::{MasterKey, SqliteStore, connect, migrate};
 use tower::ServiceExt;
 
+mod schema;
+
 const PASSWORD: &str = "correct horse battery staple";
 
 struct Api {
@@ -59,8 +61,11 @@ impl Api {
         let response = self.router.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
         let (parts, body) = response.into_parts();
         let content_type = parts.headers.get(header::CONTENT_TYPE).map(|value| value.to_str().unwrap().to_string());
+        let content_type = content_type.unwrap_or_default();
         let bytes = body.collect().await.unwrap().to_bytes();
-        (parts.status, content_type.unwrap_or_default(), String::from_utf8(bytes.to_vec()).unwrap())
+        let body = if content_type.contains("json") { serde_json::from_slice(&bytes).unwrap() } else { Value::Null };
+        schema::check_response("GET", uri, parts.status.as_u16(), &content_type, &body);
+        (parts.status, content_type, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
     async fn send(
@@ -71,7 +76,7 @@ impl Api {
         headers: &[(header::HeaderName, &str)],
         body: Option<Value>,
     ) -> Reply {
-        let mut request = Request::builder().method(method).uri(uri);
+        let mut request = Request::builder().method(method.clone()).uri(uri);
         if let Some(token) = token {
             request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
@@ -86,6 +91,9 @@ impl Api {
         let (parts, body) = response.into_parts();
         let bytes = body.collect().await.unwrap().to_bytes();
         let body = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
+        let content_type = parts.headers.get(header::CONTENT_TYPE).map_or("", |value| value.to_str().unwrap());
+        // Every answer is what the OpenAPI document says it is.
+        schema::check_response(method.as_str(), uri, parts.status.as_u16(), content_type, &body);
         Reply { status: parts.status, headers: parts.headers, body }
     }
 }
@@ -232,6 +240,17 @@ async fn creates_environments_and_services() {
     assert_eq!(created.status, StatusCode::CREATED);
     assert_eq!(created.body["config"], json!({ "port": 8080 }));
     assert_eq!(listed.body["items"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn serves_its_openapi_document_without_a_token() {
+    let api = Api::new().await;
+    let reply = api.send(Method::GET, "/api/v1/openapi.json", None, &[], None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.header(header::CONTENT_TYPE), "application/json");
+    assert_eq!(reply.body["openapi"], "3.1.0");
+    assert_eq!(reply.body["info"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(reply.body["paths"]["/api/v1/projects"]["post"].is_object());
 }
 
 #[tokio::test]

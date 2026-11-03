@@ -106,6 +106,7 @@ impl FromStr for GitProvider {
 
 /// Where each provider sends a webhook's deliveries, relative to the instance's URL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct WebhookPaths {
     pub github: String,
     pub gitlab: String,
@@ -122,6 +123,7 @@ impl WebhookPaths {
 
 /// A service's webhook. Its secret is shown once, when it is made, and never again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Webhook {
     pub id: WebhookId,
     pub service_id: ServiceId,

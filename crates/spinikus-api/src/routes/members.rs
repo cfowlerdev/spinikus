@@ -19,21 +19,23 @@ use crate::{
     response::{created, tagged},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = MemberAdd)]
 pub struct Add {
     /// The user's email; they must already have an account.
     email: String,
     role: Role,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = MemberUpdate)]
 pub struct Update {
     role: Role,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct MemberBody {
     #[serde(flatten)]
     membership: Membership,
@@ -46,7 +48,8 @@ impl From<Member> for MemberBody {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
+#[schema(as = MemberList)]
 pub struct List {
     items: Vec<MemberBody>,
 }
@@ -72,6 +75,15 @@ async fn add(
     Ok(created(location, revision, MemberBody::from(member)))
 }
 
+/// Lists a project's members.
+#[utoipa::path(
+    get,
+    path = "/projects/{id}/members",
+    operation_id = "members_list_project",
+    tag = "members",
+    params(("id" = ProjectId, Path)),
+    responses((status = 200, body = List)),
+)]
 pub async fn list_project(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -80,6 +92,16 @@ pub async fn list_project(
     list(&control, &principal, MembershipScope::Project(id)).await
 }
 
+/// Adds a user to a project by email.
+#[utoipa::path(
+    post,
+    path = "/projects/{id}/members",
+    operation_id = "members_add_project",
+    tag = "members",
+    params(("id" = ProjectId, Path)),
+    request_body = Add,
+    responses((status = 201, body = MemberBody, headers(("Location" = String, description = "Where the new resource is."), ("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn add_project(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -89,6 +111,15 @@ pub async fn add_project(
     add(&control, &principal, MembershipScope::Project(id), body).await
 }
 
+/// Lists an environment's members.
+#[utoipa::path(
+    get,
+    path = "/environments/{id}/members",
+    operation_id = "members_list_environment",
+    tag = "members",
+    params(("id" = EnvironmentId, Path)),
+    responses((status = 200, body = List)),
+)]
 pub async fn list_environment(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -97,6 +128,16 @@ pub async fn list_environment(
     list(&control, &principal, MembershipScope::Environment(id)).await
 }
 
+/// Adds a user to an environment by email.
+#[utoipa::path(
+    post,
+    path = "/environments/{id}/members",
+    operation_id = "members_add_environment",
+    tag = "members",
+    params(("id" = EnvironmentId, Path)),
+    request_body = Add,
+    responses((status = 201, body = MemberBody, headers(("Location" = String, description = "Where the new resource is."), ("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn add_environment(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -106,6 +147,16 @@ pub async fn add_environment(
     add(&control, &principal, MembershipScope::Environment(id), body).await
 }
 
+/// Changes a member's role.
+#[utoipa::path(
+    patch,
+    path = "/memberships/{id}",
+    operation_id = "members_update",
+    tag = "members",
+    params(("id" = MembershipId, Path), crate::extract::IfMatch),
+    request_body = Update,
+    responses((status = 200, body = Membership, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn update(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -117,6 +168,15 @@ pub async fn update(
     Ok(tagged(membership.revision, membership))
 }
 
+/// Removes a member.
+#[utoipa::path(
+    delete,
+    path = "/memberships/{id}",
+    operation_id = "members_delete",
+    tag = "members",
+    params(("id" = MembershipId, Path)),
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn delete(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

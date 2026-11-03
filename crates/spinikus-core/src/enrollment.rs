@@ -22,6 +22,7 @@ pub const CONTROL_PLANE_SERVER_NAME: &str = "control-plane.spinikus.internal";
 
 /// A join token for one server. The token itself is shown once; only its hash is stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EnrollmentToken {
     pub id: EnrollmentTokenId,
     pub server_id: ServerId,

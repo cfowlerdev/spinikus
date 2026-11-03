@@ -29,6 +29,7 @@ const MAX_LABEL_LEN: usize = 63;
 const SUFFIX_LEN: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Route {
     pub hostname: Hostname,
     #[serde(flatten)]
@@ -36,6 +37,7 @@ pub struct Route {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RouteAction {
     /// Proxy requests to the deployment's container on this server.
@@ -48,6 +50,7 @@ pub enum RouteAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ProxyTarget {
     pub service_id: ServiceId,
     pub deployment_id: DeploymentId,
@@ -58,6 +61,7 @@ pub struct ProxyTarget {
 /// A server's full route table. Revisions only identify a table: a new one gets a higher
 /// revision than the one before, but the agent applies whatever it is sent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RouteTable {
     pub revision: u64,
     pub routes: Vec<Route>,

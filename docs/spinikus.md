@@ -411,7 +411,7 @@ spinikus/
 ├── Cargo.toml              # workspace, shared dependency versions and lints
 ├── rust-toolchain.toml     # pinned stable toolchain
 ├── deny.toml               # cargo-deny: licenses and advisories
-├── xtask/                  # dev tasks: the stylesheet (`cargo xtask css`), release archives (`cargo xtask release`); later OpenAPI generation
+├── xtask/                  # dev tasks: the stylesheet (`cargo xtask css`), the OpenAPI document (`cargo xtask openapi`), release archives (`cargo xtask release`)
 ├── install/install.sh      # installs and upgrades a server (control plane or agent) with systemd
 ├── .github/workflows/      # CI, and releases on v* tags
 └── crates/
@@ -464,7 +464,7 @@ Whatever the entry point, the same services enforce the same rules, so the UI ne
 
 ### API
 
-JSON over HTTP under `/api/v1`. The OpenAPI spec is generated from the Rust types (code-first) and served at `/api/v1/openapi.json`. Changes within `v1` are additive only.
+JSON over HTTP under `/api/v1`. The OpenAPI 3.1 spec is generated from the code (utoipa: `#[utoipa::path]` on each handler, `ToSchema` derived next to `Serialize` on the core types behind their `openapi` feature, and the routes registered through utoipa-axum's `OpenApiRouter`, so a route can't exist without its operation). It is served unauthenticated at `/api/v1/openapi.json` and committed as `docs/openapi.json`, which a test keeps current. The API's tests check every response they get against it. Changes within `v1` are additive only.
 
 | Group          | Main routes                                                                                       | Notes                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
@@ -527,6 +527,7 @@ spinikus token list|create|revoke
 
 - **The public API is REST/JSON** with an OpenAPI spec, not gRPC. gRPC stays for the agent protocol.
 - **The CLI client is hand-written**, in the binary crate. The OpenAPI spec is used for docs and contract tests, not for client generation.
+- **The OpenAPI spec is code-first with utoipa**, not a hand-written YAML file. A hand-written spec drifts from the handlers unless something checks it, and the check would amount to generating it anyway. aide was the alternative: it infers more from axum's extractors, but our own extractors and response helpers (`tagged`, `created`) would have needed wrappers just the same, and utoipa is more widely used. What every operation shares (bearer auth, problem-detail errors) is added in one pass over the built document rather than repeated in each annotation.
 - **The CLI knows which service you mean through flags plus a link file** created by `spinikus link`. It cannot be `spinikus.json`, which holds no hosting details.
 - **Git-based deploys are MVP.** Deploying from a local directory is Later.
 - **Errors** use RFC 9457 problem details, with a stable machine-readable `code` for every error.

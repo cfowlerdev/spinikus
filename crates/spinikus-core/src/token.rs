@@ -16,6 +16,7 @@ pub const API_TOKEN_PREFIX: &str = "spk_";
 
 /// A user's API token. It acts as its user, limited to its role and scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApiToken {
     pub id: ApiTokenId,
     pub user_id: UserId,
@@ -64,6 +65,7 @@ pub struct NewApiToken {
 
 /// A signed-in web session, identified by a random cookie value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Session {
     pub id: SessionId,
     pub user_id: UserId,

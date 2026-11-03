@@ -16,8 +16,9 @@ use crate::{
     response::{PageBody, PageParams, created, tagged},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = EnvironmentCreate)]
 pub struct Create {
     name: String,
     slug: Option<String>,
@@ -30,8 +31,9 @@ pub struct Create {
     previews: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = EnvironmentUpdate)]
 pub struct Update {
     name: Option<String>,
     slug: Option<String>,
@@ -39,6 +41,15 @@ pub struct Update {
     previews: Option<bool>,
 }
 
+/// Lists a project's environments.
+#[utoipa::path(
+    get,
+    path = "/projects/{id}/environments",
+    operation_id = "environments_list",
+    tag = "environments",
+    params(("id" = ProjectId, Path), crate::response::PageQuery),
+    responses((status = 200, body = PageBody<Environment>)),
+)]
 pub async fn list(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -49,6 +60,16 @@ pub async fn list(
     Ok(PageBody::new(page, |environment| environment.id.to_string()))
 }
 
+/// Creates an environment.
+#[utoipa::path(
+    post,
+    path = "/projects/{id}/environments",
+    operation_id = "environments_create",
+    tag = "environments",
+    params(("id" = ProjectId, Path)),
+    request_body = Create,
+    responses((status = 201, body = Environment, headers(("Location" = String, description = "Where the new resource is."), ("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn create(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -61,6 +82,15 @@ pub async fn create(
     Ok(created(format!("/api/v1/environments/{}", environment.id), environment.revision, environment))
 }
 
+/// Gets an environment.
+#[utoipa::path(
+    get,
+    path = "/environments/{id}",
+    operation_id = "environments_show",
+    tag = "environments",
+    params(("id" = EnvironmentId, Path)),
+    responses((status = 200, body = Environment, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn show(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -70,6 +100,16 @@ pub async fn show(
     Ok(tagged(environment.revision, environment))
 }
 
+/// Renames an environment or turns its previews on or off.
+#[utoipa::path(
+    patch,
+    path = "/environments/{id}",
+    operation_id = "environments_update",
+    tag = "environments",
+    params(("id" = EnvironmentId, Path), crate::extract::IfMatch),
+    request_body = Update,
+    responses((status = 200, body = Environment, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn update(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -82,6 +122,15 @@ pub async fn update(
     Ok(tagged(environment.revision, environment))
 }
 
+/// Deletes an environment.
+#[utoipa::path(
+    delete,
+    path = "/environments/{id}",
+    operation_id = "environments_delete",
+    tag = "environments",
+    params(("id" = EnvironmentId, Path)),
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn delete(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

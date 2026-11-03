@@ -15,8 +15,9 @@ use crate::{
     extract::{Authenticated, Body, Path},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = TokenCreate)]
 pub struct Create {
     name: String,
     role: Role,
@@ -27,23 +28,41 @@ pub struct Create {
     expires_at: Option<Timestamp>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
+#[schema(as = TokenCreated)]
 pub struct Created {
     /// The bearer token. Shown only this once.
     token: String,
     api_token: ApiToken,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
+#[schema(as = TokenList)]
 pub struct List {
     items: Vec<ApiToken>,
 }
 
 /// The user's tokens that are not revoked.
+#[utoipa::path(
+    get,
+    path = "/tokens",
+    operation_id = "tokens_list",
+    tag = "tokens",
+    responses((status = 200, body = List)),
+)]
 pub async fn list(State(control): State<Control>, Authenticated(principal): Authenticated) -> Result<Json<List>, ApiError> {
     Ok(Json(List { items: control.list_api_tokens(&principal).await? }))
 }
 
+/// Creates an API token, never wider than the one in use.
+#[utoipa::path(
+    post,
+    path = "/tokens",
+    operation_id = "tokens_create",
+    tag = "tokens",
+    request_body = Create,
+    responses((status = 201, body = Created)),
+)]
 pub async fn create(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -55,6 +74,14 @@ pub async fn create(
 }
 
 /// Revokes one of the user's tokens, which may be the one in use.
+#[utoipa::path(
+    delete,
+    path = "/tokens/{id}",
+    operation_id = "tokens_revoke",
+    tag = "tokens",
+    params(("id" = ApiTokenId, Path)),
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn revoke(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

@@ -24,8 +24,19 @@ impl<I> PageParams<I> {
     }
 }
 
+/// The parameters of [`PageParams`], for the OpenAPI document.
+#[derive(utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+#[allow(dead_code)]
+pub struct PageQuery {
+    /// The `next_cursor` of the previous page.
+    after: Option<String>,
+    /// How many items, 50 by default and at most 100.
+    limit: Option<u32>,
+}
+
 /// A page of a list: pass `next_cursor` as `after` to get the next one. It is `null` on the last page.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct PageBody<T> {
     pub items: Vec<T>,
     pub next_cursor: Option<String>,

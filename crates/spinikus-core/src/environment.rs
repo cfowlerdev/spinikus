@@ -9,6 +9,7 @@ use crate::{
 
 /// A stage of a project, such as production or the preview for one pull request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Environment {
     pub id: EnvironmentId,
     pub project_id: ProjectId,
@@ -31,6 +32,7 @@ pub struct Environment {
 /// What the environment is for. A project has at most one production environment
 /// and one preview per pull request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EnvironmentKind {
     Production,

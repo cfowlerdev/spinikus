@@ -25,8 +25,9 @@ use crate::{
 /// How many lines already written come first, unless `tail` says otherwise.
 const DEFAULT_TAIL: u32 = 100;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
 pub struct LogParams {
     deployment_id: Option<DeploymentId>,
     since: Option<Timestamp>,
@@ -39,6 +40,14 @@ pub struct LogParams {
 /// `deployment_id`'s: a `log` event per line (`{ "at", "stream", "text" }`), then `end`
 /// (`{ "error" }`) when there are no more. With `follow=true` new lines keep coming until
 /// the client goes away.
+#[utoipa::path(
+    get,
+    path = "/services/{id}/logs",
+    operation_id = "service_logs_show",
+    tag = "logs",
+    params(("id" = ServiceId, Path), LogParams),
+    responses((status = 200, content_type = "text/event-stream", body = String, description = "`log` events, then `end`.")),
+)]
 pub async fn show(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

@@ -10,18 +10,26 @@ use crate::{
     extract::{Authenticated, Body, Client},
 };
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct SetupStatus {
     needs_setup: bool,
     /// Whether setting up needs the setup code the install script printed.
     setup_code_required: bool,
 }
 
+/// Whether the instance still needs its first admin.
+#[utoipa::path(
+    get,
+    path = "/setup",
+    operation_id = "session_setup_status",
+    tag = "session",
+    responses((status = 200, body = SetupStatus)),
+)]
 pub async fn setup_status(State(control): State<Control>) -> Result<Json<SetupStatus>, ApiError> {
     Ok(Json(SetupStatus { needs_setup: control.needs_setup().await?, setup_code_required: control.setup_code_required() }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Setup {
     /// The setup code, when the instance has one.
@@ -33,12 +41,20 @@ pub struct Setup {
 }
 
 /// Creates the first admin. Unauthenticated, and refused once any user exists.
+#[utoipa::path(
+    post,
+    path = "/setup",
+    operation_id = "session_setup",
+    tag = "session",
+    request_body = Setup,
+    responses((status = 201, body = User)),
+)]
 pub async fn setup(State(control): State<Control>, Body(setup): Body<Setup>) -> Result<(StatusCode, Json<User>), ApiError> {
     let user = control.set_up(&setup.setup_code, &setup.email, &setup.name, setup.password).await?;
     Ok((StatusCode::CREATED, Json(user)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Login {
     email: String,
@@ -52,7 +68,7 @@ fn default_token_name() -> String {
     "spinikus CLI".to_string()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct LoginResponse {
     /// The bearer token. Shown only this once.
     token: String,
@@ -60,6 +76,14 @@ pub struct LoginResponse {
 }
 
 /// Exchanges an email and password for an API token, as `spinikus login` does.
+#[utoipa::path(
+    post,
+    path = "/login",
+    operation_id = "session_login",
+    tag = "session",
+    request_body = Login,
+    responses((status = 201, body = LoginResponse)),
+)]
 pub async fn login(
     State(control): State<Control>,
     Client(client): Client,
@@ -69,6 +93,14 @@ pub async fn login(
     Ok((StatusCode::CREATED, Json(LoginResponse { token: secret.expose().to_string(), api_token })))
 }
 
+/// The user the token belongs to.
+#[utoipa::path(
+    get,
+    path = "/me",
+    operation_id = "session_me",
+    tag = "session",
+    responses((status = 200, body = User)),
+)]
 pub async fn me(Authenticated(principal): Authenticated) -> Json<User> {
     Json(principal.user)
 }

@@ -13,12 +13,22 @@ use crate::{
     response::{PageBody, PageParams, created, tagged},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = ServerCreate)]
 pub struct Create {
     name: String,
 }
 
+/// Lists the servers.
+#[utoipa::path(
+    get,
+    path = "/servers",
+    operation_id = "servers_list",
+    tag = "servers",
+    params(crate::response::PageQuery),
+    responses((status = 200, body = PageBody<Server>)),
+)]
 pub async fn list(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -28,6 +38,15 @@ pub async fn list(
     Ok(PageBody::new(page, |server| server.id.to_string()))
 }
 
+/// Adds a server, for instance admins.
+#[utoipa::path(
+    post,
+    path = "/servers",
+    operation_id = "servers_create",
+    tag = "servers",
+    request_body = Create,
+    responses((status = 201, body = Server, headers(("Location" = String, description = "Where the new resource is."), ("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn create(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -37,6 +56,15 @@ pub async fn create(
     Ok(created(format!("/api/v1/servers/{}", server.id), server.revision, server))
 }
 
+/// Gets a server.
+#[utoipa::path(
+    get,
+    path = "/servers/{id}",
+    operation_id = "servers_show",
+    tag = "servers",
+    params(("id" = ServerId, Path)),
+    responses((status = 200, body = Server, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn show(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -47,6 +75,14 @@ pub async fn show(
 }
 
 /// Revokes the server: its agent is disconnected and can never connect again.
+#[utoipa::path(
+    post,
+    path = "/servers/{id}/revoke",
+    operation_id = "servers_revoke",
+    tag = "servers",
+    params(("id" = ServerId, Path)),
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn revoke(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -56,7 +92,8 @@ pub async fn revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
+#[schema(as = ServerJoinTokenResponse)]
 pub struct JoinTokenResponse {
     /// The join token for `spinikus agent join`. Shown only this once.
     token: String,
@@ -65,6 +102,15 @@ pub struct JoinTokenResponse {
     ca_fingerprint: String,
 }
 
+/// Creates a join token for the server's agent.
+#[utoipa::path(
+    post,
+    path = "/servers/{id}/enrollment-tokens",
+    operation_id = "servers_create_join_token",
+    tag = "servers",
+    params(("id" = ServerId, Path)),
+    responses((status = 201, body = JoinTokenResponse)),
+)]
 pub async fn create_join_token(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

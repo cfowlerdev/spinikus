@@ -11,9 +11,11 @@ serde_json.workspace = true
 tokio-stream.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
 
-spinikus-control.workspace = true
-spinikus-core.workspace = true
+spinikus-control = { workspace = true, features = ["openapi"] }
+spinikus-core = { workspace = true, features = ["openapi"] }
 
 [dev-dependencies]
 http-body-util.workspace = true

@@ -17,6 +17,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Deployment {
     pub id: DeploymentId,
     pub service_id: ServiceId,
@@ -61,8 +62,10 @@ pub struct NewDeployment {
 /// The service's settings as they were when the deployment was created, so later
 /// edits never change what an existing deployment runs. A rollback reuses its target's snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeploymentSnapshot {
     pub source: SourceSpec,
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
     pub config: ServiceConfig,
     /// The config fields `spinikus.json` set, such as `runtime.port`, once the build has
     /// read it; the file's values are already in `config`.
@@ -71,6 +74,7 @@ pub struct DeploymentSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentTrigger {
     /// Started by a user from the UI, API or CLI.
@@ -95,6 +99,7 @@ impl DeploymentTrigger {
 
 /// How the new deployment replaces the live one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentStrategy {
     /// Start the new containers, verify them, switch routes, then drain the old ones.
@@ -130,6 +135,7 @@ impl_text!(DeploymentStrategy, "deployment strategy");
 
 /// One recorded change of a deployment's status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeploymentEvent {
     pub id: DeploymentEventId,
     pub deployment_id: DeploymentId,

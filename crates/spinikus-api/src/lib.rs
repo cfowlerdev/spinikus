@@ -8,6 +8,7 @@
 
 mod error;
 mod extract;
+mod openapi;
 mod response;
 mod routes;
 
@@ -16,14 +17,14 @@ use spinikus_control::Control;
 use tower_http::trace::TraceLayer;
 
 pub use error::ApiError;
+pub use openapi::{document as openapi, json as openapi_json};
 
 /// The API's routes, to merge into the server's router.
 pub fn router(control: Control) -> Router {
-    let v1 = routes::v1()
-        .fallback(|| async { ApiError::NoRoute })
-        .method_not_allowed_fallback(|| async { ApiError::MethodNotAllowed });
-    let hooks = routes::hooks()
-        .fallback(|| async { ApiError::NoRoute })
-        .method_not_allowed_fallback(|| async { ApiError::MethodNotAllowed });
+    let (v1, _) = routes::v1().split_for_parts();
+    let v1 = v1.fallback(|| async { ApiError::NoRoute }).method_not_allowed_fallback(|| async { ApiError::MethodNotAllowed });
+    let (hooks, _) = routes::hooks().split_for_parts();
+    let hooks =
+        hooks.fallback(|| async { ApiError::NoRoute }).method_not_allowed_fallback(|| async { ApiError::MethodNotAllowed });
     Router::new().nest("/api/v1", v1).nest("/hooks", hooks).layer(TraceLayer::new_for_http()).with_state(control)
 }

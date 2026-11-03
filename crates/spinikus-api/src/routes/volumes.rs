@@ -16,20 +16,31 @@ use crate::{
     response::{created, tagged},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = VolumeCreate)]
 pub struct Create {
     name: String,
     mount_path: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = VolumeUpdate)]
 pub struct Update {
     name: Option<String>,
     mount_path: Option<String>,
 }
 
+/// Lists a service's volumes.
+#[utoipa::path(
+    get,
+    path = "/services/{id}/volumes",
+    operation_id = "volumes_list",
+    tag = "volumes",
+    params(("id" = ServiceId, Path)),
+    responses((status = 200, body = Vec<Volume>)),
+)]
 pub async fn list(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -38,6 +49,16 @@ pub async fn list(
     Ok(Json(control.list_volumes(&principal, service_id).await?))
 }
 
+/// Adds a volume to a service, from its next deployment.
+#[utoipa::path(
+    post,
+    path = "/services/{id}/volumes",
+    operation_id = "volumes_create",
+    tag = "volumes",
+    params(("id" = ServiceId, Path)),
+    request_body = Create,
+    responses((status = 201, body = Volume, headers(("Location" = String, description = "Where the new resource is."), ("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn create(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -49,6 +70,15 @@ pub async fn create(
     Ok(created(format!("/api/v1/volumes/{}", volume.id), volume.revision, volume))
 }
 
+/// Gets a volume.
+#[utoipa::path(
+    get,
+    path = "/volumes/{id}",
+    operation_id = "volumes_show",
+    tag = "volumes",
+    params(("id" = VolumeId, Path)),
+    responses((status = 200, body = Volume, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn show(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -59,6 +89,15 @@ pub async fn show(
 }
 
 /// Applies from the service's next deployment; the data stays where it is.
+#[utoipa::path(
+    patch,
+    path = "/volumes/{id}",
+    operation_id = "volumes_update",
+    tag = "volumes",
+    params(("id" = VolumeId, Path), crate::extract::IfMatch),
+    request_body = Update,
+    responses((status = 200, body = Volume, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn update(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -71,6 +110,15 @@ pub async fn update(
     Ok(tagged(volume.revision, volume))
 }
 
+/// Removes a volume from a service; its data stays on the server.
+#[utoipa::path(
+    delete,
+    path = "/volumes/{id}",
+    operation_id = "volumes_delete",
+    tag = "volumes",
+    params(("id" = VolumeId, Path)),
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn delete(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

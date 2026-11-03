@@ -16,6 +16,7 @@ const PRIVATE_SUFFIXES: [&str; 9] = ["localhost", "local", "test", "example", "i
 
 /// A hostname the proxy serves, routed to a service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Domain {
     pub id: DomainId,
     pub service_id: ServiceId,

@@ -16,6 +16,7 @@ use crate::{
 pub type AuditDetails = serde_json::Map<String, serde_json::Value>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AuditEntry {
     pub id: AuditEntryId,
     pub actor: Actor,
@@ -26,6 +27,7 @@ pub struct AuditEntry {
     pub target_id: Option<String>,
     /// The project the action happened in, so a project's admins can read its part of the log.
     pub project_id: Option<ProjectId>,
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
     pub details: AuditDetails,
     pub created_at: Timestamp,
 }

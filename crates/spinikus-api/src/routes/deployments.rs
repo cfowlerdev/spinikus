@@ -24,6 +24,14 @@ use crate::{
 };
 
 /// The service's deployments, newest first.
+#[utoipa::path(
+    get,
+    path = "/services/{id}/deployments",
+    operation_id = "deployments_list",
+    tag = "deployments",
+    params(("id" = ServiceId, Path), crate::response::PageQuery),
+    responses((status = 200, body = PageBody<Deployment>)),
+)]
 pub async fn list(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -35,6 +43,14 @@ pub async fn list(
 }
 
 /// Deploys the service as it is now. The deployment starts `queued`.
+#[utoipa::path(
+    post,
+    path = "/services/{id}/deployments",
+    operation_id = "deployments_create",
+    tag = "deployments",
+    params(("id" = ServiceId, Path)),
+    responses((status = 201, body = Deployment, headers(("Location" = String, description = "Where the new resource is.")))),
+)]
 pub async fn create(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -44,6 +60,15 @@ pub async fn create(
     Ok(located(format!("/api/v1/deployments/{}", deployment.id), deployment))
 }
 
+/// Gets a deployment.
+#[utoipa::path(
+    get,
+    path = "/deployments/{id}",
+    operation_id = "deployments_show",
+    tag = "deployments",
+    params(("id" = DeploymentId, Path)),
+    responses((status = 200, body = Deployment)),
+)]
 pub async fn show(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -53,6 +78,14 @@ pub async fn show(
 }
 
 /// Every status change, oldest first.
+#[utoipa::path(
+    get,
+    path = "/deployments/{id}/events",
+    operation_id = "deployments_events",
+    tag = "deployments",
+    params(("id" = DeploymentId, Path)),
+    responses((status = 200, body = Vec<DeploymentEvent>)),
+)]
 pub async fn events(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -61,6 +94,15 @@ pub async fn events(
     Ok(Json(control.list_deployment_events(&principal, id).await?))
 }
 
+/// Cancels a deployment in progress.
+#[utoipa::path(
+    post,
+    path = "/deployments/{id}/cancel",
+    operation_id = "deployments_cancel",
+    tag = "deployments",
+    params(("id" = DeploymentId, Path)),
+    responses((status = 200, body = Deployment)),
+)]
 pub async fn cancel(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -70,6 +112,14 @@ pub async fn cancel(
 }
 
 /// The deployment's log so far (the clone, build, pull and health check), as plain text.
+#[utoipa::path(
+    get,
+    path = "/deployments/{id}/logs",
+    operation_id = "deployments_logs",
+    tag = "deployments",
+    params(("id" = DeploymentId, Path)),
+    responses((status = 200, content_type = "text/plain", body = String, description = "The log so far.")),
+)]
 pub async fn logs(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -79,7 +129,7 @@ pub async fn logs(
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RollbackBody {
     deployment_id: Option<DeploymentId>,
@@ -87,6 +137,15 @@ pub struct RollbackBody {
 
 /// Rolls the service back to an earlier deployment, by default the last one replaced. The
 /// body, `{ "deployment_id": … }`, is optional.
+#[utoipa::path(
+    post,
+    path = "/services/{id}/rollback",
+    operation_id = "deployments_rollback",
+    tag = "deployments",
+    params(("id" = ServiceId, Path)),
+    request_body(content = Option<RollbackBody>, description = "Optional."),
+    responses((status = 201, body = Deployment, headers(("Location" = String, description = "Where the new resource is.")))),
+)]
 pub async fn rollback(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -100,6 +159,14 @@ pub async fn rollback(
 
 /// Restarts the service's live container, answering with its live deployment once the
 /// agent has.
+#[utoipa::path(
+    post,
+    path = "/services/{id}/restart",
+    operation_id = "deployments_restart",
+    tag = "deployments",
+    params(("id" = ServiceId, Path)),
+    responses((status = 200, body = Deployment)),
+)]
 pub async fn restart(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -111,6 +178,14 @@ pub async fn restart(
 /// Follows the deployment as server-sent events: `log` events (a line each, with the byte
 /// offset after it as the event ID), a `status` event first and on every change, and `end`
 /// (with the final status) once it is live or has finished. `Last-Event-ID` resumes after that offset.
+#[utoipa::path(
+    get,
+    path = "/deployments/{id}/stream",
+    operation_id = "deployments_stream",
+    tag = "deployments",
+    params(("id" = DeploymentId, Path)),
+    responses((status = 200, content_type = "text/event-stream", body = String, description = "`log`, `status` and `end` events.")),
+)]
 pub async fn stream(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

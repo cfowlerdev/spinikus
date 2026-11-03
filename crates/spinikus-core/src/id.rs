@@ -72,6 +72,14 @@ macro_rules! define_id {
             }
         }
 
+        #[cfg(feature = "openapi")]
+        $crate::openapi::string_schema!(
+            $name,
+            concat!("An ID: `", $prefix, "_` and a ULID, which sorts by creation time."),
+            Some(concat!("^", $prefix, "_[0-9A-HJKMNP-TV-Z]{26}$")),
+            concat!($prefix, "_01J9ZX4Q8V6T3N2M1K0H9G8F7E")
+        );
+
         impl<'de> serde::Deserialize<'de> for $name {
             fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
                 let value = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;

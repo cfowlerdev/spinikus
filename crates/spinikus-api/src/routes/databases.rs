@@ -12,8 +12,9 @@ use crate::{
     response::located,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = DatabaseCreate)]
 pub struct Create {
     name: String,
     slug: Option<String>,
@@ -28,6 +29,15 @@ pub struct Create {
 
 /// Creates a database service and deploys it. The body has the service and its first
 /// deployment, and the restore when it starts from a backup; the location is the service's.
+#[utoipa::path(
+    post,
+    path = "/environments/{id}/databases",
+    operation_id = "databases_create",
+    tag = "databases",
+    params(("id" = EnvironmentId, Path)),
+    request_body = Create,
+    responses((status = 201, body = spinikus_control::databases::CreatedDatabase, headers(("Location" = String, description = "Where the new resource is.")))),
+)]
 pub async fn create(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

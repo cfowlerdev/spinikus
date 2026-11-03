@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::text::impl_text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentStatus {
     /// Created, waiting for its turn.
@@ -37,6 +38,7 @@ pub enum DeploymentStatus {
 
 /// Why a deployment ended as `failed` or `canceled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum EndReason {
     BuildFailed,

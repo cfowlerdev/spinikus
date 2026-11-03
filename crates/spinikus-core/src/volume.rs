@@ -17,6 +17,7 @@ pub const MAX_MOUNT_PATH_LEN: usize = 4096;
 /// A named volume of a service. The data lives on the server running the service, in a
 /// runtime volume named after the volume's ID, so renaming it never touches the data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Volume {
     pub id: VolumeId,
     pub service_id: ServiceId,

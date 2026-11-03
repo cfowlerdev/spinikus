@@ -10,6 +10,7 @@ use crate::id::{ServiceId, SourceId};
 /// public key to the repository as a read-only deploy key. The private key is stored
 /// sealed and only ever sent to the agent that builds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeployKey {
     pub service_id: ServiceId,
     /// In OpenSSH format: `ssh-ed25519 AAAA… spinikus`.
@@ -24,6 +25,7 @@ const MAX_LEN: usize = 1024;
 
 /// A service's source. Each service has at most one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Source {
     pub id: SourceId,
     pub service_id: ServiceId,
@@ -35,6 +37,7 @@ pub struct Source {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SourceSpec {
     /// Build from a Git repository.
@@ -44,6 +47,7 @@ pub enum SourceSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GitSource {
     /// `https://`, `http://` or `ssh://` URL, or scp-style `git@host:owner/repo.git`.
     pub repo_url: String,
@@ -53,6 +57,7 @@ pub struct GitSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ImageSource {
     /// Image reference, such as `ghcr.io/acme/web:1.4` or `postgres:17`.
     pub image: String,

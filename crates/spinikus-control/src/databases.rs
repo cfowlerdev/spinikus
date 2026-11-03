@@ -44,6 +44,7 @@ pub struct NewDatabase {
 
 /// A database just created, and its first deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreatedDatabase {
     pub service: Service,
     pub deployment: Deployment,

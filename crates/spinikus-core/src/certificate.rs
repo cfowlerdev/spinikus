@@ -11,6 +11,7 @@ use crate::{
 
 /// A certificate and its chain. The private key is stored encrypted and read separately.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Certificate {
     pub id: CertificateId,
     /// The names it is valid for (its subject alternative names).
@@ -49,6 +50,7 @@ pub struct CertificateBundle {
 /// Where getting a certificate for a hostname stands: the current certificate, if any,
 /// and the failures since the last success.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct HostnameCertificate {
     pub hostname: Hostname,
     pub certificate_id: Option<CertificateId>,
@@ -75,6 +77,7 @@ pub struct NewCertificate {
 /// An account with an ACME certificate authority, such as Let's Encrypt. Its credentials
 /// (the account key) are stored encrypted and read separately.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AcmeAccount {
     pub id: AcmeAccountId,
     pub directory_url: String,

@@ -34,6 +34,7 @@ pub struct DomainChanges {
 /// Where a service is reachable: its generated hostname, if it has one, and its domains,
 /// with where getting a certificate stands for those of its hostnames that have tried.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ServiceDomains {
     pub generated_hostname: Option<Hostname>,
     pub domains: Vec<Domain>,

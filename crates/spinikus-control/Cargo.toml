@@ -27,11 +27,16 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tonic = { workspace = true, features = ["tls-ring"] }
 tracing.workspace = true
+utoipa = { workspace = true, optional = true }
 x509-parser.workspace = true
 
 spinikus-core.workspace = true
 spinikus-proto.workspace = true
 spinikus-store.workspace = true
+
+[features]
+# OpenAPI schemas for the types the API returns.
+openapi = ["dep:utoipa", "spinikus-core/openapi"]
 
 [dev-dependencies]
 tokio-stream = { workspace = true, features = ["net"] }

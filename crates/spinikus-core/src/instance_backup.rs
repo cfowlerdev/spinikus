@@ -17,6 +17,7 @@ use crate::{
 /// When the instance is backed up, where to, and how many backups to keep. The passphrase is
 /// never included: it is write-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct InstanceBackupSchedule {
     #[serde(flatten)]
     pub fields: InstanceBackupScheduleFields,
@@ -27,6 +28,7 @@ pub struct InstanceBackupSchedule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct InstanceBackupScheduleFields {
     pub destination_id: StorageDestinationId,
     /// A five-field cron expression, in UTC, such as `0 3 * * *`.
@@ -38,6 +40,7 @@ pub struct InstanceBackupScheduleFields {
 
 /// One backup of the instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct InstanceBackup {
     pub id: InstanceBackupId,
     pub destination_id: StorageDestinationId,

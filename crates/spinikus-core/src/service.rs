@@ -12,6 +12,7 @@ pub type ServiceConfig = serde_json::Map<String, serde_json::Value>;
 
 /// Something that runs as containers in an environment: an app, a database or a template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Service {
     pub id: ServiceId,
     pub environment_id: EnvironmentId,
@@ -20,6 +21,7 @@ pub struct Service {
     pub slug: Slug,
     /// Fixed when the service is created.
     pub kind: ServiceKind,
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
     pub config: ServiceConfig,
     /// The server new deployments run on; `None` means the embedded server.
     pub server_id: Option<ServerId>,
@@ -29,6 +31,7 @@ pub struct Service {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceKind {
     App,

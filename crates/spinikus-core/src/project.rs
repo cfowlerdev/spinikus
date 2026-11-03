@@ -5,6 +5,7 @@ use crate::{id::ProjectId, slug::Slug};
 
 /// The top of the hierarchy: a project has environments, which have services.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Project {
     pub id: ProjectId,
     pub name: String,

@@ -15,8 +15,9 @@ use crate::{
     response::{PageBody, PageParams, created, tagged},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = UserCreate)]
 pub struct Create {
     email: String,
     name: String,
@@ -26,32 +27,45 @@ pub struct Create {
     password: Option<Secret>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = UserUpdate)]
 pub struct Update {
     email: Option<String>,
     name: Option<String>,
     admin: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = UserPassword)]
 pub struct Password {
     password: Secret,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = UserChangePassword)]
 pub struct ChangePassword {
     current_password: Secret,
     new_password: Secret,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
+#[schema(as = UserTokens)]
 pub struct Tokens {
     items: Vec<ApiToken>,
 }
 
+/// Lists the users, for instance admins.
+#[utoipa::path(
+    get,
+    path = "/users",
+    operation_id = "users_list",
+    tag = "users",
+    params(crate::response::PageQuery),
+    responses((status = 200, body = PageBody<User>)),
+)]
 pub async fn list(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -61,6 +75,15 @@ pub async fn list(
     Ok(PageBody::new(page, |user| user.id.to_string()))
 }
 
+/// Creates a user with an initial password, for instance admins.
+#[utoipa::path(
+    post,
+    path = "/users",
+    operation_id = "users_create",
+    tag = "users",
+    request_body = Create,
+    responses((status = 201, body = User, headers(("Location" = String, description = "Where the new resource is."), ("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn create(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -71,6 +94,15 @@ pub async fn create(
     Ok(created(format!("/api/v1/users/{}", user.id), user.revision, user))
 }
 
+/// Gets a user.
+#[utoipa::path(
+    get,
+    path = "/users/{id}",
+    operation_id = "users_show",
+    tag = "users",
+    params(("id" = UserId, Path)),
+    responses((status = 200, body = User, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn show(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -80,6 +112,16 @@ pub async fn show(
     Ok(tagged(user.revision, user))
 }
 
+/// Updates a user's email, name or admin flag, for instance admins.
+#[utoipa::path(
+    patch,
+    path = "/users/{id}",
+    operation_id = "users_update",
+    tag = "users",
+    params(("id" = UserId, Path), crate::extract::IfMatch),
+    request_body = Update,
+    responses((status = 200, body = User, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn update(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -93,6 +135,14 @@ pub async fn update(
 }
 
 /// Disables the user: they can't sign in, and their sessions and tokens stop working.
+#[utoipa::path(
+    post,
+    path = "/users/{id}/disable",
+    operation_id = "users_disable",
+    tag = "users",
+    params(("id" = UserId, Path)),
+    responses((status = 200, body = User, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn disable(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -102,6 +152,15 @@ pub async fn disable(
     Ok(tagged(user.revision, user))
 }
 
+/// Enables a disabled user.
+#[utoipa::path(
+    post,
+    path = "/users/{id}/enable",
+    operation_id = "users_enable",
+    tag = "users",
+    params(("id" = UserId, Path)),
+    responses((status = 200, body = User, headers(("ETag" = String, description = "The revision, for `If-Match`.")))),
+)]
 pub async fn enable(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -112,6 +171,15 @@ pub async fn enable(
 }
 
 /// Sets the user's password, ending their sessions.
+#[utoipa::path(
+    put,
+    path = "/users/{id}/password",
+    operation_id = "users_reset_password",
+    tag = "users",
+    params(("id" = UserId, Path)),
+    request_body = Password,
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn reset_password(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -123,6 +191,14 @@ pub async fn reset_password(
 }
 
 /// The user's API tokens that are not revoked; revoke one with `DELETE /tokens/{id}`.
+#[utoipa::path(
+    get,
+    path = "/users/{id}/tokens",
+    operation_id = "users_tokens",
+    tag = "users",
+    params(("id" = UserId, Path)),
+    responses((status = 200, body = Tokens)),
+)]
 pub async fn tokens(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,
@@ -132,6 +208,14 @@ pub async fn tokens(
 }
 
 /// Changes the caller's own password; their other sessions end.
+#[utoipa::path(
+    put,
+    path = "/me/password",
+    operation_id = "users_change_password",
+    tag = "users",
+    request_body = ChangePassword,
+    responses((status = 204, description = "Done.")),
+)]
 pub async fn change_password(
     State(control): State<Control>,
     Authenticated(principal): Authenticated,

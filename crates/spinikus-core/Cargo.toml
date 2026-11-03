@@ -9,4 +9,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 ulid.workspace = true
+utoipa = { workspace = true, optional = true }
 zeroize.workspace = true
+
+[features]
+# OpenAPI schemas for the API's types.
+openapi = ["dep:utoipa"]
