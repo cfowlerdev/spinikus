@@ -13,7 +13,8 @@
 # data. It installs git, Docker (through get.docker.com) and Railpack when they are missing.
 #
 # Options:
-#   --version v<x.y.z>       the release to install (default: the latest)
+#   --version v<x.y.z>       the release to install (default: the one this script was
+#                            published with, or the latest for the copy in the repository)
 #   --join <url>             install an agent and enroll it with the control plane at <url>
 #   --token <spj_…>          the join token (or SPINIKUS_JOIN_TOKEN)
 #   --ca-fingerprint <fp>    the control plane CA's fingerprint, from the join command
@@ -30,6 +31,9 @@
 set -eu
 
 REPO="cfowlerdev/spinikus"
+# The release this script installs by default. Releases publish it with their own tag here
+# (release.yml), so a release candidate's script installs that candidate.
+RELEASE="latest"
 BIN="/usr/local/bin/spinikus"
 CONFIG_DIR="/etc/spinikus"
 CONFIG="$CONFIG_DIR/spinikus.toml"
@@ -38,7 +42,7 @@ USER_NAME="spinikus"
 UNIT_DIR="/etc/systemd/system"
 
 main() {
-    version="latest"
+    version="$RELEASE"
     join_url=""
     token="${SPINIKUS_JOIN_TOKEN:-}"
     fingerprint=""

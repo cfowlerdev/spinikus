@@ -52,6 +52,12 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: sha256sum spinikus-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - name: Pin the install script to this release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          sed "s/^RELEASE=\"latest\"\$/RELEASE=\"$TAG\"/" install/install.sh > dist/install.sh
+          grep -q "^RELEASE=\"$TAG\"\$" dist/install.sh
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -60,5 +66,5 @@ jobs:
           # Versions with a suffix (v0.2.0-rc.1) are prereleases, which releases/latest skips.
           prerelease=""
           case "$TAG" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$TAG" dist/spinikus-*.tar.gz dist/SHA256SUMS install/install.sh \
+          gh release create "$TAG" dist/spinikus-*.tar.gz dist/SHA256SUMS dist/install.sh \
             --title "$TAG" --generate-notes $prerelease

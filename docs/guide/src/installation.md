@@ -117,3 +117,7 @@ curl -fsSL https://github.com/cfowlerdev/spinikus/releases/latest/download/insta
 | `--skip-railpack`       | Doesn't install Railpack; repositories without a Dockerfile won't build       |
 | `--uninstall`           | Removes Spinikus (see [Upgrading and uninstalling](operating/upgrading.md))   |
 | `--join`, `--token`, `--ca-fingerprint` | Installs an agent on another server (see [Servers](operating/servers.md)) |
+
+Each release also publishes its own copy of the script, which installs that release:
+`https://github.com/cfowlerdev/spinikus/releases/download/v<x.y.z>/install.sh`. Use it to
+install a release candidate, which the `latest` script skips.
