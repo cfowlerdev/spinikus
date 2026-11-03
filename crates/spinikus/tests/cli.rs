@@ -265,6 +265,9 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
             .await;
     assert!(created.stdout.contains("use ${{ cache.REDIS_URL }} in their variables"), "{}", created.stdout);
     assert!(cli(&["service", "show", "production/cache"]).await.stdout.contains("redis:8"));
+    let moved = cli(&["volume", "update", "data", "--mount-path", "/elsewhere", "--service", "production/cache"]).await;
+    assert_eq!(moved.code, 6, "a database's data stays where its image keeps it: {}", moved.stderr);
+    assert!(moved.stderr.contains("moving it would start the database empty"), "{}", moved.stderr);
     assert_eq!(cli(&["db", "backups", "production/cache"]).await.stdout, "ID  STATUS  MADE  SIZE  CREATED\n");
     let no_destination = cli(&["db", "backup", "production/cache"]).await;
     assert!(no_destination.stderr.contains("there are no storage destinations"), "{}", no_destination.stderr);

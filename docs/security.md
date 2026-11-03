@@ -71,6 +71,9 @@ Fixed:
   they are now refused when saved too, along with spaces and control characters.
 - **Mount paths with `:` or `,`** were accepted and only failed at deployment, since Docker
   reads them as separators. Now refused when saved.
+- **A database's data volume could be moved** through the API or CLI (only the dashboard
+  left it out), which started the database empty at its next deployment. Moving it is now
+  refused for every client.
 
 ## Accepted for now
 
@@ -90,8 +93,5 @@ Fixed:
   sessions and the audit log, and so for sign-in throttling.
 - **The database file** relies on its directory for privacy (`/var/lib/spinikus` is
   `0750`, owned by `spinikus`). Its secrets are encrypted regardless.
-- **A database's data volume can be moved** through the API or CLI, which starts the
-  database empty at its next deployment (the old data stays on the server). The dashboard
-  doesn't offer it.
 - **Sessions have no idle timeout**, only their 14-day lifetime, and there is no list of
   them to end one by one: changing your password ends your other sessions.

@@ -3,14 +3,19 @@
 //! service's next deployment: a service with volumes is deployed with `recreate`, so two
 //! containers never share one.
 //!
+//! A database's data volume stays at the path its image keeps its data in: moving it would
+//! start the database empty, so that is refused (renaming it is fine).
+//!
 //! The data stays on the server, in a runtime volume named after the volume's ID, even once
 //! the volume is deleted; removing it from the servers comes later.
 
 use serde_json::json;
 use spinikus_core::{
+    database::DatabaseSpec,
     environment::Environment,
     id::{ServiceId, VolumeId},
     membership::Role,
+    service::Service,
     slug::Slug,
     volume::{MountPath, Volume, VolumeFields},
 };
@@ -53,11 +58,12 @@ impl Control {
     }
 
     pub async fn get_volume(&self, principal: &Principal, id: VolumeId) -> Result<Volume, ControlError> {
-        let (volume, _) = self.volume_with_access(principal, id, Role::Viewer).await?;
+        let (volume, _, _) = self.volume_with_access(principal, id, Role::Viewer).await?;
         Ok(volume)
     }
 
     /// Applies `changes` if the volume is still at `revision`. The data stays where it is.
+    /// Moving a database's data volume is `Rejected`.
     pub async fn update_volume(
         &self,
         principal: &Principal,
@@ -65,17 +71,27 @@ impl Control {
         revision: i64,
         changes: VolumeChanges,
     ) -> Result<Volume, ControlError> {
-        let (current, environment) = self.volume_with_access(principal, id, Role::Developer).await?;
+        let (current, service, environment) = self.volume_with_access(principal, id, Role::Developer).await?;
         let fields = VolumeFields {
             name: match &changes.name {
                 Some(value) => name(value)?,
-                None => current.name,
+                None => current.name.clone(),
             },
             mount_path: match &changes.mount_path {
                 Some(path) => mount_path(path)?,
-                None => current.mount_path,
+                None => current.mount_path.clone(),
             },
         };
+        if fields.mount_path != current.mount_path && holds_database_data(&service, &current) {
+            return Err(ControlError::Rejected {
+                entity: "volume",
+                id: id.to_string(),
+                problem: format!(
+                    "it holds the database's data, which its image keeps at {}; moving it would start the database empty",
+                    current.mount_path
+                ),
+            });
+        }
         let volume = self.store().update_volume(id, revision, fields).await?;
         let changed = audit::changed(&[("name", changes.name.is_some()), ("mount_path", changes.mount_path.is_some())]);
         self.audit_by(principal, "volume.update", id, Some(environment.project_id), changed).await?;
@@ -84,7 +100,7 @@ impl Control {
 
     /// Deletes the volume. Needs the admin role, since later deployments go without its data.
     pub async fn delete_volume(&self, principal: &Principal, id: VolumeId) -> Result<(), ControlError> {
-        let (volume, environment) = self.volume_with_access(principal, id, Role::Admin).await?;
+        let (volume, _, environment) = self.volume_with_access(principal, id, Role::Admin).await?;
         self.store().delete_volume(id).await?;
         let details = json!({ "name": volume.name, "service_id": volume.service_id.to_string() });
         self.audit_by(principal, "volume.delete", id, Some(environment.project_id), details).await
@@ -95,14 +111,19 @@ impl Control {
         principal: &Principal,
         id: VolumeId,
         needed: Role,
-    ) -> Result<(Volume, Environment), ControlError> {
+    ) -> Result<(Volume, Service, Environment), ControlError> {
         let volume = self.store().get_volume(id).await?;
         match self.service_with_access(principal, volume.service_id, needed).await {
             Err(ControlError::NotFound { .. }) => Err(not_found("volume", id)),
             Err(error) => Err(error),
-            Ok((_, environment)) => Ok((volume, environment)),
+            Ok((service, environment)) => Ok((volume, service, environment)),
         }
     }
+}
+
+/// Whether `volume` is where `service`, a database, keeps its data.
+fn holds_database_data(service: &Service, volume: &Volume) -> bool {
+    DatabaseSpec::of(&service.config).is_some_and(|spec| spec.data_path() == volume.mount_path)
 }
 
 fn name(value: &str) -> Result<Slug, ControlError> {

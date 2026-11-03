@@ -628,7 +628,12 @@ async fn creates_a_database_with_its_parts() {
     let location = created.header(header::LOCATION).to_string();
     let variables = api.send(Method::GET, &format!("{location}/variables"), token, &[], None).await;
     let volumes = api.send(Method::GET, &format!("{location}/volumes"), token, &[], None).await;
+    let data = format!("/api/v1/volumes/{}", volumes.body[0]["id"].as_str().unwrap());
+    let revision = format!("\"{}\"", volumes.body[0]["revision"]);
+    let moved =
+        api.send(Method::PATCH, &data, token, &[(header::IF_MATCH, &revision)], Some(json!({ "mount_path": "/x" }))).await;
 
+    assert_eq!((moved.status, &moved.body["code"]), (StatusCode::CONFLICT, &json!("rejected")), "{:?}", moved.body);
     assert_eq!(created.status, StatusCode::CREATED);
     assert_eq!((&created.body["service"]["kind"], &created.body["service"]["slug"]), (&json!("database"), &json!("cache")));
     assert_eq!(created.body["service"]["config"]["database"], json!({ "engine": "redis", "version": "8" }));

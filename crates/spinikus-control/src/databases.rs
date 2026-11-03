@@ -222,6 +222,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_data_volume_can_be_renamed_but_not_moved() {
+        let setup = setup(DeploymentTimings::default()).await;
+        let (control, admin) = (&setup.control, &setup.admin);
+        let environment = setup.service.environment_id;
+        let mut postgres = new("Postgres", Engine::Postgres, None);
+        postgres.server_id = Some(setup.server.id);
+        let created = control.create_database(admin, environment, postgres).await.unwrap();
+        let data = control.list_volumes(admin, created.service.id).await.unwrap().remove(0);
+        let other = NewVolume { name: "scratch".to_string(), mount_path: "/scratch".to_string() };
+        let other = control.create_volume(admin, created.service.id, other).await.unwrap();
+
+        let to = |path: &str| crate::VolumeChanges { mount_path: Some(path.to_string()), ..Default::default() };
+        let moved = control.update_volume(admin, data.id, data.revision, to("/elsewhere")).await;
+        let same_path = control.update_volume(admin, data.id, data.revision, to(data.mount_path.as_str())).await.unwrap();
+        let renamed = crate::VolumeChanges { name: Some("pgdata".to_string()), ..Default::default() };
+        let renamed = control.update_volume(admin, data.id, same_path.revision, renamed).await.unwrap();
+        let other_moved = control.update_volume(admin, other.id, other.revision, to("/tmp/scratch")).await.unwrap();
+
+        assert!(matches!(&moved, Err(ControlError::Rejected { entity: "volume", .. })), "{moved:?}");
+        assert_eq!((renamed.name.as_str(), renamed.mount_path.as_str()), ("pgdata", "/var/lib/postgresql"));
+        assert_eq!(other_moved.mount_path.as_str(), "/tmp/scratch", "only the data volume is fixed");
+    }
+
+    #[tokio::test]
     async fn two_databases_get_different_passwords_and_slugs_must_be_free() {
         let setup = setup(DeploymentTimings::default()).await;
         let (control, admin) = (&setup.control, &setup.admin);
