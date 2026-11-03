@@ -19,8 +19,16 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 use super::{
     BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, ExecInput, ExecOutput, ExecStream, LogLine, LogLines,
-    LogOptions, OneOffExit, OneOffSpec, RuntimeError,
+    LogOptions, OneOffExit, OneOffSpec, RuntimeError, TerminalInput, TerminalInputs, TerminalSize,
 };
+
+/// A terminal opened in a container, as [`MemoryRuntime::terminals`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Terminal {
+    pub container_id: String,
+    pub command: Vec<String>,
+    pub sizes: Vec<TerminalSize>,
+}
 
 #[derive(Clone)]
 enum Event {
@@ -51,6 +59,8 @@ pub struct MemoryRuntime {
     execs: Mutex<Vec<(String, Vec<String>)>>,
     /// What each command given input read on stdin, in order.
     exec_inputs: std::sync::Arc<Mutex<Vec<Vec<u8>>>>,
+    /// Terminals opened so far: the container, the command, and every size it was given.
+    terminals: std::sync::Arc<Mutex<Vec<Terminal>>>,
     exit_on_start: AtomicBool,
     /// One-off containers run so far, how the next ones end (with what they write), and the
     /// names removed with `remove_one_off`.
@@ -88,6 +98,7 @@ impl MemoryRuntime {
             queued_exec_outputs: Mutex::default(),
             execs: Mutex::default(),
             exec_inputs: std::sync::Arc::default(),
+            terminals: std::sync::Arc::default(),
             exit_on_start: AtomicBool::new(false),
             one_offs: Mutex::default(),
             one_off_outcomes: Mutex::default(),
@@ -152,6 +163,11 @@ impl MemoryRuntime {
     /// The commands run in containers so far, with the container each ran in.
     pub fn execs(&self) -> Vec<(String, Vec<String>)> {
         lock(&self.execs).clone()
+    }
+
+    /// Terminals opened so far, with the sizes each was given.
+    pub fn terminals(&self) -> Vec<Terminal> {
+        lock(&self.terminals).clone()
     }
 
     /// What the commands given input read on stdin, in order, once they have read it all.
@@ -332,6 +348,60 @@ impl ContainerRuntime for MemoryRuntime {
             for item in output {
                 let _ = sender.send(Ok(item)).await;
             }
+        });
+        Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
+    }
+
+    /// Echoes what it is sent, like a terminal with a shell that does nothing; a line
+    /// `exit <code>` ends it with that code, and Ctrl+D at the start of a line or the input's
+    /// end with 0.
+    fn terminal(&self, container_id: &str, command: Vec<String>, size: TerminalSize, mut input: TerminalInputs) -> ExecStream {
+        if let Err(error) = self.check() {
+            return Box::pin(tokio_stream::once(Err(error)));
+        }
+        if self.get(container_id).is_none() {
+            return Box::pin(tokio_stream::once(Err(RuntimeError::NotFound)));
+        }
+        let terminals = self.terminals.clone();
+        let index = {
+            let mut terminals = lock(&terminals);
+            terminals.push(Terminal { container_id: container_id.to_string(), command, sizes: vec![size] });
+            terminals.len() - 1
+        };
+        let (sender, receiver) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            let mut line = Vec::new();
+            while let Some(item) = input.next().await {
+                let data = match item {
+                    TerminalInput::Data(data) => data,
+                    TerminalInput::Resize(size) => {
+                        lock(&terminals)[index].sizes.push(size);
+                        continue;
+                    }
+                };
+                // Like a terminal, Ctrl+D at the start of a line is the end of input, unechoed.
+                let echoed: Vec<u8> = data.iter().copied().filter(|byte| *byte != 0x04).collect();
+                if !echoed.is_empty() && sender.send(Ok(ExecOutput::Stdout(echoed.into()))).await.is_err() {
+                    return;
+                }
+                for byte in data {
+                    if byte == 0x04 && line.is_empty() {
+                        let _ = sender.send(Ok(ExecOutput::Exited(0))).await;
+                        return;
+                    }
+                    if byte != b'\r' && byte != b'\n' {
+                        line.push(byte);
+                        continue;
+                    }
+                    let typed = String::from_utf8_lossy(&line).trim().to_string();
+                    line.clear();
+                    if let Some(code) = typed.strip_prefix("exit ").and_then(|code| code.trim().parse().ok()) {
+                        let _ = sender.send(Ok(ExecOutput::Exited(code))).await;
+                        return;
+                    }
+                }
+            }
+            let _ = sender.send(Ok(ExecOutput::Exited(0))).await;
         });
         Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
     }

@@ -63,7 +63,9 @@ async fn main() -> ExitCode {
         command => match client::run(command, cli.global).await {
             Some(Ok(())) => ExitCode::SUCCESS,
             Some(Err(error)) => {
-                eprintln!("error: {error:#}");
+                if !client::is_silent(&error) {
+                    eprintln!("error: {error:#}");
+                }
                 ExitCode::from(client::exit_status(&error))
             }
             None => unreachable!("instance commands are handled above"),

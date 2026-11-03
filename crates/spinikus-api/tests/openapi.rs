@@ -68,7 +68,7 @@ fn every_operation_is_described() {
             }
             let responses = operation["responses"].as_object().unwrap();
             assert!(responses.contains_key("default"), "{id} has no problem response");
-            assert!(responses.keys().any(|status| status.starts_with('2')), "{id} has no success response");
+            assert!(responses.keys().any(|status| status.starts_with('2') || status == "101"), "{id} has no success response");
             for (status, response) in responses {
                 assert!(
                     response["description"].as_str().is_some_and(|text| !text.is_empty()),

@@ -149,6 +149,13 @@ fn same_origin(headers: &HeaderMap) -> bool {
     origin_host.is_some() && origin_host == host
 }
 
+/// Whether a WebSocket's handshake comes from a page of this site. Browsers always send
+/// `Origin` with one, and cookies go with it whatever site opens it, so it must be there and
+/// match: this, not the CSRF token, stops other sites opening sockets as the user.
+pub fn websocket_from_this_site(headers: &HeaderMap) -> bool {
+    headers.contains_key(header::ORIGIN) && same_origin(headers)
+}
+
 /// The request back if it carries `expected` in the CSRF header or form field.
 async fn has_token(request: Request, expected: &str) -> Option<Request> {
     if let Some(token) = request.headers().get(CSRF_HEADER) {
@@ -227,5 +234,20 @@ mod tests {
         assert!(!same_origin(&headers(&[("sec-fetch-site", "same-site")])));
         assert!(!same_origin(&headers(&[("origin", "https://evil.example")])));
         assert!(!same_origin(&headers(&[("origin", "null")])));
+    }
+
+    #[test]
+    fn websockets_need_an_origin_of_this_site() {
+        let headers = |origin: Option<&'static str>| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_static("spinikus.example:8080"));
+            if let Some(origin) = origin {
+                headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
+            }
+            headers
+        };
+        assert!(websocket_from_this_site(&headers(Some("https://spinikus.example:8080"))));
+        assert!(!websocket_from_this_site(&headers(None)));
+        assert!(!websocket_from_this_site(&headers(Some("https://evil.example"))));
     }
 }

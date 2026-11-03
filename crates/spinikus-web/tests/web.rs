@@ -1402,6 +1402,52 @@ async fn shows_runtime_logs_and_downloads_deployment_logs() {
 }
 
 #[tokio::test]
+async fn admins_open_terminals_from_the_service_and_its_deployments() {
+    let web = Web::new().await;
+    let (admin_principal, _, _, service) = shop_with_team(&web).await;
+    let admin = web.sign_in("ada%40example.com").await;
+    let developer = web.sign_in("dev%40example.com").await;
+    let page = format!("/services/{}/terminal", service.id);
+
+    // Developers neither see it nor open it.
+    let by_developer = web.get(&page, Some(&developer)).await;
+    let developers_service = web.get(&format!("/services/{}", service.id), Some(&developer)).await;
+    assert_eq!(by_developer.status, StatusCode::FORBIDDEN);
+    assert!(!developers_service.body.contains(&page), "{}", developers_service.body);
+
+    // Admins get the Terminal tab, which loads the page in full, with its own CSP.
+    let terminal = web.get(&page, Some(&admin)).await;
+    let nothing_live = web.get(&format!("/services/{}", service.id), Some(&admin)).await;
+    assert_eq!(terminal.status, StatusCode::OK);
+    let csp = terminal.header("content-security-policy").unwrap();
+    assert!(csp.contains("style-src 'self' 'unsafe-inline'") && csp.contains("script-src 'self';"), "{csp}");
+    assert!(!nothing_live.header("content-security-policy").unwrap().contains("unsafe-inline"));
+    assert!(terminal.body.contains(&format!(r#"data-socket="{page}/socket""#)), "{}", terminal.body);
+    assert!(terminal.body.contains(r#"<body class="#) && terminal.body.contains(r#"hx-boost="false""#));
+    assert!(terminal.body.contains("/assets/xterm.min.js?v=") && terminal.body.contains("/assets/terminal.js?v="));
+    assert!(nothing_live.body.contains(&format!(r#"href="{page}" hx-boost="false""#)), "the tab: {}", nothing_live.body);
+    let button = format!(r#"href="{page}" hx-boost="false" class="inline-flex"#);
+    assert!(!nothing_live.body.contains(&button), "no button with nothing live");
+    assert_eq!(web.get("/assets/xterm.css", None).await.header("content-type"), Some("text/css; charset=utf-8"));
+
+    // With something live: a button on the service page, and a link on the deployment's page.
+    let server = web.control.create_server(&admin_principal, NewServer { name: "web-1".to_string() }).await.unwrap();
+    let changes = spinikus_control::ServiceChanges { server_id: Some(Some(server.id)), ..Default::default() };
+    web.control.update_service(&admin_principal, service.id, service.revision, changes).await.unwrap();
+    let image = SourceSpec::Image(ImageSource { image: "nginx:1".to_string() });
+    web.control.create_source(&admin_principal, service.id, image).await.unwrap();
+    let deployment = web.control.create_deployment(&admin_principal, service.id).await.unwrap();
+    go_live(&web.control, deployment.id, "nginx@sha256:01").await;
+    let live = web.get(&format!("/services/{}", service.id), Some(&admin)).await;
+    let deployment_page = web.get(&format!("/deployments/{}", deployment.id), Some(&admin)).await;
+    let developers_deployment = web.get(&format!("/deployments/{}", deployment.id), Some(&developer)).await;
+    assert!(live.body.contains(&button), "{}", live.body);
+    let link = format!(r#"href="{page}?deployment_id={}" hx-boost="false""#, deployment.id);
+    assert!(deployment_page.body.contains(&link), "{}", deployment_page.body);
+    assert!(!developers_deployment.body.contains(&page));
+}
+
+#[tokio::test]
 async fn the_palette_lists_what_the_user_can_open() {
     let web = Web::new().await;
     let (admin, shop, production, service) = shop_with_team(&web).await;

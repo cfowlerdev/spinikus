@@ -36,7 +36,14 @@ accepts for now. Report vulnerabilities privately to the maintainers rather than
   are never wider than the token that made them.
 - **Forms** need a same-origin request (`Sec-Fetch-Site`, `Origin` against `Host`) and,
   with a session, a CSRF token. The dashboard's CSP allows no inline scripts or styles and no
-  framing. Templates escape everything they render.
+  framing (the terminal page alone allows inline styles, below). Templates escape everything
+  they render.
+- **Terminals** run anything as the container's user, so only the environment's admins may
+  open one, and each is in the audit log (`service.terminal`, with the deployment and the
+  program, not its arguments, which may hold secrets). The dashboard's terminal WebSocket
+  needs the session cookie and an `Origin` of this site, since a handshake carries no CSRF
+  token and browsers send cookies with any site's WebSocket; the API's needs a bearer token.
+  Messages from the client are limited to 64 KiB, terminals to 500 by 1000 characters.
 - **Secrets** (variables marked secret, deploy keys, storage credentials, webhook secrets,
   certificates' keys, the instance backup passphrase) are encrypted with envelope
   encryption under the master key, which lives outside the database, and each is bound to
@@ -93,5 +100,14 @@ Fixed:
   sessions and the audit log, and so for sign-in throttling.
 - **The database file** relies on its directory for privacy (`/var/lib/spinikus` is
   `0750`, owned by `spinikus`). Its secrets are encrypted regardless.
+- **The terminal page allows inline styles** (`style-src 'unsafe-inline'`), which xterm.js
+  sets as it draws, and supports no nonce for. Scripts stay limited to this site's, and the
+  terminal's output is drawn as text, never as HTML.
+- **What happens in a terminal isn't recorded**: the audit log says who opened one, in which
+  container, not what they typed or saw.
+- **A program can outlive a closed terminal.** Closing it types Ctrl+D, which ends a shell
+  at its prompt, then closes the input; Docker has no hangup for a command run in a
+  container, so a program running in the foreground keeps going until it exits or the
+  container is replaced.
 - **Sessions have no idle timeout**, only their 14-day lifetime, and there is no list of
   them to end one by one: changing your password ends your other sessions.

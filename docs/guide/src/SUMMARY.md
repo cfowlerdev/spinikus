@@ -20,6 +20,7 @@
 - [Deploy on push](apps/deploy-on-push.md)
 - [Previews of pull requests](apps/previews.md)
 - [Logs](apps/logs.md)
+- [Terminal](apps/terminal.md)
 
 # Databases
 

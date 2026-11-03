@@ -39,9 +39,30 @@ pub fn fail(exit: Exit, message: impl Into<String>) -> anyhow::Error {
     CliError { exit, message: message.into() }.into()
 }
 
+/// A command run with `shell` exited with this status (not 0), which becomes the CLI's own.
+/// It isn't printed as an error: the command said what it had to.
+#[derive(Debug)]
+pub struct CommandExited(pub u8);
+
+impl fmt::Display for CommandExited {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the command exited with status {}", self.0)
+    }
+}
+
+impl std::error::Error for CommandExited {}
+
 /// The exit status for an error from a client command.
 pub fn exit_status(error: &anyhow::Error) -> u8 {
+    if let Some(CommandExited(status)) = error.downcast_ref() {
+        return *status;
+    }
     error.downcast_ref::<CliError>().map_or(Exit::Failure, |error| error.exit) as u8
+}
+
+/// Whether the error goes unprinted, since it only carries an exit status.
+pub fn is_silent(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CommandExited>().is_some()
 }
 
 #[cfg(test)]
@@ -55,5 +76,7 @@ mod tests {
         let error = Err::<(), _>(fail(Exit::NotFound, "no such service")).context("Couldn't deploy").unwrap_err();
         assert_eq!(exit_status(&error), 5);
         assert_eq!(exit_status(&anyhow::anyhow!("something else")), 1);
+        let exited = anyhow::Error::from(CommandExited(42));
+        assert_eq!((exit_status(&exited), is_silent(&exited)), (42, true));
     }
 }

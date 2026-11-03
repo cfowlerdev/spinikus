@@ -16,6 +16,8 @@ short, for running an instance:
   instance backups' passphrase safe.
 - **Apps reach your private network** like any process on the server, cloud metadata
   endpoints included. Restrict that with the host's firewall if it matters.
+- **Terminals run anything in a container.** Only environment admins may open them, and each
+  is in the audit log; what is typed in one isn't recorded.
 - **Use scoped, expiring API tokens** for automation, one per pipeline.
 - **Check the audit log** (Settings → Audit log) for changes you don't expect.
 - **Keep Spinikus up to date** (see [Upgrading](upgrading.md)), and the servers' operating

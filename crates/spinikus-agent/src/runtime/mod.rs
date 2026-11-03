@@ -19,7 +19,7 @@ mod session;
 
 pub use docker::DockerRuntime;
 #[cfg(any(test, feature = "test-support"))]
-pub use memory::MemoryRuntime;
+pub use memory::{MemoryRuntime, Terminal};
 
 /// The label holding the service ID (`svc_…`) on every container Spinikus starts.
 pub const SERVICE_LABEL: &str = "spinikus.service";
@@ -153,6 +153,28 @@ pub type ExecInput = Pin<Box<dyn Stream<Item = bytes::Bytes> + Send>>;
 /// A command's output; it ends after [`ExecOutput::Exited`], or with an error.
 pub type ExecStream = Pin<Box<dyn Stream<Item = Result<ExecOutput, RuntimeError>> + Send>>;
 
+/// The `TERM` terminals get: what xterm.js and most terminals emulate.
+pub const TERMINAL_TYPE: &str = "xterm-256color";
+
+/// A terminal's size, in characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSize {
+    pub rows: u16,
+    pub columns: u16,
+}
+
+/// What a terminal gets from whoever uses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalInput {
+    /// Keystrokes, and anything pasted.
+    Data(bytes::Bytes),
+    /// The window changed size.
+    Resize(TerminalSize),
+}
+
+/// A terminal's input; the command's input closes when it ends.
+pub type TerminalInputs = Pin<Box<dyn Stream<Item = TerminalInput> + Send>>;
+
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync + 'static {
     /// Every container Spinikus manages on this server, running or not.
@@ -183,6 +205,12 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// while input is written, so neither can block the other. Dropping the stream stops
     /// reading its output, not the command.
     fn exec(&self, container_id: &str, command: Vec<String>, input: Option<ExecInput>) -> ExecStream;
+
+    /// Runs a command in a running container with a terminal of `size` (and `TERM` set), as
+    /// the container's user. Its output, stdout and stderr together, comes as
+    /// [`ExecOutput::Stdout`], then [`ExecOutput::Exited`]. When `input` ends, the command's
+    /// input closes; the command itself may keep running until it exits.
+    fn terminal(&self, container_id: &str, command: Vec<String>, size: TerminalSize, input: TerminalInputs) -> ExecStream;
 
     /// Pulls an image and returns the reference to run, pinned by digest. `progress` gets
     /// a line for each step of the pull.

@@ -79,6 +79,8 @@ pub fn router(control: Control) -> Router {
         .route("/services/{id}/logs", get(pages::logs::logs))
         .route("/services/{id}/logs/stream", get(pages::logs::stream))
         .route("/services/{id}/logs/download", get(pages::logs::download))
+        .route("/services/{id}/terminal", get(pages::terminal::terminal))
+        .route("/services/{id}/terminal/socket", get(pages::terminal::socket))
         .route("/services/{id}/domains", get(pages::domains::domains).post(pages::domains::create))
         .route("/variables/{id}/edit", get(pages::variables::edit).post(pages::variables::update))
         .route("/variables/{id}/delete", post(pages::variables::delete))
@@ -161,7 +163,8 @@ async fn keep_url_on_refusal(request: Request, next: Next) -> Response {
 async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(CONTENT_SECURITY_POLICY));
+    // A page may have its own (the terminal's).
+    headers.entry(header::CONTENT_SECURITY_POLICY).or_insert(HeaderValue::from_static(CONTENT_SECURITY_POLICY));
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("same-origin"));

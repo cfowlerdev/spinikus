@@ -4,7 +4,8 @@
 
 - **A deployment**: its page (the service's **Deployments** tab), or
   `spinikus deployment logs <id>`. Failures end the log with the reason and the error.
-- **An app**: the service's **Logs** tab, or `spinikus logs -f`.
+- **An app**: the service's **Logs** tab, or `spinikus logs -f`. To look inside its running
+  container, open its **Terminal** tab, or run `spinikus shell` (see [Terminal](../apps/terminal.md)).
 - **Spinikus itself**: `journalctl -u spinikus -f` on the control plane's server,
   `journalctl -u spinikus-agent -f` on other servers. For more detail, set
   `[logging] level = "debug"` in `/etc/spinikus/spinikus.toml` and restart.

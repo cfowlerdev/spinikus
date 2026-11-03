@@ -11,6 +11,9 @@ use serde_json::Value;
 
 use super::error::{Exit, fail};
 
+/// A WebSocket opened with [`Api::websocket`].
+pub type WebSocket = tokio_tungstenite::WebSocketStream<reqwest::Upgraded>;
+
 /// Items per page when reading a whole list (the server's maximum).
 const PAGE_SIZE: u32 = 100;
 
@@ -102,6 +105,43 @@ impl Api {
     pub async fn text(&self, path: &str) -> anyhow::Result<String> {
         let response = self.send(Method::GET, path, &[], None, None).await?;
         response.text().await.context("The server's answer broke off")
+    }
+
+    /// Opens a WebSocket: a GET asking to upgrade, through the same client (so the same TLS),
+    /// then WebSocket framing over the upgraded connection. A refusal is a problem detail like
+    /// any other request's.
+    pub async fn websocket(&self, path: &str, query: &[(&str, String)]) -> anyhow::Result<WebSocket> {
+        use tokio_tungstenite::tungstenite::handshake::{client::generate_key, derive_accept_key};
+
+        let key = generate_key();
+        let mut request = self
+            .http
+            .get(self.url(path, query))
+            .header(header::CONNECTION, "Upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header(header::SEC_WEBSOCKET_VERSION, "13")
+            .header(header::SEC_WEBSOCKET_KEY, &key);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.with_context(|| format!("Couldn't reach {}", self.server()))?;
+        if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+            return Err(match response.status().is_success() {
+                true => anyhow::anyhow!("{} didn't open a WebSocket", self.server()),
+                false => problem(response).await,
+            });
+        }
+        let accepted = response.headers().get(header::SEC_WEBSOCKET_ACCEPT).map(|value| value.as_bytes().to_vec());
+        if accepted.as_deref() != Some(derive_accept_key(key.as_bytes()).as_bytes()) {
+            anyhow::bail!("{} answered the WebSocket handshake wrongly", self.server());
+        }
+        let upgraded = response.upgrade().await.context("The WebSocket's connection broke off")?;
+        Ok(tokio_tungstenite::WebSocketStream::from_raw_socket(
+            upgraded,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await)
     }
 
     /// Every item of a paginated list, following `next_cursor`.

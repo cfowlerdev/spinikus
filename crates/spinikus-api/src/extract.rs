@@ -69,6 +69,25 @@ impl<T: DeserializeOwned + Send, S: Send + Sync> FromRequestParts<S> for Path<T>
     }
 }
 
+/// A request to upgrade to a WebSocket. Anything else is refused with `400 websocket_required`
+/// (or `426`, as axum says) before the handler does anything.
+pub struct WebSocket(pub axum::extract::ws::WebSocketUpgrade);
+
+impl<S: Send + Sync> FromRequestParts<S> for WebSocket {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::extract::ws::WebSocketUpgrade::from_request_parts(parts, state).await {
+            Ok(upgrade) => Ok(Self(upgrade)),
+            Err(rejection) => Err(ApiError::BadRequest {
+                status: rejection.status(),
+                code: "websocket_required",
+                detail: rejection.body_text(),
+            }),
+        }
+    }
+}
+
 /// Query parameters.
 pub struct Query<T>(pub T);
 

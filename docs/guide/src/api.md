@@ -58,6 +58,15 @@ deployment=$(curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
 curl -fsSN -H "Authorization: Bearer $TOKEN" "$API/deployments/$deployment/stream"
 ```
 
+## Terminals
+
+`GET /api/v1/services/{id}/terminal` opens a terminal in the service's running container as a
+WebSocket, as `spinikus shell` does: binary messages are the terminal's bytes both ways, and
+the server ends with a JSON text message, `{"type":"exit","code":0}` or
+`{"type":"error","message":"…"}`. Send `{"type":"resize","rows":40,"columns":120}` when the
+window changes. The query takes `rows`, `columns`, `deployment_id`, and `command` as a JSON
+array, such as `["psql","-U","app"]`.
+
 ## Webhooks
 
 Git hosts deliver pushes to `/hooks/git/<provider>/<webhook ID>`, outside `/api/v1`, signed

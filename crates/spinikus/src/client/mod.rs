@@ -12,6 +12,7 @@ mod error;
 mod link;
 mod output;
 mod resources;
+mod shell;
 mod storage;
 mod target;
 mod variables;
@@ -21,7 +22,7 @@ use std::path::PathBuf;
 
 pub use api::Api;
 pub use contexts::CONFIG_DIR_VAR;
-pub use error::{CliError, Exit, exit_status};
+pub use error::{CliError, Exit, exit_status, is_silent};
 
 use args::Global;
 use contexts::{ConfigDir, Contexts};
@@ -65,6 +66,7 @@ async fn run_with(session: &Session, command: Commands) -> anyhow::Result<()> {
         Commands::Restart(args) => deploy::restart(session, args).await,
         Commands::Deployment(command) => deploy::deployment(session, command).await,
         Commands::Logs(args) => deploy::logs(session, args).await,
+        Commands::Shell(args) => shell::shell(session, args).await,
         Commands::Env(command) => variables::env(session, command).await,
         Commands::Domain(command) => resources::domain(session, command).await,
         Commands::Volume(command) => resources::volume(session, command).await,

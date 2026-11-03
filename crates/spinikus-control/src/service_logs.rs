@@ -7,8 +7,10 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 
 use jiff::Timestamp;
 use spinikus_core::{
+    deployment::Deployment,
     id::{DeploymentId, ServerId, ServiceId},
     membership::Role,
+    server::ObservedInstance,
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, control_message, open_session, session_frame::Frame};
 use spinikus_store::{DeploymentRepository, InstanceRepository, StoreError};
@@ -61,10 +63,16 @@ struct Pending {
     ready: oneshot::Sender<Attached>,
 }
 
-/// An open session: the agent's frames, and the sender that keeps the agent's side open.
-struct Attached {
-    frames: Streaming<pb::SessionFrame>,
-    _open: mpsc::Sender<pb::SessionFrame>,
+/// An open session: the agent's frames, and the sender for frames to the agent, which keeps
+/// the agent's side open until dropped.
+pub(crate) struct Attached {
+    pub(crate) frames: Streaming<pb::SessionFrame>,
+    pub(crate) outbound: mpsc::Sender<pb::SessionFrame>,
+}
+
+/// A refusal about the deployment.
+fn rejected(deployment: &Deployment, problem: &str) -> ControlError {
+    ControlError::Rejected { entity: "deployment", id: deployment.id.to_string(), problem: problem.to_string() }
 }
 
 impl Sessions {
@@ -82,7 +90,29 @@ impl Control {
         query: LogQuery,
     ) -> Result<ReceiverStream<ContainerLogUpdate>, ControlError> {
         self.service_with_access(principal, service_id, Role::Viewer).await?;
-        let deployment = match query.deployment_id {
+        let (deployment, instance) = self.deployment_container(service_id, query.deployment_id).await?;
+        let tail = pb::LogTailSession {
+            container_id: instance.container_id,
+            since: query
+                .since
+                .map(|since| prost_types::Timestamp { seconds: since.as_second(), nanos: since.subsec_nanosecond() }),
+            tail: query.tail.unwrap_or(0).min(MAX_TAIL),
+            follow: query.follow,
+        };
+        let attached = self.open_session(&deployment, open_session::Kind::LogTail(tail), "the log").await?;
+        let (sender, receiver) = mpsc::channel(256);
+        tokio::spawn(forward(attached, sender));
+        Ok(ReceiverStream::new(receiver))
+    }
+
+    /// The container of the deployment named, or of the service's live one, as its server
+    /// last reported it.
+    pub(crate) async fn deployment_container(
+        &self,
+        service_id: ServiceId,
+        deployment_id: Option<DeploymentId>,
+    ) -> Result<(Deployment, ObservedInstance), ControlError> {
+        let deployment = match deployment_id {
             Some(id) => match self.store().get_deployment(id).await {
                 Ok(deployment) if deployment.service_id == service_id => deployment,
                 Ok(_) | Err(StoreError::NotFound { .. }) => return Err(not_found("deployment", id)),
@@ -93,33 +123,29 @@ impl Control {
                 problem: "the service has nothing live; name a deployment".to_string(),
             })?,
         };
-        let rejected = |problem: &str| ControlError::Rejected {
-            entity: "deployment",
-            id: deployment.id.to_string(),
-            problem: problem.to_string(),
-        };
         let instances = self.store().list_server_instances(deployment.server_id).await?;
-        let container = instances
-            .into_iter()
-            .find(|instance| instance.observed.deployment_id == deployment.id)
-            .map(|instance| instance.observed.container_id)
-            .ok_or_else(|| rejected("it has no container on its server"))?;
-        if !self.agents().is_connected(deployment.server_id) {
-            return Err(rejected("the agent of its server is not connected"));
+        let instance = instances.into_iter().find(|instance| instance.observed.deployment_id == deployment.id);
+        match instance {
+            Some(instance) => Ok((deployment, instance.observed)),
+            None => Err(rejected(&deployment, "it has no container on its server")),
         }
+    }
 
-        let session_id = format!("log-{}", rand::random::<u128>());
+    /// Asks the agent of the deployment's server to open a session, and waits for it.
+    /// `what` names it in the refusal when it doesn't.
+    pub(crate) async fn open_session(
+        &self,
+        deployment: &Deployment,
+        kind: open_session::Kind,
+        what: &str,
+    ) -> Result<Attached, ControlError> {
+        if !self.agents().is_connected(deployment.server_id) {
+            return Err(rejected(deployment, "the agent of its server is not connected"));
+        }
+        let session_id = format!("session-{}", rand::random::<u128>());
         let (ready, attached) = oneshot::channel();
         self.sessions.lock().insert(session_id.clone(), Pending { server: deployment.server_id, ready });
-        let tail = pb::LogTailSession {
-            container_id: container,
-            since: query
-                .since
-                .map(|since| prost_types::Timestamp { seconds: since.as_second(), nanos: since.subsec_nanosecond() }),
-            tail: query.tail.unwrap_or(0).min(MAX_TAIL),
-            follow: query.follow,
-        };
-        let open = pb::OpenSession { session_id: session_id.clone(), kind: Some(open_session::Kind::LogTail(tail)) };
+        let open = pb::OpenSession { session_id: session_id.clone(), kind: Some(kind) };
         let command = pb::Command { command_id: format!("session/{session_id}"), kind: Some(Kind::OpenSession(open)) };
         let message = pb::ControlMessage { message: Some(control_message::Message::Command(command)) };
         let sent = self.agents().send(deployment.server_id, message).await.is_ok();
@@ -127,17 +153,10 @@ impl Control {
             true => tokio::time::timeout(SESSION_OPEN_TIMEOUT, attached).await.ok().and_then(Result::ok),
             false => None,
         };
-        let attached = match attached {
-            Some(attached) => attached,
-            None => {
-                self.sessions.lock().remove(&session_id);
-                return Err(rejected("the agent of its server did not open the log"));
-            }
-        };
-
-        let (sender, receiver) = mpsc::channel(256);
-        tokio::spawn(forward(attached, sender));
-        Ok(ReceiverStream::new(receiver))
+        attached.ok_or_else(|| {
+            self.sessions.lock().remove(&session_id);
+            rejected(deployment, &format!("the agent of its server did not open {what}"))
+        })
     }
 
     /// Takes an agent's session stream, whose first frame names the session, and hands it to
@@ -159,10 +178,10 @@ impl Control {
         if pending.server != server {
             return Err(Status::permission_denied("the session is for another server"));
         }
-        let (open, receiver) = mpsc::channel(1);
+        let (outbound, receiver) = mpsc::channel(64);
         pending
             .ready
-            .send(Attached { frames, _open: open })
+            .send(Attached { frames, outbound })
             .map_err(|_| Status::cancelled("nobody is waiting for the session any more"))?;
         Ok(ReceiverStream::new(receiver))
     }

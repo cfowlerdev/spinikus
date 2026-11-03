@@ -18,6 +18,7 @@ pub mod services;
 pub mod session;
 pub mod settings;
 pub mod storage;
+pub mod terminal;
 pub mod tokens;
 pub mod users;
 pub mod variables;
@@ -50,6 +51,7 @@ enum Tab {
     Backups,
     Members,
     AuditLog,
+    Terminal,
     Settings,
 }
 
@@ -94,6 +96,9 @@ fn service_tabs(service: &Service, role: Role, current: Tab) -> Markup {
     }
     if Engine::of(&service.config).is_some() {
         tabs.push(("Backups", format!("{base}/backups"), current == Tab::Backups));
+    }
+    if role == Role::Admin {
+        tabs.push(("Terminal", format!("{base}/terminal"), current == Tab::Terminal));
     }
     if role >= Role::Developer {
         tabs.push(("Settings", format!("{base}/settings"), current == Tab::Settings));

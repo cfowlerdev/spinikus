@@ -1,7 +1,8 @@
 //! On-demand sessions. The control plane asks for one with an `OpenSession` command on the
 //! control stream; the agent opens an `AgentService.OpenSession` stream whose first frame
-//! carries the session ID, and serves it until either side closes it. Only log tails exist
-//! so far: the container's log as `log_line` frames, then `closed`.
+//! carries the session ID, and serves it until either side closes it. A log tail sends the
+//! container's log as `log_line` frames, then `closed`; a terminal runs a command with a TTY,
+//! relaying `data` and `resize` frames both ways, then `closed` with its exit code.
 
 use std::{sync::Arc, time::Duration};
 
@@ -11,6 +12,8 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::{Streaming, transport::Channel};
 
 use crate::runtime::{ContainerRuntime, LogOptions};
+
+mod terminal;
 
 /// How long a finished session waits for the control plane to close its side.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
@@ -26,7 +29,10 @@ pub(crate) fn open(client: AgentServiceClient<Channel>, runtime: Arc<dyn Contain
 }
 
 fn closed(error: impl Into<String>) -> pb::SessionFrame {
-    pb::SessionFrame { session_id: String::new(), frame: Some(Frame::Closed(pb::SessionClosed { error: error.into() })) }
+    pb::SessionFrame {
+        session_id: String::new(),
+        frame: Some(Frame::Closed(pb::SessionClosed { error: error.into(), exit_code: None })),
+    }
 }
 
 async fn serve(
@@ -38,17 +44,24 @@ async fn serve(
     let first = pb::SessionFrame { session_id: open.session_id.clone(), frame: None };
     sender.send(first).await.expect("the receiver is held below");
     let mut inbound = client.open_session(ReceiverStream::new(receiver)).await?.into_inner();
-    match open.kind {
-        Some(Kind::LogTail(tail)) => log_tail(runtime, tail, &sender, &mut inbound).await,
-        Some(Kind::Terminal(_)) | None => {
-            let _ = sender.send(closed("this agent cannot open this kind of session yet")).await;
+    let inbound = match open.kind {
+        Some(Kind::LogTail(tail)) => {
+            log_tail(runtime, tail, &sender, &mut inbound).await;
+            Some(inbound)
         }
-    }
+        Some(Kind::Terminal(terminal)) => terminal::serve(runtime, terminal, &sender, inbound).await,
+        None => {
+            let _ = sender.send(closed("this agent cannot open this kind of session")).await;
+            Some(inbound)
+        }
+    };
     // Dropping the response stream resets the call, losing frames not yet sent: end our side
     // and wait for the control plane to close its own.
     drop(sender);
-    let drained = async { while let Ok(Some(_)) = inbound.message().await {} };
-    let _ = tokio::time::timeout(CLOSE_GRACE, drained).await;
+    if let Some(mut inbound) = inbound {
+        let drained = async { while let Ok(Some(_)) = inbound.message().await {} };
+        let _ = tokio::time::timeout(CLOSE_GRACE, drained).await;
+    }
     Ok(())
 }
 
@@ -86,7 +99,7 @@ async fn log_tail(
                         .into(),
                         text: line.text,
                     }),
-                    Some(Err(error)) => Frame::Closed(pb::SessionClosed { error: error.to_string() }),
+                    Some(Err(error)) => Frame::Closed(pb::SessionClosed { error: error.to_string(), exit_code: None }),
                     None => Frame::Closed(pb::SessionClosed::default()),
                 };
                 let last = matches!(frame, Frame::Closed(_));

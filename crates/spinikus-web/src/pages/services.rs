@@ -173,6 +173,9 @@ async fn service_page(
             }
             @if can_deploy {
                 div class="ml-auto flex gap-2" {
+                    @if live.is_some() && role == Role::Admin {
+                        a href=(super::terminal::url(service.id, None)) hx-boost="false" class=(BUTTON_SECONDARY) { "Terminal" }
+                    }
                     @if live.is_some() {
                         form method="post" action={ "/services/" (service.id) "/restart" }
                             hx-confirm="Restart the running container? Requests to it fail until it is back up." {

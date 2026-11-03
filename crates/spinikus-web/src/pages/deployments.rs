@@ -60,6 +60,12 @@ fn may_have_container(deployment: &Deployment) -> bool {
     deployment.cleaned_at.is_none() && matches!(deployment.status, Starting | Verifying | Live | Draining | Superseded | Failed)
 }
 
+/// Whether the deployment's container may be running, so a terminal can open in it.
+fn may_be_running(deployment: &Deployment) -> bool {
+    use spinikus_core::deployment::DeploymentStatus::*;
+    deployment.cleaned_at.is_none() && matches!(deployment.status, Verifying | Live | Draining)
+}
+
 /// The summary alone, which reloads itself when the status changes.
 pub async fn summary(State(control): State<Control>, signed: Signed, Path(id): Path<String>) -> Result<Markup, WebError> {
     let deployment = control.get_deployment(&signed.principal, parse_id(&id)?).await?;
@@ -156,6 +162,9 @@ async fn deployment_page(
                     }
                     @if may_have_container(&deployment) {
                         a href={ "/services/" (service.id) "/logs?deployment_id=" (deployment.id) } class={ (LINK) " text-sm" } { "Container logs" }
+                    }
+                    @if role == Role::Admin && may_be_running(&deployment) {
+                        a href=(super::terminal::url(service.id, Some(deployment.id))) hx-boost="false" class={ (LINK) " text-sm" } { "Terminal" }
                     }
                 }
                 div class="flex max-h-[36rem] flex-col-reverse overflow-y-auto rounded-lg bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-200 ring-1 ring-zinc-800" {

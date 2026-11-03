@@ -229,6 +229,19 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
     assert_eq!(not_live.code, 6, "{}", not_live.stderr);
     assert!(not_live.stderr.contains("nothing live to restart"), "{}", not_live.stderr);
 
+    // A command in the running container, its input piped (the in-memory terminal echoes it,
+    // and `exit <code>` ends it), exiting with the command's status.
+    let shell = spinikus(&config, &work, &["shell", "--", "sh", "-l"], Some("echo hi\nexit 5\n")).await;
+    assert_eq!(shell.code, 5, "{}", shell.stderr);
+    assert_eq!(shell.stdout, "echo hi\nexit 5\n");
+    assert_eq!(shell.stderr, "", "the command's status isn't an error message");
+    let opened = runtime.terminals().pop().expect("a terminal was opened");
+    assert_eq!(opened.command, ["sh", "-l"]);
+    let ended = spinikus(&config, &work, &["shell"], Some("true\n")).await;
+    assert_eq!((ended.code, ended.stdout.as_str()), (0, "true\n"), "the end of input ends it: {}", ended.stderr);
+    let not_running = cli(&["shell", "production/broken"]).await;
+    assert_eq!(not_running.code, 6, "{}", not_running.stderr);
+
     // Domains.
     assert_eq!(cli(&["domain", "add", "www.example.com"]).await.code, 0);
     let domains = cli(&["domain", "list"]).await.stdout;

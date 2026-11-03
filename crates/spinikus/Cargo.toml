@@ -16,7 +16,10 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true
+futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 tokio.workspace = true
+tokio-stream.workspace = true
+tokio-tungstenite.workspace = true
 toml = "1.1.2"
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -27,6 +30,10 @@ spinikus-control.workspace = true
 spinikus-core.workspace = true
 spinikus-store.workspace = true
 spinikus-web.workspace = true
+
+# Raw mode and the window's size for `shell`.
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 # musl's allocator is slow under many threads; release binaries are built for musl.
 [target.'cfg(target_env = "musl")'.dependencies]

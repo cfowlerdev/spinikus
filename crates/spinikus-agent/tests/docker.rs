@@ -490,6 +490,62 @@ async fn runs_a_command_in_a_container_with_its_environment() {
     assert_eq!(counted.last(), Some(&ExecOutput::Exited(0)));
 }
 
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn opens_a_terminal_in_a_container() {
+    use spinikus_agent::runtime::{TerminalInput, TerminalInputs, TerminalSize};
+
+    let runtime = DockerRuntime::new();
+    let docker = runtime.client().unwrap();
+    let pull = CreateImageOptionsBuilder::new().from_image(IMAGE).build();
+    let mut pulling = docker.create_image(Some(pull), None, None);
+    while let Some(progress) = pulling.next().await {
+        progress.unwrap();
+    }
+    let body = ContainerCreateBody {
+        image: Some(IMAGE.to_string()),
+        cmd: Some(vec!["sleep".to_string(), "300".to_string()]),
+        ..Default::default()
+    };
+    let id = docker.create_container(None, body).await.unwrap().id;
+    let _cleanup = Cleanup(runtime.clone(), id.clone());
+    docker.start_container(&id, None).await.unwrap();
+    let within = Duration::from_secs(10);
+    let shell = vec!["/bin/sh".to_string()];
+
+    // Typed into a terminal of one size, resized, then asked about it.
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let input: TerminalInputs = Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver));
+    let size = TerminalSize { rows: 24, columns: 80 };
+    let mut output = runtime.terminal(&id, shell.clone(), size, input);
+    let typed = |text: &str| TerminalInput::Data(bytes::Bytes::from(text.to_string()));
+    sender.send(typed("echo \"term=$TERM\"; stty size\r")).await.unwrap();
+    sender.send(TerminalInput::Resize(TerminalSize { rows: 33, columns: 101 })).await.unwrap();
+    sender.send(typed("stty size; exit 4\r")).await.unwrap();
+    let mut text = Vec::new();
+    let exit = timeout(within, async {
+        while let Some(item) = output.next().await {
+            match item.unwrap() {
+                ExecOutput::Stdout(bytes) | ExecOutput::Stderr(bytes) => text.extend_from_slice(&bytes),
+                ExecOutput::Exited(code) => return code,
+            }
+        }
+        panic!("no exit");
+    })
+    .await
+    .unwrap();
+    let text = String::from_utf8_lossy(&text);
+
+    assert!(text.contains("term=xterm-256color"), "{text}");
+    assert!(text.contains("24 80") && text.contains("33 101"), "{text}");
+    assert_eq!(exit, 4);
+
+    // Ctrl+D at the prompt is the end of input, as in any terminal.
+    let input: TerminalInputs = Box::pin(tokio_stream::iter([typed("\u{4}")]).chain(tokio_stream::pending()));
+    let ended: Vec<_> = timeout(within, runtime.terminal(&id, shell, size, input).collect::<Vec<_>>()).await.unwrap();
+    assert_eq!(ended.last().map(|item| item.as_ref().unwrap()), Some(&ExecOutput::Exited(0)));
+}
+
 /// Removes a network even when an assertion fails. Declare it before the containers'
 /// [`Cleanup`]s, so they go first.
 struct NetworkCleanup(DockerRuntime, String);

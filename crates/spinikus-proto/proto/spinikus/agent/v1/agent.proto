@@ -431,10 +431,15 @@ message OpenSession {
   }
 }
 
+// A command in the container with a terminal: the control plane sends keystrokes as `data`
+// and window changes as `resize`, the agent sends the terminal's output as `data`, then
+// `closed` with the command's exit code. Closing the stream closes the command's input.
 message TerminalSession {
   string container_id = 1;
   uint32 rows = 2;
   uint32 columns = 3;
+  // The command to run; the container's shell if empty.
+  repeated string command = 4;
 }
 
 // The agent sends the container's log as `log_line` frames, then `closed` once there is
@@ -530,6 +535,8 @@ message TerminalSize {
 
 message SessionClosed {
   string error = 1;
+  // How a terminal's command exited, when it did.
+  optional int64 exit_code = 2;
 }
 
 message StatsBatch {

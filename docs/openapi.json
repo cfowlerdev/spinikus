@@ -3,7 +3,7 @@
   "info": {
     "title": "Spinikus API",
     "description": "The API of a Spinikus instance, as the dashboard and the `spinikus` CLI use it.\n\nCallers authenticate with an API token, `Authorization: Bearer spk_…` (from `POST /api/v1/login` or the dashboard's API tokens page). Errors are RFC 9457 problem details whose `code` is stable. Single resources carry their revision as an `ETag`, and updates need it back in `If-Match`. Lists are cursor pages: pass a page's `next_cursor` as `after` for the next one.",
-    "version": "0.1.1"
+    "version": "0.2.0-rc.1"
   },
   "servers": [
     {
@@ -2631,6 +2631,80 @@
                 }
               }
             }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/services/{id}/terminal": {
+      "get": {
+        "tags": [
+          "terminals"
+        ],
+        "summary": "Opens a terminal in the service's running container, as a WebSocket.",
+        "description": "Opens a terminal in the service's running container, as a WebSocket. Binary messages are the terminal's bytes, both ways; the client sends `{\"type\":\"resize\",\"rows\",\"columns\"}` as text when its window changes, and the server ends with `{\"type\":\"exit\",\"code\"}` or `{\"type\":\"error\",\"message\"}` before closing. Closing the socket closes the command's input. Environment admins only; each terminal is recorded in the audit log.",
+        "operationId": "terminals_open",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ServiceId"
+            }
+          },
+          {
+            "name": "deployment_id",
+            "in": "query",
+            "description": "The deployment whose container to open it in; the live one by default.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/DeploymentId"
+            }
+          },
+          {
+            "name": "command",
+            "in": "query",
+            "description": "The command to run, as a JSON array of strings, such as `[\"psql\",\"-U\",\"app\"]`; the\ncontainer's shell (bash, else sh) by default.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "description": "The terminal's size in characters; 24 by 80 by default.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "columns",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switched to the terminal's WebSocket."
           },
           "default": {
             "description": "A problem detail; `code` says which.",
@@ -9538,6 +9612,10 @@
     {
       "name": "logs",
       "description": "A service's runtime logs."
+    },
+    {
+      "name": "terminals",
+      "description": "Shells and commands in a service's running container, over a WebSocket."
     },
     {
       "name": "variables",

@@ -278,6 +278,8 @@ async fn malformed_requests_are_problems_too() {
         .body(Body::from("{not json"))
         .unwrap();
     let not_json = api.router.clone().oneshot(request).await.unwrap();
+    let terminal = "/api/v1/services/svc_01J0000000000000000000000A/terminal";
+    let not_websocket = api.send(Method::GET, terminal, token, &[], None).await;
 
     assert_eq!((bad_id.status, &bad_id.body["code"]), (StatusCode::NOT_FOUND, &json!("not_found")));
     assert_eq!((no_route.status, &no_route.body["code"]), (StatusCode::NOT_FOUND, &json!("not_found")));
@@ -285,6 +287,7 @@ async fn malformed_requests_are_problems_too() {
     assert_eq!((bad_query.status, &bad_query.body["code"]), (StatusCode::BAD_REQUEST, &json!("invalid_query")));
     assert_eq!((bad_if_match.status, &bad_if_match.body["code"]), (StatusCode::BAD_REQUEST, &json!("invalid_header")));
     assert_eq!(not_json.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(not_websocket.body["code"], json!("websocket_required"), "{:?}", not_websocket.body);
 }
 
 #[tokio::test]

@@ -1,7 +1,9 @@
-//! Static assets, embedded in the binary: the stylesheet built by `cargo xtask css` and the
+//! Static assets, embedded in the binary: the stylesheet built by `cargo xtask css`; the
 //! vendored HTMX (2.0.11, `htmx.org` on npm) and its SSE extension (2.2.4, `htmx-ext-sse`),
-//! each checked against the registry's integrity hash, and the command palette's own
-//! `palette.js`.
+//! and xterm.js (6.0.0, `@xterm/xterm`: `lib/xterm.js` and `css/xterm.css`, MIT) and its fit
+//! addon (0.11.0, `@xterm/addon-fit`: `lib/addon-fit.js`), each checked against the
+//! registry's integrity hash; and our own `palette.js` (the command palette) and
+//! `terminal.js` (the terminal page).
 //! Pages link them with their content's hash as `?v=`, so a response for the current version
 //! can be cached for good.
 
@@ -25,11 +27,15 @@ struct Asset {
 }
 
 static ASSETS: LazyLock<HashMap<&'static str, Asset>> = LazyLock::new(|| {
-    let assets: [(&str, &str, &[u8]); 4] = [
+    let assets: [(&str, &str, &[u8]); 8] = [
         ("app.css", "text/css; charset=utf-8", include_bytes!("../assets/app.css")),
         ("htmx.min.js", "text/javascript; charset=utf-8", include_bytes!("../assets/htmx.min.js")),
         ("htmx-ext-sse.min.js", "text/javascript; charset=utf-8", include_bytes!("../assets/htmx-ext-sse.min.js")),
         ("palette.js", "text/javascript; charset=utf-8", include_bytes!("../assets/palette.js")),
+        ("xterm.min.js", "text/javascript; charset=utf-8", include_bytes!("../assets/xterm.min.js")),
+        ("xterm-addon-fit.min.js", "text/javascript; charset=utf-8", include_bytes!("../assets/xterm-addon-fit.min.js")),
+        ("xterm.css", "text/css; charset=utf-8", include_bytes!("../assets/xterm.css")),
+        ("terminal.js", "text/javascript; charset=utf-8", include_bytes!("../assets/terminal.js")),
     ];
     assets
         .into_iter()

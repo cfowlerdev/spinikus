@@ -26,6 +26,7 @@ pub mod service;
 pub mod setting;
 pub mod slug;
 pub mod source;
+pub mod terminal;
 pub mod text;
 pub mod token;
 pub mod user;

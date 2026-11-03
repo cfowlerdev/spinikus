@@ -227,6 +227,17 @@ pub struct LogsArgs {
     pub timestamps: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct ShellArgs {
+    pub service: Option<String>,
+    /// A deployment's container instead of the live one (it must be running)
+    #[arg(long)]
+    pub deployment: Option<String>,
+    /// The command to run, after `--`, such as `-- psql -U app` (default: bash, else sh)
+    #[arg(last = true)]
+    pub command: Vec<String>,
+}
+
 /// Where variables live: a service, an environment or a project. With none of these, the
 /// linked service (or environment, if the link names none).
 #[derive(Args, Debug, Clone)]

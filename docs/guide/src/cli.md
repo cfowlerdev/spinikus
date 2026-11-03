@@ -78,6 +78,7 @@ picked by directory.
 | `restart`      | Restart a service's running container                                           |
 | `deployment`   | List deployments, show one, print or follow its log, cancel it                  |
 | `logs`         | Print or follow a service's runtime logs                                        |
+| `shell`        | Open a shell, or run a command, in a service's running container ([Terminal](apps/terminal.md)) |
 | `env`          | List, set, unset, import and export variables                                   |
 | `domain`       | List, add and remove domains                                                    |
 | `volume`       | List, add, update and remove volumes                                            |
@@ -113,6 +114,9 @@ Scripts can rely on these:
 | 5      | What was named doesn't exist, or you can't see it                            |
 | 6      | Refused: invalid input, a conflict, or a change made since it was read       |
 | 7      | A deployment, backup or restore that was waited for failed or was canceled   |
+
+`shell` is the exception: once the command runs, the CLI exits with the command's own exit
+status.
 
 ## In CI
 

@@ -14,6 +14,7 @@ mod services;
 mod session;
 mod settings;
 mod sources;
+mod terminals;
 mod tokens;
 mod users;
 mod variables;
@@ -57,6 +58,7 @@ pub fn v1() -> OpenApiRouter<Control> {
         .routes(routes!(deployments::rollback))
         .routes(routes!(deployments::restart))
         .routes(routes!(service_logs::show))
+        .routes(routes!(terminals::open))
         .routes(routes!(deployments::show))
         .routes(routes!(deployments::events))
         .routes(routes!(deployments::logs))

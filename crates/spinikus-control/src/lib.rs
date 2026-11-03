@@ -26,6 +26,7 @@ pub mod services;
 pub mod settings;
 pub mod setup;
 pub mod sources;
+pub mod terminals;
 #[cfg(test)]
 mod test_support;
 pub mod throttle;

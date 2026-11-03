@@ -905,6 +905,157 @@ async fn runtime_logs_come_from_the_agent_and_stop_when_nobody_reads() {
     assert!(refused.contains("not connected"), "said in the log box: {refused}");
 }
 
+#[tokio::test]
+async fn terminals_run_in_the_container_from_control_the_api_and_the_dashboard() {
+    use spinikus_control::terminals::{TerminalOptions, TerminalOutput};
+    use spinikus_store::AuditLogRepository;
+    use tokio_stream::StreamExt;
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
+
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let runtime = Arc::new(MemoryRuntime::new());
+    runtime.add_image("ghcr.io/acme/web:1", "ghcr.io/acme/web@sha256:01");
+    let (_stop, _agent) = start_agent_with(&files, runtime.clone(), None);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let service = control_plane.service(server, "ghcr.io/acme/web:1", json!({ "healthcheck": { "start_period": "0s" } })).await;
+    let (control, admin) = (&control_plane.control, &control_plane.admin);
+    let deployment = control.create_deployment(admin, service).await.unwrap();
+    control_plane.wait_for_deployment(deployment.id, DeploymentStatus::Live, Duration::from_secs(10)).await;
+    wait_for_deployment(&control_plane, server, deployment.id, Some(InstanceStatus::Running)).await;
+    let within = Duration::from_secs(5);
+
+    // Through the service layer: keystrokes in, the terminal's output back, a resize, the exit.
+    let terminal = control.open_terminal(admin, service, TerminalOptions::default()).await.unwrap();
+    terminal.input.write(b"echo hi\r".to_vec()).await.unwrap();
+    terminal.input.resize(40, 120).await.unwrap();
+    terminal.input.write(b"exit 3\r".to_vec()).await.unwrap();
+    let output: Vec<_> = tokio::time::timeout(within, terminal.output.collect()).await.unwrap();
+    let opened = runtime.terminals().pop().unwrap();
+    let audit = control.store().list_audit_entries(None, None, None, 100).await.unwrap();
+
+    let (data, last) = output.split_at(output.len() - 1);
+    let typed: Vec<u8> = data
+        .iter()
+        .flat_map(|item| match item {
+            TerminalOutput::Data(data) => data.clone(),
+            other => panic!("not data: {other:?}"),
+        })
+        .collect();
+    assert_eq!(typed, b"echo hi\rexit 3\r");
+    assert_eq!(last, [TerminalOutput::Exited(3)]);
+    assert_eq!(opened.command[0], "/bin/sh", "the shell by default: {opened:?}");
+    let sizes: Vec<_> = opened.sizes.iter().map(|size| (size.rows, size.columns)).collect();
+    assert_eq!(sizes, [(24, 80), (40, 120)]);
+    let entry = audit.iter().find(|entry| entry.action.as_str() == "service.terminal").expect("audited");
+    assert_eq!(entry.target_id.as_deref(), Some(service.to_string().as_str()));
+
+    // The API's WebSocket, with a bearer token and a command.
+    let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_address = api.local_addr().unwrap();
+    let router = spinikus_api::router(control.clone()).into_make_service_with_connect_info::<SocketAddr>();
+    tokio::spawn(axum::serve(api, router).into_future());
+    let new_token = spinikus_control::NewToken {
+        name: "terminal".to_string(),
+        role: spinikus_core::membership::Role::Admin,
+        scope: None,
+        expires_at: None,
+    };
+    let (_, token) = control.create_api_token(admin, new_token).await.unwrap();
+    let url = format!("ws://{api_address}/api/v1/services/{service}/terminal?command=%5B%22psql%22%5D&rows=30&columns=100");
+    let mut request = url.into_client_request().unwrap();
+    let bearer = HeaderValue::from_str(&format!("Bearer {}", token.expose())).unwrap();
+    request.headers_mut().insert("authorization", bearer);
+    let stream = TcpStream::connect(api_address).await.unwrap();
+    let (mut socket, _) = tokio_tungstenite::client_async(request, stream).await.unwrap();
+    socket_send(&mut socket, Message::Binary(b"exit 7\r".to_vec().into())).await;
+    let api_messages = read_messages(&mut socket).await;
+    let unauthenticated = format!("ws://{api_address}/api/v1/services/{service}/terminal").into_client_request().unwrap();
+    let refused = tokio_tungstenite::client_async(unauthenticated, TcpStream::connect(api_address).await.unwrap()).await;
+
+    assert_eq!(api_messages, [Message::Binary(b"exit 7\r".to_vec().into()), Message::Text(r#"{"type":"exit","code":7}"#.into())]);
+    let opened = runtime.terminals().pop().unwrap();
+    assert_eq!((opened.command, opened.sizes[0].rows, opened.sizes[0].columns), (vec!["psql".to_string()], 30, 100));
+    match refused {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => assert_eq!(response.status(), 401),
+        other => panic!("not refused: {other:?}"),
+    }
+
+    // The dashboard: the page, and its socket with the session cookie, from this site only.
+    let dashboard = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = dashboard.local_addr().unwrap();
+    tokio::spawn(axum::serve(dashboard, spinikus_web::router(control.clone())).into_future());
+    let session = NewSession {
+        user_id: admin.user.id,
+        expires_at: Timestamp::now() + SignedDuration::from_hours(1),
+        user_agent: None,
+        ip_address: None,
+    };
+    let (_, cookie) = control.store().create_session(session).await.unwrap();
+    let cookie = cookie.expose();
+    let page = read_until(address, &format!("/services/{service}/terminal"), cookie, "</html>").await;
+    let socket_request = |origin: Option<&str>| {
+        let mut request = format!("ws://{address}/services/{service}/terminal/socket").into_client_request().unwrap();
+        let headers = request.headers_mut();
+        headers.insert("cookie", HeaderValue::from_str(&format!("spinikus_session={cookie}")).unwrap());
+        if let Some(origin) = origin {
+            headers.insert("origin", HeaderValue::from_str(origin).unwrap());
+        }
+        request
+    };
+    let this_site = format!("http://{address}");
+    let (mut socket, _) =
+        tokio_tungstenite::client_async(socket_request(Some(&this_site)), TcpStream::connect(address).await.unwrap())
+            .await
+            .unwrap();
+    socket_send(&mut socket, Message::Binary(b"\x04".to_vec().into())).await;
+    let web_messages = read_messages(&mut socket).await;
+    let elsewhere = socket_request(Some("https://evil.example"));
+    let elsewhere = tokio_tungstenite::client_async(elsewhere, TcpStream::connect(address).await.unwrap()).await;
+    let no_origin = tokio_tungstenite::client_async(socket_request(None), TcpStream::connect(address).await.unwrap()).await;
+
+    assert!(page.contains("style-src 'self' 'unsafe-inline'"), "the terminal page's own CSP: {page}");
+    assert!(page.contains(&format!("data-socket=\"/services/{service}/terminal/socket\"")), "{page}");
+    assert!(page.contains("/assets/xterm.min.js?v=") && page.contains("hx-boost=\"false\""), "{page}");
+    assert_eq!(web_messages, [Message::Text(r#"{"type":"exit","code":0}"#.into())]);
+    for refused in [elsewhere, no_origin] {
+        match refused {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => assert_eq!(response.status(), 403),
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+}
+
+async fn socket_send<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    message: tokio_tungstenite::tungstenite::Message,
+) {
+    use futures_util::SinkExt;
+    socket.send(message).await.unwrap();
+}
+
+/// A WebSocket's data and text messages until the server closes it.
+async fn read_messages<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+) -> Vec<tokio_tungstenite::tungstenite::Message> {
+    use tokio_stream::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let read = async {
+        let mut messages = Vec::new();
+        while let Some(Ok(message)) = socket.next().await {
+            match message {
+                Message::Binary(_) | Message::Text(_) => messages.push(message),
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+        messages
+    };
+    tokio::time::timeout(Duration::from_secs(5), read).await.expect("the socket closed")
+}
+
 /// A raw HTTP/1.1 GET with a session cookie, read until `marker` shows up (or the response
 /// ends), so a stream that goes on can be read too.
 async fn read_until(address: SocketAddr, path: &str, cookie: &str, marker: &str) -> String {

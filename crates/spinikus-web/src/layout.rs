@@ -42,7 +42,20 @@ fn htmx_config() -> String {
     .to_string()
 }
 
-fn document(title: &str, body: Markup) -> Markup {
+/// What a page needs beyond the usual: its own scripts and stylesheets, and whether HTMX
+/// boosts its links and forms.
+#[derive(Clone, Copy)]
+pub struct Head<'a> {
+    pub boost: bool,
+    pub scripts: &'a [&'a str],
+    pub styles: &'a [&'a str],
+}
+
+impl Head<'_> {
+    const USUAL: Head<'static> = Head { boost: true, scripts: &[], styles: &[] };
+}
+
+fn document(title: &str, body: Markup, head: Head) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" class="h-full" {
@@ -55,8 +68,10 @@ fn document(title: &str, body: Markup) -> Markup {
                 script src=(assets::url("htmx.min.js")) defer {}
                 script src=(assets::url("htmx-ext-sse.min.js")) defer {}
                 script src=(assets::url("palette.js")) defer {}
+                @for style in head.styles { link rel="stylesheet" href=(assets::url(style)); }
+                @for script in head.scripts { script src=(assets::url(script)) defer {} }
             }
-            body class="h-full bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100" hx-boost="true" {
+            body class="h-full bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100" hx-boost=(head.boost) {
                 (body)
             }
         }
@@ -66,6 +81,11 @@ fn document(title: &str, body: Markup) -> Markup {
 /// A page for someone signed in: the header, then `content`. HTMX requests carry the CSRF
 /// token from the wrapper, which is swapped with the page (the body's own attributes are not).
 pub fn page(signed: &Signed, title: &str, crumbs: &[(&str, String)], content: Markup) -> Markup {
+    page_with(signed, title, crumbs, content, Head::USUAL)
+}
+
+/// [`page`] with more in its head.
+pub fn page_with(signed: &Signed, title: &str, crumbs: &[(&str, String)], content: Markup, head: Head) -> Markup {
     let headers = json!({ "X-CSRF-Token": signed.csrf }).to_string();
     let user = &signed.principal.user;
     document(
@@ -112,6 +132,7 @@ pub fn page(signed: &Signed, title: &str, crumbs: &[(&str, String)], content: Ma
                 (palette())
             }
         },
+        head,
     )
 }
 
@@ -141,6 +162,7 @@ pub fn bare(title: &str, content: Markup) -> Markup {
                 (content)
             }
         },
+        Head::USUAL,
     )
 }
 
@@ -172,10 +194,12 @@ pub fn tabs(tabs: &[(&str, String, bool)]) -> Markup {
     html! {
         nav aria-label="Sections" class="mb-6 flex gap-6 overflow-x-auto border-b border-zinc-200 text-sm dark:border-zinc-800" {
             @for (label, href, current) in tabs {
+                // The terminal's page loads in full, for its scripts and its own CSP.
+                @let boost = if href.ends_with("/terminal") { "false" } else { "true" };
                 @if *current {
-                    a href=(href) aria-current="page" class="-mb-px shrink-0 border-b-2 border-indigo-500 pb-3 font-medium whitespace-nowrap text-zinc-900 dark:text-zinc-100" { (label) }
+                    a href=(href) hx-boost=(boost) aria-current="page" class="-mb-px shrink-0 border-b-2 border-indigo-500 pb-3 font-medium whitespace-nowrap text-zinc-900 dark:text-zinc-100" { (label) }
                 } @else {
-                    a href=(href) class="-mb-px shrink-0 border-b-2 border-transparent pb-3 whitespace-nowrap text-zinc-500 hover:border-zinc-300 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { (label) }
+                    a href=(href) hx-boost=(boost) class="-mb-px shrink-0 border-b-2 border-transparent pb-3 whitespace-nowrap text-zinc-500 hover:border-zinc-300 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" { (label) }
                 }
             }
         }

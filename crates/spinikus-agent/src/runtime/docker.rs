@@ -14,7 +14,7 @@ use bollard::{
     API_DEFAULT_VERSION, Docker, body_try_stream,
     container::LogOutput,
     errors::Error,
-    exec::StartExecResults,
+    exec::{ResizeExecOptions, StartExecResults},
     models::{
         ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EndpointSettings, EventMessageTypeEnum,
         ExecConfig, HealthStatusEnum, HostConfig, NetworkCreateRequest, NetworkingConfig, PortBinding, RestartPolicy,
@@ -34,8 +34,8 @@ use tokio_stream::StreamExt;
 
 use super::{
     BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, ExecInput, ExecOutput, ExecStream, LogLine,
-    LogLines, LogOptions, Network, ONE_OFF_LABEL, OneOffExit, OneOffSpec, PORT_LABEL, RuntimeError, SERVICE_LABEL, owner,
-    session,
+    LogLines, LogOptions, Network, ONE_OFF_LABEL, OneOffExit, OneOffSpec, PORT_LABEL, RuntimeError, SERVICE_LABEL, TERMINAL_TYPE,
+    TerminalInput, TerminalInputs, TerminalSize, owner, session,
 };
 
 /// Aborts a task when dropped, such as stdin's writer once the command's output ends.
@@ -44,6 +44,15 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// Resizes an exec's terminal. A resize racing the command's exit fails; its output says how
+/// it ended.
+async fn resize_exec(docker: &Docker, exec: &str, size: TerminalSize) {
+    let options = ResizeExecOptions { height: size.rows, width: size.columns };
+    if let Err(error) = docker.resize_exec(exec, options).await {
+        tracing::debug!(%error, "failed to resize a terminal");
     }
 }
 
@@ -313,6 +322,69 @@ impl ContainerRuntime for DockerRuntime {
                         LogOutput::StdIn { .. } => continue,
                     };
                     if sender.send(Ok(output)).await.is_err() {
+                        return Ok(None);
+                    }
+                }
+                let exit = docker.inspect_exec(&exec).await.map_err(runtime_error)?.exit_code;
+                Ok(Some(ExecOutput::Exited(exit.unwrap_or(-1))))
+            }
+            .await;
+            let last = match outcome {
+                Ok(Some(exited)) => Ok(exited),
+                Ok(None) => return,
+                Err(error) => Err(error),
+            };
+            let _ = sender.send(last).await;
+        });
+        Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
+    }
+
+    fn terminal(&self, container_id: &str, command: Vec<String>, size: TerminalSize, mut input: TerminalInputs) -> ExecStream {
+        let docker = match self.client() {
+            Ok(docker) => docker,
+            Err(error) => return Box::pin(tokio_stream::once(Err(error))),
+        };
+        let container_id = container_id.to_string();
+        let (sender, receiver) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            let outcome = async {
+                let config = ExecConfig {
+                    cmd: Some(command),
+                    env: Some(vec![format!("TERM={TERMINAL_TYPE}")]),
+                    attach_stdin: Some(true),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    tty: Some(true),
+                    ..Default::default()
+                };
+                let exec = docker.create_exec(&container_id, config).await.map_err(runtime_error)?.id;
+                let StartExecResults::Attached { mut output, input: mut stdin } =
+                    docker.start_exec(&exec, None).await.map_err(runtime_error)?
+                else {
+                    return Err(RuntimeError::Failed("the command started detached".to_string()));
+                };
+                resize_exec(&docker, &exec, size).await;
+                let (resizer, resized) = (docker.clone(), exec.clone());
+                let writer = tokio::spawn(async move {
+                    while let Some(item) = input.next().await {
+                        match item {
+                            TerminalInput::Data(data) => {
+                                if stdin.write_all(&data).await.is_err() {
+                                    return;
+                                }
+                            }
+                            TerminalInput::Resize(size) => resize_exec(&resizer, &resized, size).await,
+                        }
+                    }
+                    let _ = stdin.shutdown().await;
+                });
+                let _writer = AbortOnDrop(writer);
+                while let Some(output) = output.next().await {
+                    let data = match output.map_err(runtime_error)? {
+                        LogOutput::StdOut { message } | LogOutput::Console { message } | LogOutput::StdErr { message } => message,
+                        LogOutput::StdIn { .. } => continue,
+                    };
+                    if sender.send(Ok(ExecOutput::Stdout(data))).await.is_err() {
                         return Ok(None);
                     }
                 }
