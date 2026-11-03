@@ -177,6 +177,22 @@ async fn setup_needs_the_setup_code_when_there_is_one() {
 }
 
 #[tokio::test]
+async fn makes_sign_ins_wait_after_too_many_wrong_passwords() {
+    let web = Web::new().await;
+    web.control.create_first_admin("ada@example.com", "Ada", Secret::new(PASSWORD)).await.unwrap();
+
+    for _ in 0..spinikus_control::throttle::MAX_FAILURES {
+        let wrong = web.post("/login", None, "email=ada%40example.com&password=nope").await;
+        assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+    }
+    let throttled = web.post("/login", None, "email=ada%40example.com&password=correct+horse+battery+staple").await;
+
+    assert_eq!(throttled.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(throttled.body.contains("Too many failed sign-ins; try again in 15 minutes."), "{}", throttled.body);
+    assert!(throttled.header("set-cookie").is_none());
+}
+
+#[tokio::test]
 async fn signs_in_and_out() {
     let web = Web::new().await;
     web.control.create_first_admin("ada@example.com", "Ada", Secret::new(PASSWORD)).await.unwrap();

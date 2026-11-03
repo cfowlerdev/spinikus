@@ -60,6 +60,7 @@ fn control_status(error: &ControlError) -> StatusCode {
         ControlError::Invalid { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         ControlError::InvalidCredentials | ControlError::Unauthenticated => StatusCode::UNAUTHORIZED,
         ControlError::Forbidden => StatusCode::FORBIDDEN,
+        ControlError::TooManyAttempts { .. } => StatusCode::TOO_MANY_REQUESTS,
         ControlError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -102,6 +103,12 @@ impl IntoResponse for ApiError {
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/problem+json"));
         if status == StatusCode::UNAUTHORIZED {
             headers.insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        if let Self::Control(ControlError::TooManyAttempts { retry_after }) = &self {
+            headers.insert(
+                header::RETRY_AFTER,
+                HeaderValue::from(u64::try_from(retry_after.as_millis().div_ceil(1000)).unwrap_or(u64::MAX).max(1)),
+            );
         }
         response
     }

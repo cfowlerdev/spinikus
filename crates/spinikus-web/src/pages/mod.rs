@@ -135,7 +135,8 @@ fn refused(error: &ControlError) -> Option<String> {
         ControlError::Conflict { .. }
         | ControlError::HasChildren { .. }
         | ControlError::RevisionMismatch { .. }
-        | ControlError::InvalidTransition(_) => error.to_string(),
+        | ControlError::InvalidTransition(_)
+        | ControlError::TooManyAttempts { .. } => error.to_string(),
         _ => return None,
     };
     let mut chars = message.chars();

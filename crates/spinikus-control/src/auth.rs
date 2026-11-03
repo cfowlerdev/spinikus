@@ -97,7 +97,7 @@ impl Control {
     /// Checks the email and password and starts a web session. Returns the session and the
     /// cookie value. Every failure is `InvalidCredentials`, whatever the reason.
     pub async fn sign_in(&self, email: &str, password: Secret, client: ClientInfo) -> Result<(Session, Secret), ControlError> {
-        let user = self.check_password(email, password).await?;
+        let user = self.check_password(email, password, &client).await?;
         let (session, secret) = self
             .store()
             .create_session(NewSession {
@@ -130,7 +130,7 @@ impl Control {
         client: ClientInfo,
     ) -> Result<(ApiToken, Secret), ControlError> {
         let name = input::name(token_name)?;
-        let user = self.check_password(email, password).await?;
+        let user = self.check_password(email, password, &client).await?;
         let new = NewApiToken {
             user_id: user.id,
             name,
@@ -151,8 +151,15 @@ impl Control {
         Ok((token, secret))
     }
 
-    /// The active user with this email and password, or `InvalidCredentials`.
-    async fn check_password(&self, email: &str, password: Secret) -> Result<User, ControlError> {
+    /// The active user with this email and password, or `InvalidCredentials`; or
+    /// `TooManyAttempts`, without checking, after too many wrong passwords from the client's
+    /// address ([`crate::throttle`]).
+    async fn check_password(&self, email: &str, password: Secret, client: &ClientInfo) -> Result<User, ControlError> {
+        let address = client.ip_address.as_deref();
+        if let Err(retry_after) = self.sign_ins.check(email, address) {
+            tracing::info!(address, "sign-in refused after too many failures");
+            return Err(ControlError::TooManyAttempts { retry_after });
+        }
         let user = match email.parse::<Email>() {
             Ok(email) => self.store().find_user_by_email(&email).await?.filter(User::is_active),
             Err(_) => None,
@@ -164,9 +171,13 @@ impl Control {
         // Verify even without a user, so timing does not reveal which emails have accounts.
         let matches = password::verify(password, hash).await;
         match user.filter(|_| matches) {
-            Some(user) => Ok(user),
+            Some(user) => {
+                self.sign_ins.succeeded(email, address);
+                Ok(user)
+            }
             None => {
-                tracing::info!("sign-in failed");
+                self.sign_ins.failed(email, address);
+                tracing::info!(address, "sign-in failed");
                 Err(ControlError::InvalidCredentials)
             }
         }
@@ -263,6 +274,27 @@ mod tests {
             let result = control.sign_in(email, Secret::new(password), client()).await;
             assert!(matches!(result, Err(ControlError::InvalidCredentials)), "{email}: {result:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn refuses_sign_ins_after_too_many_wrong_passwords() {
+        let (_dir, control) = control().await;
+        user(&control, "ada@example.com", true).await;
+
+        for _ in 0..crate::throttle::MAX_FAILURES {
+            let wrong = control.sign_in("ada@example.com", Secret::new("wrong password here"), client()).await;
+            assert!(matches!(wrong, Err(ControlError::InvalidCredentials)), "{wrong:?}");
+        }
+        // Even the right password, until the window ends; tokens for the CLI too.
+        let refused = control.sign_in("ada@example.com", Secret::new(PASSWORD), client()).await;
+        let token = control.create_login_token("ada@example.com", Secret::new(PASSWORD), "laptop", client()).await;
+        let elsewhere = ClientInfo { ip_address: Some("198.51.100.2".to_string()), ..client() };
+
+        assert!(matches!(refused, Err(ControlError::TooManyAttempts { .. })), "{refused:?}");
+        assert!(matches!(token, Err(ControlError::TooManyAttempts { .. })), "{token:?}");
+        assert!(control.sign_in("ada@example.com", Secret::new(PASSWORD), elsewhere).await.is_ok());
+        let message = refused.unwrap_err().to_string();
+        assert_eq!(message, "too many failed sign-ins; try again in 15 minutes");
     }
 
     #[tokio::test]

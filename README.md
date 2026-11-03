@@ -36,6 +36,10 @@ The restore keeps the database and key it replaces beside them, as `*.before-res
 
 To back up on a schedule, add a storage destination (Settings → Storage), then set the schedule and its passphrase in Settings → Backups. Each backup is the same file, uploaded to `<prefix>instance/` in the bucket; download one with any S3 client to restore it.
 
+## Security
+
+See [`docs/security.md`](docs/security.md) for the trust model, what protects what, and the risks Spinikus accepts for now.
+
 ## Develop
 
 ```sh

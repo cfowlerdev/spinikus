@@ -56,6 +56,11 @@ pub async fn login(
             let form = login_form(&login.email, login.next.as_deref(), Some("Wrong email or password."));
             Ok((StatusCode::UNAUTHORIZED, form).into_response())
         }
+        Err(error @ ControlError::TooManyAttempts { .. }) => {
+            let message = super::refused(&error).unwrap_or_default();
+            let form = login_form(&login.email, login.next.as_deref(), Some(&message));
+            Ok((StatusCode::TOO_MANY_REQUESTS, form).into_response())
+        }
         Err(error) => Err(error.into()),
     }
 }

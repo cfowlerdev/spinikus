@@ -136,7 +136,7 @@ async fn logs_in_for_a_bearer_token() {
     let token = api.admin_token().await;
     let wrong = json!({ "email": "admin@example.com", "password": "not the password" });
 
-    let failed = api.send(Method::POST, "/api/v1/login", None, &[], Some(wrong)).await;
+    let failed = api.send(Method::POST, "/api/v1/login", None, &[], Some(wrong.clone())).await;
     let me = api.send(Method::GET, "/api/v1/me", Some(&token), &[], None).await;
     let anonymous = api.send(Method::GET, "/api/v1/me", None, &[], None).await;
     let bogus = api.send(Method::GET, "/api/v1/me", Some("spk_bogus"), &[], None).await;
@@ -147,6 +147,16 @@ async fn logs_in_for_a_bearer_token() {
     assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
     assert_eq!(anonymous.header(header::WWW_AUTHENTICATE), "Bearer");
     assert_eq!(bogus.body["code"], "unauthenticated");
+
+    // One wrong password so far; after the rest, even the right one waits.
+    for _ in 1..spinikus_control::throttle::MAX_FAILURES {
+        api.send(Method::POST, "/api/v1/login", None, &[], Some(wrong.clone())).await;
+    }
+    let right = json!({ "email": "admin@example.com", "password": PASSWORD });
+    let throttled = api.send(Method::POST, "/api/v1/login", None, &[], Some(right)).await;
+    assert_eq!((throttled.status, &throttled.body["code"]), (StatusCode::TOO_MANY_REQUESTS, &json!("too_many_attempts")));
+    let retry_after: u64 = throttled.header(header::RETRY_AFTER).parse().unwrap();
+    assert!((890..=900).contains(&retry_after), "{retry_after}");
 }
 
 #[tokio::test]

@@ -68,6 +68,9 @@ impl FromStr for MountPath {
             Some("it is longer than 4096 characters")
         } else if path.chars().any(|c| c == '\0' || c.is_control()) {
             Some("control characters are not allowed")
+        } else if path.contains([':', ',']) {
+            // Docker reads them as separators in a mount.
+            Some("`:` and `,` are not allowed")
         } else if path[1..].split('/').any(|component| matches!(component, "" | "." | "..")) {
             Some("it cannot contain empty, `.` or `..` components")
         } else {
@@ -116,7 +119,21 @@ mod tests {
     #[test]
     fn rejects_invalid_paths() {
         let too_long = format!("/{}", "a".repeat(MAX_MOUNT_PATH_LEN));
-        for input in ["", "/", "//", "data", "./data", "/data//x", "/data/../etc", "/data/.", "/da\0ta", "/a\nb", &too_long] {
+        for input in [
+            "",
+            "/",
+            "//",
+            "data",
+            "./data",
+            "/data//x",
+            "/data/../etc",
+            "/data/.",
+            "/da\0ta",
+            "/a\nb",
+            "/data:ro",
+            "/a,b",
+            &too_long,
+        ] {
             assert!(input.parse::<MountPath>().is_err(), "{input:?} should be rejected");
         }
     }

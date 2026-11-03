@@ -24,7 +24,7 @@ use hyper::{
 };
 use hyper_util::{
     client::legacy::{Client, connect::HttpConnector},
-    rt::{TokioExecutor, TokioIo},
+    rt::{TokioExecutor, TokioIo, TokioTimer},
     server::{conn::auto, graceful::GracefulShutdown},
 };
 use spinikus_core::{
@@ -46,6 +46,10 @@ use crate::{
 
 /// How long connecting to an app may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a client gets to send a request's headers, so slow clients can't hold
+/// connections open for free.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a client gets to finish the TLS handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -237,7 +241,9 @@ pub async fn serve_tls(proxy: Arc<Proxy>, listener: TcpListener, shutdown: impl 
 async fn accept(proxy: Arc<Proxy>, listener: TcpListener, tls: Option<TlsAcceptor>, shutdown: impl Future<Output = ()>) {
     let mut shutdown = std::pin::pin!(shutdown);
     let graceful = GracefulShutdown::new();
-    let builder = auto::Builder::new(TokioExecutor::new());
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    builder.http1().timer(TokioTimer::new()).header_read_timeout(HEADER_READ_TIMEOUT);
+    builder.http2().timer(TokioTimer::new());
     loop {
         let (stream, peer) = tokio::select! {
             () = shutdown.as_mut() => break,

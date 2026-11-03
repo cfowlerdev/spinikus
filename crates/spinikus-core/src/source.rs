@@ -116,6 +116,10 @@ fn check(field: &'static str, value: &str, problem: fn(&str) -> Option<&'static 
 }
 
 fn repo_url_problem(url: &str) -> Option<&'static str> {
+    // Git refuses such hosts itself; refusing them here too keeps them away from `git` and `ssh`.
+    if url.starts_with('-') || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some("it cannot start with `-` or contain spaces or control characters");
+    }
     if let Some(rest) = ["https://", "http://", "ssh://"].iter().find_map(|scheme| url.strip_prefix(scheme)) {
         let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
         return (host.is_empty() || path.is_empty()).then_some("it needs a host and a repository path");
@@ -198,6 +202,8 @@ mod tests {
     fn rejects_bad_repo_urls() {
         for url in
             ["", "github.com/acme/web", "https://github.com", "ftp://host/repo", "@host:repo", "git@host:", "https://host/a b"]
+                .into_iter()
+                .chain(["-oProxyCommand=touch /tmp/x@host:repo", "git@host:repo\n", "https://host/repo\tx"])
         {
             assert_eq!(invalid_field(git(url, "main", None)), "repo_url", "{url}");
         }

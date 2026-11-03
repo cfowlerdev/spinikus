@@ -28,6 +28,7 @@ pub mod setup;
 pub mod sources;
 #[cfg(test)]
 mod test_support;
+pub mod throttle;
 pub mod tokens;
 pub mod users;
 pub mod variables;
@@ -77,6 +78,7 @@ pub struct Control {
     logs: Arc<deployments::logs::DeploymentLogs>,
     sessions: Arc<service_logs::Sessions>,
     restarts: Arc<restarts::Restarts>,
+    sign_ins: Arc<throttle::SignInThrottle>,
     backups: Arc<backups::Backups>,
     /// Held while a pull request's preview is made, updated or removed, since each service's
     /// webhook gets the same events.
@@ -102,6 +104,7 @@ impl Control {
             logs,
             sessions,
             restarts: Arc::default(),
+            sign_ins: Arc::default(),
             backups,
             previews: Arc::default(),
             setup_code: None,

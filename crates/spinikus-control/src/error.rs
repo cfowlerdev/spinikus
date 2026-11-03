@@ -24,6 +24,9 @@ pub enum ControlError {
     /// Deliberately vague, so sign-in does not reveal which emails have accounts.
     #[error("invalid email or password")]
     InvalidCredentials,
+    /// Too many failed sign-ins from this address, for this email or overall.
+    #[error("too many failed sign-ins; try again in {} minutes", retry_after.as_secs().div_ceil(60).max(1))]
+    TooManyAttempts { retry_after: std::time::Duration },
     #[error("authentication required")]
     Unauthenticated,
     #[error("you do not have permission to do this")]
@@ -47,6 +50,7 @@ impl ControlError {
             Self::InvalidTransition(_) => "invalid_transition",
             Self::Invalid { .. } => "invalid",
             Self::InvalidCredentials => "invalid_credentials",
+            Self::TooManyAttempts { .. } => "too_many_attempts",
             Self::Unauthenticated => "unauthenticated",
             Self::Forbidden => "forbidden",
             Self::AlreadySetUp => "already_set_up",
