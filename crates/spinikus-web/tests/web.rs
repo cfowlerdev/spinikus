@@ -1393,6 +1393,67 @@ async fn creates_databases_and_backs_them_up_and_restores_them() {
 }
 
 #[tokio::test]
+async fn backs_up_an_apps_volumes_and_restores_them() {
+    use spinikus_control::{NewStorageDestination, NewVolume};
+    use spinikus_core::server::ServerFields;
+    use spinikus_store::{BackupRepository, ServerRepository};
+
+    let web = Web::new().await;
+    let control = &web.control;
+    let (admin, _, _, service) = shop_with_team(&web).await;
+    let server = control.store().get_or_create_embedded_server(ServerFields { name: "this machine".to_string() }).await.unwrap();
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+    let backups = format!("/services/{}/backups", service.id);
+
+    // An app has the tab too; without volumes, the page says what to add.
+    let service_page = web.get(&format!("/services/{}", service.id), Some(&dev)).await;
+    assert!(service_page.body.contains(&format!(r#"href="{backups}""#)), "{}", service_page.body);
+    let page = web.get(&backups, Some(&dev)).await;
+    assert!(page.body.contains("it has none") && page.body.contains("/settings#volumes"), "{}", page.body);
+    let new = NewStorageDestination {
+        name: "Offsite".to_string(),
+        endpoint: None,
+        region: None,
+        bucket: "backups".to_string(),
+        path_prefix: None,
+        path_style: false,
+        access_key_id: "AKIA".to_string(),
+        secret_access_key: Secret::new("key"),
+    };
+    let destination = control.create_storage_destination(&admin, new).await.unwrap().id.to_string();
+    let token = page.csrf();
+    let refused = web.post(&backups, Some(&dev), &form(&[("_csrf", &token), ("destination_id", &destination)])).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.body.contains("no volumes"), "{}", refused.body);
+
+    // With two volumes, the form asks which one.
+    let volume = |name: &str, path: &str| NewVolume { name: name.to_string(), mount_path: path.to_string() };
+    let uploads = control.create_volume(&admin, service.id, volume("uploads", "/app/uploads")).await.unwrap();
+    control.create_volume(&admin, service.id, volume("cache", "/app/cache")).await.unwrap();
+    let page = web.get(&backups, Some(&dev)).await;
+    assert!(page.body.contains(r#"name="volume_id""#) && page.body.contains("uploads (/app/uploads)"), "{}", page.body);
+    let unnamed = web.post(&backups, Some(&dev), &form(&[("_csrf", &token), ("destination_id", &destination)])).await;
+    assert_eq!(unnamed.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(unnamed.body.contains("name the one to back up"), "{}", unnamed.body);
+    let fields = form(&[("_csrf", &token), ("destination_id", &destination), ("volume_id", &uploads.id.to_string())]);
+    assert_eq!(web.post(&backups, Some(&dev), &fields).await.status, StatusCode::SEE_OTHER);
+
+    // Its row names the volume; restoring is into it, never into a new database.
+    let backup = control.list_backups(&admin, service.id, None, 10).await.unwrap().items.remove(0);
+    assert_eq!(backup.volume_id, Some(uploads.id));
+    control.store().start_backup(backup.id, server.id).await.unwrap();
+    control.store().finish_backup(backup.id, Ok(2048)).await.unwrap();
+    let page = web.get(&backups, Some(&ada)).await;
+    assert!(page.body.contains("uploads") && page.body.contains("Restore this backup into uploads?"), "{}", page.body);
+    assert!(!page.body.contains("Restore into a new database"), "{}", page.body);
+    let restored = web.post(&format!("/backups/{}/restore", backup.id), Some(&ada), &format!("_csrf={}", page.csrf())).await;
+    assert_eq!(restored.header("location"), Some(format!("{backups}?restoring=1").as_str()), "{}", restored.body);
+    let safety = control.list_backups(&admin, service.id, None, 10).await.unwrap().items.remove(0);
+    assert_eq!(safety.volume_id, Some(uploads.id), "the safety backup is of the same volume");
+}
+
+#[tokio::test]
 async fn instance_admins_change_the_general_settings() {
     let web = Web::new().await;
     let (admin, _, _, _) = shop_with_team(&web).await;

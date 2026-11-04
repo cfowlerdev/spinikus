@@ -1,6 +1,6 @@
-//! The backup runner: turns due schedules into queued backups, sends each queued backup or
-//! restore to the agent of the server its database is live on, and applies the schedules'
-//! retention.
+//! The backup runner: turns due schedules into queued backups (one per volume, for a
+//! service with volumes), sends each queued backup or restore to the agent of the server its
+//! database is live on or its volume is kept on, and applies the schedules' retention.
 //!
 //! The database is the state, like for deployments: a queued run is sent when its
 //! database's agent is connected (and fails when the database has nothing live, or the
@@ -22,8 +22,8 @@ use std::{
 
 use jiff::Timestamp;
 use spinikus_core::{
-    backup::{Backup, BackupStatus, Restore},
-    deployment::DeploymentStatus,
+    backup::{Backup, BackupSource, BackupStatus, HELPER_IMAGE, Restore, volume_archive_command, volume_restore_command},
+    deployment::{Deployment, DeploymentStatus},
     id::{BackupId, RestoreId, ServerId, ServiceId},
 };
 use spinikus_proto::agent::v1::{self as pb, command::Kind, command_result::Outcome, control_message};
@@ -115,10 +115,16 @@ pub(crate) fn parse_command_id(id: &str) -> Option<RunId> {
 
 type Sent = HashMap<String, (ServerId, Instant)>;
 
-/// Where a database runs, or why it can't be reached yet or ever.
+/// How many of a service's newest deployments are looked through for the one that ran
+/// last, which tells where its volumes are.
+const DEPLOYMENTS_LOOKED_AT: u32 = 50;
+
+/// Where a database runs or a volume is kept, or why it can't be reached yet or ever.
 enum Located {
     Ready {
         server: ServerId,
+        /// The database's container; for a volume, the service's running container to stop
+        /// during a restore, or empty.
         container_id: String,
     },
     /// It may become ready: the agent is away, or the container not reported yet.
@@ -225,13 +231,25 @@ impl Control {
                 tracing::error!(schedule = %schedule.id, %error, "failed to move a backup schedule on");
                 continue;
             }
-            let queued = match self.store().get_service(schedule.service_id).await {
-                Ok(service) => self.queue_backup(&service, schedule.fields.destination_id, Some(schedule.id)).await,
-                Err(error) => Err(error.into()),
+            let service = match self.store().get_service(schedule.service_id).await {
+                Ok(service) => service,
+                Err(error) => {
+                    tracing::warn!(schedule = %schedule.id, %error, "could not queue a scheduled backup");
+                    continue;
+                }
             };
-            match queued {
-                Ok(backup) => tracing::info!(schedule = %schedule.id, backup = %backup.id, "queued a scheduled backup"),
-                Err(error) => tracing::warn!(schedule = %schedule.id, %error, "could not queue a scheduled backup"),
+            let sources = match self.backup_sources(&service).await {
+                Ok(sources) => sources,
+                Err(error) => {
+                    tracing::warn!(schedule = %schedule.id, %error, "could not queue a scheduled backup");
+                    continue;
+                }
+            };
+            for source in sources {
+                match self.queue_backup(&service, schedule.fields.destination_id, Some(schedule.id), source).await {
+                    Ok(backup) => tracing::info!(schedule = %schedule.id, backup = %backup.id, "queued a scheduled backup"),
+                    Err(error) => tracing::warn!(schedule = %schedule.id, %error, "could not queue a scheduled backup"),
+                }
             }
         }
     }
@@ -249,23 +267,36 @@ impl Control {
             Err(StoreError::NotFound { .. }) => None,
             Err(error) => return Err(error.into()),
         };
-        let located = match &destination {
-            Some(_) => self.locate_database(backup.service_id).await?,
-            None => Located::Never("its storage destination was deleted".to_string()),
+        let located = match (&destination, backup.source()) {
+            (None, _) => Located::Never("its storage destination was deleted".to_string()),
+            (Some(_), BackupSource::Database(_)) => self.locate_database(backup.service_id).await?,
+            (Some(_), BackupSource::Volume(_)) => self.locate_volume(backup.service_id, false).await?,
         };
         match self.next_step(sent, &run, located).await? {
             Next::Send { server, container_id, first } => {
                 let destination = destination.expect("located only with a destination");
                 let secret = self.store().storage_destination_secret(destination.id).await?;
-                let command = pb::BackupDatabase {
-                    backup_id: backup.id.to_string(),
-                    container_id,
-                    command: backup.engine.dump_command(),
-                    destination: Some(super::storage::proto(&destination.fields, &secret)),
-                    object_key: backup.object_key.clone(),
+                let destination = Some(super::storage::proto(&destination.fields, &secret));
+                let kind = match backup.source() {
+                    BackupSource::Database(engine) => Kind::BackupDatabase(pb::BackupDatabase {
+                        backup_id: backup.id.to_string(),
+                        container_id,
+                        command: engine.dump_command(),
+                        destination,
+                        object_key: backup.object_key.clone(),
+                    }),
+                    BackupSource::Volume(volume) => Kind::BackupVolume(pb::BackupVolume {
+                        backup_id: backup.id.to_string(),
+                        service_id: backup.service_id.to_string(),
+                        volume_id: volume.to_string(),
+                        image: HELPER_IMAGE.to_string(),
+                        command: volume_archive_command(),
+                        destination,
+                        object_key: backup.object_key.clone(),
+                    }),
                 };
                 let started = |server| async move { self.store().start_backup(backup.id, server).await };
-                self.send_run(sent, run.id, server, Kind::BackupDatabase(command), first.then_some(started)).await?;
+                self.send_run(sent, run.id, server, kind, first.then_some(started)).await?;
             }
             Next::Fail(problem) => self.fail_backup(backup, &problem).await?,
             Next::Wait => {}
@@ -291,9 +322,15 @@ impl Control {
                 Err(error) => return Err(error.into()),
             }
         }
+        let backup = match self.store().get_backup(restore.backup_id).await {
+            Ok(backup) => Some(backup),
+            Err(StoreError::NotFound { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let database = !matches!(backup.as_ref().map(Backup::source), Some(BackupSource::Volume(_)));
         // A database with nothing live yet, such as a new one restored into, is waited for
         // while its deployment runs, and counts as waiting from when it went live.
-        if restore.status == BackupStatus::Queued {
+        if restore.status == BackupStatus::Queued && database {
             match self.store().live_deployment(restore.service_id).await? {
                 Some(live) => waiting_since = waiting_since.max(live.updated_at),
                 None => {
@@ -319,33 +356,51 @@ impl Control {
             started_at: restore.started_at,
             server_id: restore.server_id,
         };
-        let backup = match self.store().get_backup(restore.backup_id).await {
-            Ok(backup) => Some(backup),
-            Err(StoreError::NotFound { .. }) => None,
-            Err(error) => return Err(error.into()),
-        };
-        let located = match &backup {
+        let located = match backup.as_ref().map(Backup::source) {
             None => Located::Never("the backup was deleted".to_string()),
-            Some(_) => self.locate_database(restore.service_id).await?,
+            Some(BackupSource::Database(_)) => self.locate_database(restore.service_id).await?,
+            Some(BackupSource::Volume(_)) => self.locate_volume(restore.service_id, true).await?,
         };
         match self.next_step(sent, &run, located).await? {
             Next::Send { server, container_id, first } => {
                 let backup = backup.expect("located with a backup");
-                let plan = backup.engine.restore_plan();
                 // A deleted destination still reaches the backups it holds.
                 let destination = self.store().get_storage_destination_any(backup.destination_id).await?;
                 let secret = self.store().storage_destination_secret(destination.id).await?;
-                let command = pb::RestoreDatabase {
-                    restore_id: restore.id.to_string(),
-                    container_id,
-                    command: plan.command,
-                    destination: Some(super::storage::proto(&destination.fields, &secret)),
-                    object_key: backup.object_key,
-                    restart: plan.restart,
-                    ready_command: plan.ready_command,
+                let destination = Some(super::storage::proto(&destination.fields, &secret));
+                let kind = match backup.source() {
+                    BackupSource::Database(engine) => {
+                        let plan = engine.restore_plan();
+                        Kind::RestoreDatabase(pb::RestoreDatabase {
+                            restore_id: restore.id.to_string(),
+                            container_id,
+                            command: plan.command,
+                            destination,
+                            object_key: backup.object_key,
+                            restart: plan.restart,
+                            ready_command: plan.ready_command,
+                        })
+                    }
+                    BackupSource::Volume(volume) => {
+                        let grace_period = match container_id.is_empty() {
+                            true => None,
+                            false => self.stop_grace(restore.service_id).await?,
+                        };
+                        Kind::RestoreVolume(pb::RestoreVolume {
+                            restore_id: restore.id.to_string(),
+                            service_id: restore.service_id.to_string(),
+                            volume_id: volume.to_string(),
+                            image: HELPER_IMAGE.to_string(),
+                            command: volume_restore_command(),
+                            destination,
+                            object_key: backup.object_key,
+                            container_id,
+                            grace_period,
+                        })
+                    }
                 };
                 let started = |server| async move { self.store().start_restore(restore.id, server).await };
-                self.send_run(sent, run.id, server, Kind::RestoreDatabase(command), first.then_some(started)).await?;
+                self.send_run(sent, run.id, server, kind, first.then_some(started)).await?;
             }
             Next::Fail(problem) => self.fail_restore(restore, &problem).await?,
             Next::Wait => {}
@@ -383,7 +438,7 @@ impl Control {
                     Located::Ready { server: target, container_id } if target == server => {
                         Next::Send { server, container_id, first: false }
                     }
-                    Located::Ready { .. } => Next::Fail("its database moved to another server".to_string()),
+                    Located::Ready { .. } => Next::Fail("its service moved to another server".to_string()),
                     Located::Waiting(problem) => {
                         let seen = self.store().get_server(server).await?.last_seen_at;
                         let since = seen.map_or(running_since, |seen| seen.max(running_since));
@@ -419,6 +474,61 @@ impl Control {
             return Ok(Located::Waiting("the database's container has not been reported".to_string()));
         };
         Ok(Located::Ready { server: server.id, container_id: container.observed.container_id })
+    }
+
+    /// The server that keeps the service's volumes: that of its live deployment, else of the
+    /// newest one that ran. For a restore (`with_container`), also the live container to stop
+    /// meanwhile, unless the service is stopped.
+    async fn locate_volume(&self, service_id: ServiceId, with_container: bool) -> Result<Located, ControlError> {
+        let service = match self.store().get_service(service_id).await {
+            Ok(service) => service,
+            Err(StoreError::NotFound { .. }) => return Ok(Located::Never("its service was deleted".to_string())),
+            Err(error) => return Err(error.into()),
+        };
+        let live = self.store().live_deployment(service_id).await?;
+        let ran = match &live {
+            Some(live) => Some(live.clone()),
+            None => self.newest_that_ran(service_id).await?,
+        };
+        let Some(deployment) = ran else {
+            return Ok(Located::Never("the service has never run, so its volumes aren't on any server yet".to_string()));
+        };
+        let server = self.store().get_server(deployment.server_id).await?;
+        if server.revoked_at.is_some() {
+            return Ok(Located::Never(format!("server `{}` was revoked", server.name)));
+        }
+        if !self.agents().is_connected(server.id) {
+            return Ok(Located::Waiting(format!("the agent of server `{}` is not connected", server.name)));
+        }
+        let mut container_id = String::new();
+        if with_container
+            && service.stopped_at.is_none()
+            && let Some(live) = live
+        {
+            let instances = self.store().list_server_instances(server.id).await?;
+            let Some(container) = instances.into_iter().find(|instance| instance.observed.deployment_id == live.id) else {
+                return Ok(Located::Waiting("the service's container has not been reported".to_string()));
+            };
+            container_id = container.observed.container_id;
+        }
+        Ok(Located::Ready { server: server.id, container_id })
+    }
+
+    /// The service's newest deployment that ran (live once, now draining or superseded).
+    async fn newest_that_ran(&self, service_id: ServiceId) -> Result<Option<Deployment>, ControlError> {
+        let deployments = self.store().list_deployments(service_id, None, DEPLOYMENTS_LOOKED_AT).await?;
+        Ok(deployments
+            .into_iter()
+            .find(|deployment| matches!(deployment.status, DeploymentStatus::Draining | DeploymentStatus::Superseded)))
+    }
+
+    /// How long the service's live container gets to stop, from its deployment's settings.
+    async fn stop_grace(&self, service_id: ServiceId) -> Result<Option<prost_types::Duration>, ControlError> {
+        let Some(live) = self.store().live_deployment(service_id).await? else {
+            return Ok(None);
+        };
+        let grace = crate::deployments::commands::settings(&live)?.shutdown_timeout();
+        Ok(prost_types::Duration::try_from(grace).ok())
     }
 
     /// Sends a run's command, then records it as sent; a first send also starts the run with

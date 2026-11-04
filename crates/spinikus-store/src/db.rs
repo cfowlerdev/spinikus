@@ -123,6 +123,50 @@ mod tests {
         migrate(&pool).await.unwrap();
     }
 
+    /// Rebuilding `backups` for volume backups keeps its rows, and what refers to it.
+    #[tokio::test]
+    async fn volume_backups_keep_existing_backups_and_restores() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = SqliteConnectOptions::new().filename(dir.path().join("spinikus.db")).create_if_missing(true);
+        // One connection, so the pragmas below apply to every statement.
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options.foreign_keys(true)).await.unwrap();
+        let mut migrator = sqlx::migrate!();
+        migrator.migrations = migrator.migrations.iter().filter(|migration| migration.version < 31).cloned().collect();
+        migrator.run(&pool).await.unwrap();
+        // Rows whose parents don't matter here.
+        sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO backups (id, service_id, destination_id, status, engine, object_key)
+             VALUES ('bkp_1', 'svc_1', 'dst_1', 'succeeded', 'postgres', 'svc_1/bkp_1.pgdump')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO restores (id, service_id, backup_id, status) VALUES ('rst_1', 'svc_1', 'bkp_1', 'queued')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.unwrap();
+
+        migrate(&pool).await.unwrap();
+
+        let kept: (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT id, engine, volume_id FROM backups").fetch_one(&pool).await.unwrap();
+        let referenced: Vec<String> =
+            sqlx::query_scalar("SELECT \"table\" FROM pragma_foreign_key_list('restores')").fetch_all(&pool).await.unwrap();
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys").fetch_one(&pool).await.unwrap();
+        let neither = sqlx::query(
+            "INSERT INTO backups (id, service_id, destination_id, status, object_key) VALUES ('bkp_2', 'svc_1', 'dst_1', 'queued', 'k')",
+        )
+        .execute(&pool)
+        .await;
+
+        assert_eq!(kept, ("bkp_1".to_string(), Some("postgres".to_string()), None));
+        assert!(referenced.iter().all(|table| table != "backups_new") && referenced.contains(&"backups".to_string()));
+        assert_eq!(foreign_keys, 1, "turned back on");
+        assert!(neither.is_err(), "a backup has an engine or a volume");
+    }
+
     #[tokio::test]
     async fn all_tables_are_strict() {
         let (_dir, pool) = migrated_pool().await;

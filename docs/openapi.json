@@ -4495,7 +4495,7 @@
         "tags": [
           "backups"
         ],
-        "summary": "Lists a database's backup schedules.",
+        "summary": "Lists a database's or a service's backup schedules.",
         "operationId": "backups_list_schedules",
         "parameters": [
           {
@@ -4537,7 +4537,7 @@
         "tags": [
           "backups"
         ],
-        "summary": "Creates a backup schedule for a database.",
+        "summary": "Creates a backup schedule for a database, or for a service with volumes: each run backs up the database, or each of the service's volumes, and `keep_last` counts each volume's backups on their own.",
         "operationId": "backups_create_schedule",
         "parameters": [
           {
@@ -4808,8 +4808,8 @@
         "tags": [
           "backups"
         ],
-        "summary": "Backs the database up now.",
-        "description": "Backs the database up now. The backup starts `queued`.",
+        "summary": "Backs a database, or one of a service's volumes, up now.",
+        "description": "Backs a database, or one of a service's volumes, up now. The backup starts `queued`. A database's backup holds its engine's dump (`engine`); a volume's, a gzipped tar of it (`volume_id`), made in a helper container while the service keeps running.",
         "operationId": "backups_create",
         "parameters": [
           {
@@ -4941,8 +4941,8 @@
         "tags": [
           "backups"
         ],
-        "summary": "Restores the backup into its database, replacing the data there, after a safety backup of it.",
-        "description": "Restores the backup into its database, replacing the data there, after a safety backup of it. The restore starts `queued`; it runs once the safety backup succeeded.",
+        "summary": "Restores the backup where it came from, replacing the data there, after a safety backup of it: a dump into its live database, or an archive into its volume, with the service's container stopped meanwhile if it runs.",
+        "description": "Restores the backup where it came from, replacing the data there, after a safety backup of it: a dump into its live database, or an archive into its volume, with the service's container stopped meanwhile if it runs. The restore starts `queued`; it runs once the safety backup succeeded.",
         "operationId": "backups_restore",
         "parameters": [
           {
@@ -4991,7 +4991,7 @@
         "tags": [
           "backups"
         ],
-        "summary": "The database's restores, newest first.",
+        "summary": "The service's restores, newest first.",
         "operationId": "backups_list_restores",
         "parameters": [
           {
@@ -6318,7 +6318,7 @@
           },
           {
             "type": "object",
-            "description": "A database's latest finished backup failed.",
+            "description": "A service's latest finished backup failed: a database's, or the newest of an app's volumes'.",
             "required": [
               "service",
               "backup_id",
@@ -6622,7 +6622,6 @@
           "service_id",
           "destination_id",
           "status",
-          "engine",
           "object_key",
           "created_at"
         ],
@@ -6651,11 +6650,30 @@
             "$ref": "#/components/schemas/BackupStatus"
           },
           "engine": {
-            "$ref": "#/components/schemas/Engine"
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Engine",
+                "description": "The database's engine, for a dump; `None` for a volume's archive."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "volume_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/VolumeId",
+                "description": "The volume archived; `None` for a database dump."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "object_key": {
             "type": "string",
-            "description": "The key of the dump in the destination's bucket."
+            "description": "The key of the dump or archive in the destination's bucket."
           },
           "server_id": {
             "oneOf": [
@@ -7032,6 +7050,17 @@
         "properties": {
           "destination_id": {
             "$ref": "#/components/schemas/StorageDestinationId"
+          },
+          "volume_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/VolumeId",
+                "description": "The volume to back up, for a service that isn't a database; it may be left out when\nthe service has only one. A database is backed up whole, with its engine's dump."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false
@@ -8771,7 +8800,6 @@
                 "service_id",
                 "destination_id",
                 "status",
-                "engine",
                 "object_key",
                 "created_at"
               ],
@@ -8800,11 +8828,30 @@
                   "$ref": "#/components/schemas/BackupStatus"
                 },
                 "engine": {
-                  "$ref": "#/components/schemas/Engine"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Engine",
+                      "description": "The database's engine, for a dump; `None` for a volume's archive."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "volume_id": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/VolumeId",
+                      "description": "The volume archived; `None` for a database dump."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "object_key": {
                   "type": "string",
-                  "description": "The key of the dump in the destination's bucket."
+                  "description": "The key of the dump or archive in the destination's bucket."
                 },
                 "server_id": {
                   "oneOf": [

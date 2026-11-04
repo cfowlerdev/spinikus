@@ -87,7 +87,8 @@ fn environment_tabs(environment: &Environment, role: Role, current: Tab) -> Mark
     layout::tabs(&tabs)
 }
 
-/// A service's tabs; only apps have domains, and only databases backups.
+/// A service's tabs; only apps have domains. Databases have backups of their data, apps of
+/// their volumes.
 fn service_tabs(service: &Service, role: Role, current: Tab) -> Markup {
     let base = format!("/services/{}", service.id);
     let mut tabs = vec![
@@ -99,7 +100,7 @@ fn service_tabs(service: &Service, role: Role, current: Tab) -> Markup {
     if service.kind == ServiceKind::App {
         tabs.push(("Domains", format!("{base}/domains"), current == Tab::Domains));
     }
-    if Engine::of(&service.config).is_some() {
+    if service.kind == ServiceKind::App || Engine::of(&service.config).is_some() {
         tabs.push(("Backups", format!("{base}/backups"), current == Tab::Backups));
     }
     if role == Role::Admin {

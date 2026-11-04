@@ -1,20 +1,22 @@
-//! Backups of database services to S3-compatible storage.
+//! Backups of databases and of app volumes to S3-compatible storage.
 //!
 //! A storage destination is a bucket (on AWS, R2, B2, MinIO, …) with credentials, shared by
-//! the instance. A backup is one run: the agent of the database's server dumps it with the
-//! engine's own tool and uploads the dump straight to the destination, as
-//! `<path prefix><service ID>/<backup ID>.<extension>`. Schedules create backups on a cron
-//! expression and keep the newest few of their own.
+//! the instance. A backup is one run, of one [`BackupSource`]: a database, which the agent of
+//! its server dumps with the engine's own tool, or one volume of an app, which the agent
+//! archives with `tar` in a helper container ([`HELPER_IMAGE`]) that mounts it. Either goes
+//! straight to the destination, as `<path prefix><service ID>/<backup ID>.<extension>`.
+//! Schedules create backups on a cron expression (one per volume, for an app) and keep the
+//! newest few of their own, per volume.
 //!
-//! A restore loads a backup back into its database, replacing what is there, after taking
-//! a safety backup of the current data. Only Postgres can be restored so far.
+//! A restore loads a backup back where it came from, replacing what is there, after taking
+//! a safety backup of the current data.
 
 use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::{
     database::Engine,
-    id::{BackupId, BackupScheduleId, RestoreId, ServerId, ServiceId, StorageDestinationId},
+    id::{BackupId, BackupScheduleId, RestoreId, ServerId, ServiceId, StorageDestinationId, VolumeId},
     text::impl_text,
 };
 
@@ -85,8 +87,11 @@ pub struct Backup {
     /// The schedule that made it; `None` for one asked for by hand.
     pub schedule_id: Option<BackupScheduleId>,
     pub status: BackupStatus,
-    pub engine: Engine,
-    /// The key of the dump in the destination's bucket.
+    /// The database's engine, for a dump; `None` for a volume's archive.
+    pub engine: Option<Engine>,
+    /// The volume archived; `None` for a database dump.
+    pub volume_id: Option<VolumeId>,
+    /// The key of the dump or archive in the destination's bucket.
     pub object_key: String,
     /// The server that made it, once it started.
     pub server_id: Option<ServerId>,
@@ -105,8 +110,36 @@ pub struct NewBackup {
     pub service_id: ServiceId,
     pub destination_id: StorageDestinationId,
     pub schedule_id: Option<BackupScheduleId>,
-    pub engine: Engine,
+    pub source: BackupSource,
     pub object_key: String,
+}
+
+/// What a backup holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackupSource {
+    /// A dump of a database service, made with its engine's tool.
+    Database(Engine),
+    /// A gzipped tar of one volume of a service.
+    Volume(VolumeId),
+}
+
+impl BackupSource {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Database(engine) => engine.dump_extension(),
+            Self::Volume(_) => "tar.gz",
+        }
+    }
+}
+
+impl Backup {
+    pub fn source(&self) -> BackupSource {
+        match (self.engine, self.volume_id) {
+            (_, Some(volume)) => BackupSource::Volume(volume),
+            (Some(engine), None) => BackupSource::Database(engine),
+            (None, None) => unreachable!("the store keeps exactly one of a backup's engine and volume"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -260,8 +293,45 @@ impl Engine {
 }
 
 /// Where a backup goes in its destination's bucket.
-pub fn object_key(path_prefix: &str, service: ServiceId, backup: BackupId, engine: Engine) -> String {
-    format!("{path_prefix}{service}/{backup}.{}", engine.dump_extension())
+pub fn object_key(path_prefix: &str, service: ServiceId, backup: BackupId, source: BackupSource) -> String {
+    format!("{path_prefix}{service}/{backup}.{}", source.extension())
+}
+
+/// The image of the helper containers that archive and restore volumes: small, and with
+/// `tar`, `gzip` and a shell, which app images may lack.
+pub const HELPER_IMAGE: &str = "busybox:1.37.0";
+
+/// Where a helper container mounts the volume.
+pub const HELPER_MOUNT: &str = "/volume";
+
+/// Writes the volume's contents to stdout as a gzipped tar, paths relative to its root.
+pub fn volume_archive_command() -> Vec<String> {
+    ["tar", "-czf", "-", "-C", HELPER_MOUNT, "."].map(String::from).to_vec()
+}
+
+/// Replaces the volume's contents with the gzipped tar on stdin. It is unpacked beside the
+/// current contents first, so a broken or cut-off archive changes nothing; only then are the
+/// current contents removed and the unpacked ones moved in, renames on the same filesystem.
+pub fn volume_restore_command() -> Vec<String> {
+    let script = format!(
+        r#"set -eu
+stage={HELPER_MOUNT}/.spinikus-restore
+rm -rf "$stage"
+trap 'rm -rf "$stage"' EXIT
+mkdir "$stage"
+tar -xzf - -C "$stage"
+cd {HELPER_MOUNT}
+for entry in * .[!.]* ..?*; do
+  if [ -e "$entry" ] || [ -L "$entry" ]; then
+    [ "$entry" = .spinikus-restore ] || rm -rf "$entry"
+  fi
+done
+cd "$stage"
+for entry in * .[!.]* ..?*; do
+  if [ -e "$entry" ] || [ -L "$entry" ]; then mv "$entry" {HELPER_MOUNT}/; fi
+done"#
+    );
+    vec!["/bin/sh".to_string(), "-c".to_string(), script]
 }
 
 #[cfg(test)]
@@ -272,8 +342,11 @@ mod tests {
     fn keys_backups_by_service_and_id() {
         let (service, backup) = (ServiceId::new(), BackupId::new());
 
-        assert_eq!(object_key("spinikus/", service, backup, Engine::Postgres), format!("spinikus/{service}/{backup}.pgdump"));
-        assert_eq!(object_key("", service, backup, Engine::Redis), format!("{service}/{backup}.rdb"));
+        let (postgres, redis) = (BackupSource::Database(Engine::Postgres), BackupSource::Database(Engine::Redis));
+        let volume = BackupSource::Volume(VolumeId::new());
+        assert_eq!(object_key("spinikus/", service, backup, postgres), format!("spinikus/{service}/{backup}.pgdump"));
+        assert_eq!(object_key("", service, backup, redis), format!("{service}/{backup}.rdb"));
+        assert_eq!(object_key("", service, backup, volume), format!("{service}/{backup}.tar.gz"));
     }
 
     #[test]

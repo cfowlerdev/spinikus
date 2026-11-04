@@ -60,7 +60,10 @@ accepts for now. Report vulnerabilities privately to the maintainers rather than
   agent reported, under its own server ID. A server's metrics are for instance admins, a
   service's for its viewers.
 - **Containers** publish their ports on `127.0.0.1` only; the proxy is the way in. Volumes
-  are named Docker volumes, never host paths. `git` runs with no user or system config and
+  are named Docker volumes, never host paths. Volume backups and restores run in a helper
+  container with the volume mounted (read-only for a backup) and no network; the agent
+  accepts only Spinikus's own volume IDs (`vol_…`) as the volume to mount, and checks that a
+  container it stops for a restore is the service's. `git` runs with no user or system config and
   only the `https`, `http` and `ssh` protocols.
 - **The proxy** times out TLS handshakes after 10 seconds and request headers after 30.
 - **Every change** a user makes is in the audit log, with the acting user or token.
@@ -104,6 +107,12 @@ Fixed:
   dropped capabilities and resource limits are on the roadmap with service settings.
 - **Builds and apps can reach your private network**, including cloud metadata endpoints,
   like any process on the server. Restrict it with the host's firewall if that matters.
+- **The helper image comes from Docker Hub**: volume backups and restores pull
+  `busybox:1.37.0` by tag on first use, as databases' images are pulled. Pre-pull it, or
+  mirror it, if the server shouldn't reach Docker Hub.
+- **Volume backups hold the files as they are**, unencrypted, like database dumps; anyone
+  who can read the bucket can read them. Use a bucket only Spinikus and its admins can read,
+  with the provider's encryption at rest if it matters.
 - **Notification channels can point anywhere**, including the private network, like
   storage destinations: an instance admin can make the control plane send requests to
   any http(s) URL or SMTP server. Only instance admins manage them. Messages hold names

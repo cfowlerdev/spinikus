@@ -186,6 +186,16 @@ impl Commands {
                 let backups = self.backups.clone();
                 Box::pin(async move { restore_database(&*runtime, &backups, restore, &progress).await })
             }
+            Some(Kind::BackupVolume(backup)) => {
+                tracing::info!(command = id, backup = backup.backup_id, "backing up a volume");
+                let backups = self.backups.clone();
+                Box::pin(async move { crate::volume::backup_volume(&*runtime, &backups, backup, &progress).await })
+            }
+            Some(Kind::RestoreVolume(restore)) => {
+                tracing::info!(command = id, restore = restore.restore_id, "restoring a volume");
+                let backups = self.backups.clone();
+                Box::pin(async move { crate::volume::restore_volume(&*runtime, &backups, restore, &progress).await })
+            }
             Some(Kind::RestartInstance(restart)) => {
                 tracing::info!(command = id, container = restart.container_id, "restarting a container");
                 Box::pin(async move { restart_instance(&*runtime, restart).await.map(|()| pb::CommandSucceeded::default()) })
@@ -273,6 +283,8 @@ fn name(kind: &Kind) -> &'static str {
         Kind::RemoveDeployment(_) => "RemoveDeployment",
         Kind::BackupDatabase(_) => "BackupDatabase",
         Kind::RestoreDatabase(_) => "RestoreDatabase",
+        Kind::BackupVolume(_) => "BackupVolume",
+        Kind::RestoreVolume(_) => "RestoreVolume",
     }
 }
 

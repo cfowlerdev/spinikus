@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use jiff::Timestamp;
 use spinikus_core::{
     backup::{
-        Backup, BackupSchedule, BackupScheduleFields, BackupStatus, NewBackup, StorageDestination, StorageDestinationFields,
+        Backup, BackupSchedule, BackupScheduleFields, BackupSource, BackupStatus, NewBackup, StorageDestination,
+        StorageDestinationFields,
     },
     id::{BackupId, BackupScheduleId, ServerId, ServiceId, StorageDestinationId},
     secret::Secret,
@@ -99,15 +100,15 @@ pub trait BackupRepository: Send + Sync {
     /// The service's backups that are not deleted, newest first, starting after `after`.
     async fn list_backups(&self, service_id: ServiceId, after: Option<BackupId>, limit: u32) -> Result<Vec<Backup>, StoreError>;
 
-    /// For each service not deleted whose newest finished backup (not deleted) failed: that
-    /// backup, oldest first.
+    /// For each service not deleted whose newest finished backup (not deleted; of each volume,
+    /// for an app) failed: that backup, oldest first.
     async fn list_failed_latest_backups(&self) -> Result<Vec<Backup>, StoreError>;
 
     /// Every queued and running backup, oldest first.
     async fn list_active_backups(&self) -> Result<Vec<Backup>, StoreError>;
 
-    /// The schedule's successful backups beyond its newest `keep`, which are not deleted and
-    /// not being restored.
+    /// The schedule's successful backups beyond its newest `keep` (of each volume, for an
+    /// app's), which are not deleted and not being restored.
     async fn list_backups_beyond(&self, schedule_id: BackupScheduleId, keep: u32) -> Result<Vec<Backup>, StoreError>;
 
     /// Moves a queued backup to running on `server`. `false` if it was not queued.
@@ -217,7 +218,8 @@ struct BackupRow {
     destination_id: String,
     schedule_id: Option<String>,
     status: String,
-    engine: String,
+    engine: Option<String>,
+    volume_id: Option<String>,
     object_key: String,
     server_id: Option<String>,
     size_bytes: Option<i64>,
@@ -238,7 +240,8 @@ impl TryFrom<BackupRow> for Backup {
             destination_id: parse_column(BACKUP, "destination_id", &row.destination_id)?,
             schedule_id: row.schedule_id.map(|id| parse_column(BACKUP, "schedule_id", &id)).transpose()?,
             status: parse_column(BACKUP, "status", &row.status)?,
-            engine: parse_column(BACKUP, "engine", &row.engine)?,
+            engine: row.engine.map(|engine| parse_column(BACKUP, "engine", &engine)).transpose()?,
+            volume_id: row.volume_id.map(|id| parse_column(BACKUP, "volume_id", &id)).transpose()?,
             object_key: row.object_key,
             server_id: row.server_id.map(|id| parse_column(BACKUP, "server_id", &id)).transpose()?,
             size_bytes: row.size_bytes.map(|size| size.max(0) as u64),
@@ -252,8 +255,8 @@ impl TryFrom<BackupRow> for Backup {
 
 macro_rules! backup_columns {
     () => {
-        "id, service_id, destination_id, schedule_id, status, engine, object_key, server_id, size_bytes, error,
-         created_at, started_at, finished_at"
+        "id, service_id, destination_id, schedule_id, status, engine, volume_id, object_key, server_id, size_bytes,
+         error, created_at, started_at, finished_at"
     };
 }
 
@@ -589,15 +592,22 @@ async fn check_schedule_parents(
 impl BackupRepository for SqliteStore {
     async fn create_backup(&self, new: NewBackup) -> Result<Backup, StoreError> {
         let row: Option<BackupRow> = sqlx::query_as(concat!(
-            "INSERT INTO backups (id, service_id, destination_id, schedule_id, status, engine, object_key)
-             SELECT ?, id, ?, ?, 'queued', ?, ? FROM services WHERE id = ? AND deleted_at IS NULL
+            "INSERT INTO backups (id, service_id, destination_id, schedule_id, status, engine, volume_id, object_key)
+             SELECT ?, id, ?, ?, 'queued', ?, ?, ? FROM services WHERE id = ? AND deleted_at IS NULL
              RETURNING ",
             backup_columns!()
         ))
         .bind(new.id.to_string())
         .bind(new.destination_id.to_string())
         .bind(new.schedule_id.map(|id| id.to_string()))
-        .bind(new.engine.as_str())
+        .bind(match new.source {
+            BackupSource::Database(engine) => Some(engine.as_str()),
+            BackupSource::Volume(_) => None,
+        })
+        .bind(match new.source {
+            BackupSource::Database(_) => None,
+            BackupSource::Volume(volume) => Some(volume.to_string()),
+        })
         .bind(&new.object_key)
         .bind(new.service_id.to_string())
         .fetch_optional(self.pool())
@@ -622,8 +632,8 @@ impl BackupRepository for SqliteStore {
             "SELECT ",
             backup_columns!(),
             " FROM backups AS b WHERE status = 'failed' AND deleted_at IS NULL
-               AND id = (SELECT MAX(id) FROM backups WHERE service_id = b.service_id AND deleted_at IS NULL
-                         AND status IN ('succeeded', 'failed'))
+               AND id = (SELECT MAX(id) FROM backups WHERE service_id = b.service_id AND volume_id IS b.volume_id
+                         AND deleted_at IS NULL AND status IN ('succeeded', 'failed'))
                AND EXISTS (SELECT 1 FROM services WHERE services.id = b.service_id AND services.deleted_at IS NULL)
              ORDER BY id"
         ))
@@ -676,10 +686,11 @@ impl BackupRepository for SqliteStore {
         let rows: Vec<BackupRow> = sqlx::query_as(concat!(
             "SELECT ",
             backup_columns!(),
-            " FROM backups WHERE schedule_id = ? AND status = 'succeeded' AND deleted_at IS NULL
-               AND NOT EXISTS (SELECT 1 FROM restores
-                               WHERE restores.backup_id = backups.id AND restores.status IN ('queued', 'running'))
-             ORDER BY id DESC LIMIT -1 OFFSET ?"
+            " FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY volume_id ORDER BY id DESC) AS newer
+                   FROM backups WHERE schedule_id = ? AND status = 'succeeded' AND deleted_at IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM restores
+                                     WHERE restores.backup_id = backups.id AND restores.status IN ('queued', 'running')))
+             WHERE newer > ? ORDER BY id DESC"
         ))
         .bind(schedule_id.to_string())
         .bind(keep)
@@ -743,7 +754,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::{EnvironmentRepository, ProjectRepository, ServerRepository, ServiceRepository, test_support::store};
+    use spinikus_core::id::VolumeId;
+
+    use crate::{
+        EnvironmentRepository, ProjectRepository, ServerRepository, ServiceRepository, VolumeRepository, test_support::store,
+    };
 
     fn destination(name: &str) -> StorageDestinationFields {
         StorageDestinationFields {
@@ -778,8 +793,8 @@ mod tests {
             service_id: service,
             destination_id: destination,
             schedule_id: schedule,
-            engine: Engine::Postgres,
-            object_key: object_key("spinikus/", service, id, Engine::Postgres),
+            source: BackupSource::Database(Engine::Postgres),
+            object_key: object_key("spinikus/", service, id, BackupSource::Database(Engine::Postgres)),
         }
     }
 
@@ -924,5 +939,56 @@ mod tests {
         assert_eq!(listed().await, vec![failed], "a deleted backup doesn't count");
         store.mark_backup_deleted(failed).await.unwrap();
         assert!(listed().await.is_empty(), "nor does a deleted failure");
+    }
+
+    #[tokio::test]
+    async fn keeps_and_reports_each_volume_on_its_own() {
+        let (_dir, store) = store().await;
+        let service = database(&store).await;
+        let volume = |name: &str| {
+            let store = &store;
+            let fields = spinikus_core::volume::VolumeFields {
+                name: name.parse().unwrap(),
+                mount_path: format!("/{name}").parse().unwrap(),
+            };
+            async move { store.create_volume(service, fields).await.unwrap().id }
+        };
+        let (uploads, cache) = (volume("uploads").await, volume("cache").await);
+        let destination = store.create_storage_destination(destination("S3"), &Secret::new("s")).await.unwrap();
+        let fields =
+            BackupScheduleFields { destination_id: destination.id, cron: "0 3 * * *".to_string(), keep_last: 2, enabled: true };
+        let schedule = store.create_backup_schedule(service, fields, None).await.unwrap();
+        let backup = |volume: VolumeId, outcome: Result<u64, String>| {
+            let store = &store;
+            async move {
+                let id = BackupId::new();
+                let source = BackupSource::Volume(volume);
+                let new = NewBackup {
+                    id,
+                    service_id: service,
+                    destination_id: destination.id,
+                    schedule_id: Some(schedule.id),
+                    source,
+                    object_key: object_key("", service, id, source),
+                };
+                let backup = store.create_backup(new).await.unwrap();
+                store.finish_backup(id, outcome).await.unwrap();
+                backup
+            }
+        };
+        let mut made = Vec::new();
+        for _ in 0..3 {
+            made.push(backup(uploads, Ok(1)).await.id);
+        }
+        let only_cache = backup(cache, Ok(1)).await;
+        let failed = backup(cache, Err("tar: short read".to_string())).await;
+
+        let beyond: Vec<_> = store.list_backups_beyond(schedule.id, 2).await.unwrap().into_iter().map(|b| b.id).collect();
+        let failing: Vec<_> = store.list_failed_latest_backups().await.unwrap().into_iter().map(|b| b.id).collect();
+
+        assert_eq!((only_cache.volume_id, only_cache.engine), (Some(cache), None));
+        assert!(only_cache.object_key.ends_with(".tar.gz"));
+        assert_eq!(beyond, vec![made[0]], "two of each volume are kept");
+        assert_eq!(failing, vec![failed.id], "uploads' latest succeeded");
     }
 }

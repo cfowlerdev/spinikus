@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use object_store::{ObjectStoreExt, path::Path};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use spinikus_core::id::RestoreId;
 use spinikus_proto::agent::v1::{self as pb, FailureReason};
 use tokio_stream::StreamExt;
@@ -45,29 +45,14 @@ pub(crate) async fn restore_database(
     let store = stores.store(destination).map_err(|failed| restore_failed(failed.message))?;
 
     progress.phase("downloading");
-    let download = match store.get(&path).await {
-        Ok(download) => download,
-        Err(object_store::Error::NotFound { .. }) => {
-            return Err(restore_failed(format!("the backup `{}` is not in the bucket", restore.object_key)));
-        }
-        Err(error) => return Err(restore_failed(format!("could not download the backup: {error}"))),
-    };
-    let size = download.meta.size;
+    let download = download(&*store, &path, &restore.object_key).await.map_err(restore_failed)?;
+    let size = download.size;
     let (restart, ready_command) = (restore.restart, restore.ready_command);
     progress.phase("restoring");
     tracing::info!(restore = %restore_id, container = restore.container_id, size, "restoring a database");
-    // A failed download ends the input early and is remembered here.
-    let download_error = Arc::new(Mutex::new(None));
-    let failed_download = download_error.clone();
-    let input = download.into_stream().map_while(move |chunk| match chunk {
-        Ok(bytes) => Some(bytes),
-        Err(error) => {
-            *failed_download.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
-            None
-        }
-    });
-    let outcome = run(runtime, &restore.container_id, "the restore", restore.command, Some(Box::pin(input))).await;
-    let download_error = download_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    let (input, download_error) = download.into_input();
+    let outcome = run(runtime, &restore.container_id, "the restore", restore.command, Some(input)).await;
+    let download_error = download_error();
     let outcome = match (download_error, outcome) {
         (Some(error), _) => Err(format!("the download failed: {error}")),
         (None, Err(error)) => Err(error),
@@ -84,6 +69,42 @@ pub(crate) async fn restore_database(
             tracing::warn!(restore = %restore_id, message, "a restore failed");
             Err(restore_failed(message))
         }
+    }
+}
+
+/// A backup being downloaded, to feed a command's stdin as it arrives.
+pub(crate) struct Download {
+    stream: std::pin::Pin<Box<dyn tokio_stream::Stream<Item = object_store::Result<bytes::Bytes>> + Send>>,
+    pub(crate) size: u64,
+}
+
+impl Download {
+    /// The download as a command's input, which ends early if the download fails, and a way
+    /// to ask afterwards whether it did and why.
+    pub(crate) fn into_input(self) -> (ExecInput, impl FnOnce() -> Option<String>) {
+        let error = Arc::new(Mutex::new(None));
+        let failed = error.clone();
+        let input = self.stream.map_while(move |chunk| match chunk {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                *failed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
+                None
+            }
+        });
+        let error = move || error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+        (Box::pin(input), error)
+    }
+}
+
+/// Starts downloading `object_key`.
+pub(crate) async fn download(store: &dyn ObjectStore, path: &Path, object_key: &str) -> Result<Download, String> {
+    match store.get(path).await {
+        Ok(download) => {
+            let size = download.meta.size;
+            Ok(Download { stream: download.into_stream(), size })
+        }
+        Err(object_store::Error::NotFound { .. }) => Err(format!("the backup `{object_key}` is not in the bucket")),
+        Err(error) => Err(format!("could not download the backup: {error}")),
     }
 }
 
@@ -120,7 +141,7 @@ async fn restart_until_ready(
 }
 
 /// Runs a command in the container to its end; `what` names it in errors.
-async fn run(
+pub(crate) async fn run(
     runtime: &dyn ContainerRuntime,
     container_id: &str,
     what: &str,
@@ -141,7 +162,7 @@ async fn run(
     }
 }
 
-fn restore_failed(message: impl Into<String>) -> pb::CommandFailed {
+pub(crate) fn restore_failed(message: impl Into<String>) -> pb::CommandFailed {
     failure(FailureReason::RestoreFailed, message)
 }
 

@@ -30,6 +30,7 @@ mod restore;
 pub mod runtime;
 mod sessions;
 mod stats;
+mod volume;
 
 pub use backoff::Backoff;
 pub use backup::{BackupStores, s3};

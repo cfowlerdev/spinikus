@@ -174,6 +174,10 @@ pub struct Backup {
     pub size_bytes: Option<u64>,
     #[serde(default)]
     pub error: Option<String>,
+    /// An app's volume; `None` for a database's dump.
+    #[serde(default)]
+    pub volume_id: Option<String>,
+    pub service_id: String,
     pub created_at: String,
 }
 

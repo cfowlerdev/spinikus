@@ -375,6 +375,33 @@ pub enum VolumeCommand {
         #[arg(short, long)]
         service: Option<String>,
     },
+    /// Back a volume's files up now
+    Backup {
+        /// The volume's name or ID
+        volume: String,
+        #[arg(short, long)]
+        service: Option<String>,
+        /// The storage destination, by name or ID (default: the only one)
+        #[arg(long)]
+        destination: Option<String>,
+        #[arg(short, long)]
+        detach: bool,
+    },
+    /// List a service's volume backups, newest first
+    Backups {
+        /// Only this volume's (name or ID)
+        volume: Option<String>,
+        #[arg(short, long)]
+        service: Option<String>,
+    },
+    /// Restore a backup into its volume, after a safety backup; the app is stopped meanwhile
+    Restore {
+        backup: String,
+        #[arg(short, long)]
+        yes: bool,
+        #[arg(short, long)]
+        detach: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]

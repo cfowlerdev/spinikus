@@ -1,8 +1,9 @@
 # Backups and restores
 
-Spinikus backs databases up to S3-compatible object storage: Amazon S3, Cloudflare R2,
-Backblaze B2, MinIO, RustFS and others. Keep backups with a provider other than the one
-your server runs on, so one outage can't take both.
+Spinikus backs databases, and the files in apps' [volumes](../apps/volumes.md), up to
+S3-compatible object storage: Amazon S3, Cloudflare R2, Backblaze B2, MinIO, RustFS and
+others. Keep backups with a provider other than the one your server runs on, so one outage
+can't take both.
 
 ## Adding a storage destination
 
@@ -24,7 +25,7 @@ keep it.
 
 ## Backing up
 
-On a database's **Backups** tab:
+On a database's **Backups** tab (an app's is described [below](#an-apps-volumes)):
 
 - **Back up now** makes a backup to a destination you choose.
 - **Add a schedule** backs up regularly. A schedule has a **destination**, a **cron
@@ -61,6 +62,35 @@ backup. Safety backups are labeled as such and are never deleted by a schedule.
 Only one restore runs at a time per database. Restoring takes the admin role in the
 database's environment.
 
+## An app's volumes
+
+An app with [volumes](../apps/volumes.md) has a **Backups** tab too. A backup holds **one
+volume's files**, as a gzipped tar archive (`.tar.gz`, stored like a database's backups).
+**Back up now** asks which volume when the app has more than one; a **schedule** backs up
+every volume of the app at each run and keeps that many backups of each. Volumes are copied
+while the app runs, so a file being written at that moment may be copied half-written; for
+data that must be consistent, such as a SQLite database, prefer a time when nothing writes.
+
+```sh
+spinikus volume backup uploads -s shop/production/web   # waits until it is done
+spinikus volume backups -s shop/production/web          # every volume's, or name one
+spinikus volume restore bkp_01J…
+```
+
+**Restore** replaces the volume's files with the backup's: like a database's restore, it
+makes a safety backup of the volume first. The app's container is then **stopped** (with its
+shutdown timeout), the archive unpacked, and the container **started again**, whether the
+restore succeeded or not; a restore that fails partway leaves the files as they were. Files
+added since the backup are deleted.
+
+The copying is done by a small helper container (`busybox`, pulled from Docker Hub the first
+time) that mounts the volume, so the app's image needs no tools of its own. It runs on the
+server the app last ran on, which is where the volume's data is: an app must have been
+deployed once, and keeps its backups working while it is stopped. A volume restore waits for
+no deployment, so it is refused while one of the app is in progress. A removed volume's
+backups stay, but can't be restored. A database's data volume isn't backed up this way: its
+backups are the database's own dumps.
+
 ## A new database from a backup
 
 **Restore into a new database** next to a backup creates another database, of the same
@@ -74,5 +104,5 @@ spinikus db create Postgres18 --from-backup bkp_01J… --version 18 -e shop/stag
 
 ## Backing up Spinikus itself
 
-Database backups don't include Spinikus's own data (projects, settings, secrets). For that,
+These backups don't include Spinikus's own data (projects, settings, secrets). For that,
 see [Backing up Spinikus](../operating/instance-backups.md).

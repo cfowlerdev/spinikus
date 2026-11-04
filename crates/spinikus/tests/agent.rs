@@ -1363,7 +1363,7 @@ async fn backs_up_and_restores_a_database_through_s3() {
 
     sql("CREATE TABLE notes (body text); INSERT INTO notes VALUES ('before');").await;
     let tested = control.test_storage_destination(admin, destination.id).await;
-    let backup = control.create_backup(admin, postgres.service.id, destination.id).await.unwrap();
+    let backup = control.create_backup(admin, postgres.service.id, destination.id, None).await.unwrap();
     let backup = wait_for(backup.id).await;
     let key = format!("s3://backups/{}", backup.object_key);
     let head = s3.aws(&["s3", "cp", &key, "-"]);
@@ -1391,7 +1391,7 @@ async fn backs_up_and_restores_a_database_through_s3() {
         secret_access_key: Secret::new("not-the-secret"),
     };
     let wrong = control.create_storage_destination(admin, wrong).await.unwrap();
-    let refused = control.create_backup(admin, postgres.service.id, wrong.id).await.unwrap();
+    let refused = control.create_backup(admin, postgres.service.id, wrong.id, None).await.unwrap();
     let refused = wait_for(refused.id).await;
 
     assert!(tested.is_ok(), "{tested:?}");
@@ -1486,7 +1486,7 @@ async fn backs_up_and_restores_redis_through_s3() {
     let keys = || async { format!("{}|{}", cli(&["GET", "kept"]).await, cli(&["GET", "added"]).await) };
 
     cli(&["SET", "kept", "before"]).await;
-    let backup = control.create_backup(admin, redis.service.id, destination.id).await.unwrap();
+    let backup = control.create_backup(admin, redis.service.id, destination.id, None).await.unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     let backup = loop {
         let backup = control.get_backup(admin, backup.id).await.unwrap();
@@ -1529,6 +1529,132 @@ async fn backs_up_and_restores_redis_through_s3() {
     assert_eq!(after_undo, "changed|after");
     assert!(restarted.status.success(), "{restarted:?}");
     assert_eq!(later, "x");
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon; pulls busybox, rustfs/rustfs and amazon/aws-cli"]
+async fn backs_up_and_restores_an_apps_volume_through_s3() {
+    use spinikus_control::{NewStorageDestination, NewVolume};
+    use spinikus_core::{
+        backup::{BackupStatus, HELPER_IMAGE},
+        id::{BackupId, RestoreId},
+    };
+
+    let s3 = S3Server::start().await;
+    let control_plane = ControlPlane::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let files = AgentFiles::new(dir.path().join("agent"));
+    let server = enroll(&control_plane, &files).await;
+    let (_stop, _agent) = start_agent_with(&files, Arc::new(DockerRuntime::new()), None);
+    control_plane.wait_for_status(server, ServerStatus::Connected).await;
+    let (control, admin) = (&control_plane.control, &control_plane.admin);
+    let present =
+        |image: &str| std::process::Command::new("docker").args(["image", "inspect", image]).output().unwrap().status.success();
+    let pulled = [HELPER_IMAGE].into_iter().filter(|image| !present(image)).collect();
+    let runtime = json!({ "port": 8080, "start": "exec httpd -f -p 8080 -h /data", "shutdown_timeout": "2s" });
+    let service = control_plane.service(server, HELPER_IMAGE, runtime).await;
+    let new = NewVolume { name: "data".to_string(), mount_path: "/data".to_string() };
+    let volume = control.create_volume(admin, service, new).await.unwrap();
+    let environment = control.get_service(admin, service).await.unwrap().environment_id;
+    let _cleanup = DatabaseCleanup {
+        services: vec![service.to_string()],
+        volumes: vec![volume.id.to_string()],
+        network: format!("spinikus-{environment}"),
+        pulled,
+    };
+    let within = Duration::from_secs(300);
+    let deployment = control.create_deployment(admin, service).await.unwrap();
+    control_plane.wait_for_deployment(deployment.id, DeploymentStatus::Live, within).await;
+    let container = format!("spinikus-{}", deployment.id);
+    let shell = |script: &str| {
+        let output = std::process::Command::new("docker").args(["exec", &container, "sh", "-c", script]).output().unwrap();
+        assert!(output.status.success(), "{script}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let files = || shell("cd /data && cat note && ls -A | sort | tr '\\n' ' ' && cat sub/file");
+    let started_at = || {
+        let output = std::process::Command::new("docker")
+            .args(["inspect", "--format", "{{.State.StartedAt}}", &container])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let destination = NewStorageDestination {
+        name: "RustFS".to_string(),
+        endpoint: Some(format!("http://127.0.0.1:{}", s3.port)),
+        region: None,
+        bucket: "backups".to_string(),
+        path_prefix: Some("spinikus".to_string()),
+        path_style: true,
+        access_key_id: S3_ACCESS_KEY.to_string(),
+        secret_access_key: Secret::new(S3_SECRET_KEY),
+    };
+    let destination = control.create_storage_destination(admin, destination).await.unwrap();
+    let backed_up = |id: BackupId| async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let backup = control.get_backup(admin, id).await.unwrap();
+            if backup.status.is_finished() {
+                return backup;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the backup did not finish: {backup:?}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    let restored = |id: RestoreId| async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let restore = control.get_restore(admin, id).await.unwrap();
+            if restore.status.is_finished() {
+                return restore;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the restore did not finish: {restore:?}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+
+    // Files, a dotfile and a directory, archived while the app runs.
+    shell("cd /data && echo before > note && echo hidden > .dotfile && mkdir sub && echo nested > sub/file");
+    let backup = control.create_backup(admin, service, destination.id, None).await.unwrap();
+    let backup = backed_up(backup.id).await;
+    let key = format!("s3://backups/{}", backup.object_key);
+    let archive = s3.aws(&["s3", "cp", &key, "-"]);
+    shell("cd /data && echo after > note && echo new > added");
+    let before_restore = started_at();
+    let restore = control.restore_backup(admin, backup.id).await.unwrap();
+    let restore = restored(restore.id).await;
+    let after_restore = files();
+    let restarted = started_at() != before_restore;
+    // The safety backup undoes the restore.
+    let undo = control.restore_backup(admin, restore.safety_backup_id.unwrap()).await.unwrap();
+    let undo = restored(undo.id).await;
+    let after_undo = files();
+    let helpers = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "--all",
+            "--quiet",
+            "--filter",
+            &format!("label=spinikus.service={service}"),
+            "--filter",
+            "label=spinikus.one-off",
+        ])
+        .output()
+        .unwrap();
+    let live = control.store().get_deployment(deployment.id).await.unwrap().status;
+
+    assert_eq!(backup.status, BackupStatus::Succeeded, "{backup:?}");
+    assert_eq!(backup.volume_id, Some(volume.id));
+    assert!(backup.object_key.ends_with(".tar.gz"), "{}", backup.object_key);
+    assert!(archive.stdout.starts_with(&[0x1f, 0x8b]), "gzip: {:?}", String::from_utf8_lossy(&archive.stderr));
+    assert_eq!(backup.size_bytes, Some(archive.stdout.len() as u64));
+    assert_eq!(restore.status, BackupStatus::Succeeded, "{restore:?}");
+    assert_eq!(after_restore, "before\n.dotfile note sub \nnested", "added files are gone, the rest as backed up");
+    assert!(restarted, "the app was stopped for the restore and started again");
+    assert_eq!(undo.status, BackupStatus::Succeeded, "{undo:?}");
+    assert_eq!(after_undo, "after\n.dotfile added note sub \nnested");
+    assert!(String::from_utf8_lossy(&helpers.stdout).trim().is_empty(), "helpers are removed");
+    assert_eq!(live, DeploymentStatus::Live);
 }
 
 #[tokio::test]

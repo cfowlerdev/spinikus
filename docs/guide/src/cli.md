@@ -82,7 +82,7 @@ picked by directory.
 | `shell`        | Open a shell, or run a command, in a service's running container ([Terminal](apps/terminal.md)) |
 | `env`          | List, set, unset, import and export variables                                   |
 | `domain`       | List, add and remove domains                                                    |
-| `volume`       | List, add, update and remove volumes                                            |
+| `volume`       | List, add, update and remove volumes; back them up, list backups and restore    |
 | `db`           | Create databases; back up, list backups and restore                             |
 | `token`        | Create, list and revoke your API tokens                                         |
 

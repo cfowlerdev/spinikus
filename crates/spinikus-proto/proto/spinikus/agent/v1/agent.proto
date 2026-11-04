@@ -261,6 +261,8 @@ message Command {
     RestoreDatabase restore_database = 11;
     StopInstance stop_instance = 12;
     StartInstance start_instance = 13;
+    BackupVolume backup_volume = 14;
+    RestoreVolume restore_volume = 15;
   }
 }
 
@@ -405,6 +407,39 @@ message RestoreDatabase {
   string object_key = 5;
   bool restart = 6;
   repeated string ready_command = 7;
+}
+
+// Archive a volume: run `command` in a helper container from `image` (pulled if missing)
+// that mounts the volume read-only at `/volume`, and upload what it writes to stdout to
+// `destination` as `object_key`. The helper is removed afterwards. A non-zero exit aborts
+// the upload.
+message BackupVolume {
+  string backup_id = 1;
+  // The service the volume belongs to, for the helper's labels.
+  string service_id = 2;
+  // The volume's ID (`vol_…`), which names the runtime volume.
+  string volume_id = 3;
+  string image = 4;
+  repeated string command = 5;
+  StorageDestination destination = 6;
+  string object_key = 7;
+}
+
+// Restore a volume: stop `container_id` first, if given (the service's live container,
+// which mounts the volume), download `object_key` from `destination` and feed it to
+// `command` run in a helper container from `image` that mounts the volume read-write at
+// `/volume`, then start `container_id` again, whether the restore succeeded or not. A
+// non-zero exit fails the restore; the command is expected to change nothing then.
+message RestoreVolume {
+  string restore_id = 1;
+  string service_id = 2;
+  string volume_id = 3;
+  string image = 4;
+  repeated string command = 5;
+  StorageDestination destination = 6;
+  string object_key = 7;
+  string container_id = 8;
+  google.protobuf.Duration grace_period = 9;
 }
 
 // An S3-compatible bucket and the credentials to reach it.

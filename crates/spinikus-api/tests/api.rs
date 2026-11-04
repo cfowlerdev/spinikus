@@ -756,6 +756,30 @@ async fn manages_destinations_schedules_and_backups_of_a_database() {
     assert_eq!((restore.status, &restore.body["code"]), (StatusCode::CONFLICT, &json!("rejected")));
     assert_eq!(restores.body["items"], json!([]));
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+
+    // An app's backups are of one of its volumes; a database's have none to name.
+    let with_volume = api
+        .send(
+            Method::POST,
+            &backups,
+            token,
+            &[],
+            Some(json!({ "destination_id": id, "volume_id": "vol_01JZ0000000000000000000000" })),
+        )
+        .await;
+    assert_eq!((with_volume.status, &with_volume.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("volume_id")));
+    let services = format!("/api/v1/environments/{}/services", production.body["id"].as_str().unwrap());
+    let app = api.send(Method::POST, &services, token, &[], Some(json!({ "name": "Web", "kind": "app", "config": {} }))).await;
+    let app_backups = format!("/api/v1/services/{}/backups", app.body["id"].as_str().unwrap());
+    let nothing = api.send(Method::POST, &app_backups, token, &[], Some(json!({ "destination_id": id }))).await;
+    assert_eq!((nothing.status, &nothing.body["code"]), (StatusCode::CONFLICT, &json!("rejected")), "no volumes");
+    let volumes = format!("/api/v1/services/{}/volumes", app.body["id"].as_str().unwrap());
+    let uploads =
+        api.send(Method::POST, &volumes, token, &[], Some(json!({ "name": "uploads", "mount_path": "/app/uploads" }))).await;
+    let volume_backup = api.send(Method::POST, &app_backups, token, &[], Some(json!({ "destination_id": id }))).await;
+    assert_eq!(volume_backup.status, StatusCode::CREATED, "{}", volume_backup.body);
+    assert_eq!((&volume_backup.body["volume_id"], &volume_backup.body["engine"]), (&uploads.body["id"], &Value::Null));
+    assert!(volume_backup.body["object_key"].as_str().unwrap().ends_with(".tar.gz"), "{}", volume_backup.body);
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@
 use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 use spinikus_core::{
-    backup::{NewBackup, object_key},
+    backup::{BackupSource, NewBackup, object_key},
     certificate::NewCertificate,
     database::Engine,
     deployment::{DeploymentStatus, EndReason},
@@ -83,8 +83,8 @@ async fn shows_a_services_problems_to_whoever_may_see_it() {
         service_id: setup.service.id,
         destination_id: destination,
         schedule_id: None,
-        engine: Engine::Postgres,
-        object_key: object_key("", setup.service.id, id, Engine::Postgres),
+        source: BackupSource::Database(Engine::Postgres),
+        object_key: object_key("", setup.service.id, id, BackupSource::Database(Engine::Postgres)),
     };
     let backup = control.store().create_backup(new).await.unwrap();
     control.store().finish_backup(backup.id, Err("pg_dump: connection refused".to_string())).await.unwrap();

@@ -80,6 +80,21 @@ pub struct OneOffSpec {
     pub timeout: Duration,
 }
 
+/// A helper container for work on a volume, such as archiving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperSpec {
+    /// Unique on the server; a container left with this name by an earlier run is replaced.
+    pub name: String,
+    pub image: String,
+    pub service_id: spinikus_core::id::ServiceId,
+    /// The named volume to mount, and where.
+    pub volume: String,
+    pub mount: String,
+    pub read_only: bool,
+    /// What the [`ONE_OFF_LABEL`] says, such as the backup's ID.
+    pub label: String,
+}
+
 /// How a one-off container ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OneOffExit {
@@ -258,6 +273,13 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// timeout, and removed once it has stopped. A container left with the same name by an
     /// earlier run is removed first. It carries [`ONE_OFF_LABEL`], so listings leave it out.
     async fn run_once(&self, spec: &OneOffSpec, output: &(dyn Fn(LogLine) + Send + Sync)) -> Result<OneOffExit, RuntimeError>;
+
+    /// Starts a helper container from `spec.image`, pulled first if it isn't on the server,
+    /// and returns its ID: `spec.volume` mounted at `spec.mount`, no network, no restart
+    /// policy, idle until it is removed with [`ContainerRuntime::remove_one_off`]; commands
+    /// run in it with [`ContainerRuntime::exec`]. A container left with the same name by an
+    /// earlier run is removed first. It carries [`ONE_OFF_LABEL`], so listings leave it out.
+    async fn start_helper(&self, spec: &HelperSpec) -> Result<String, RuntimeError>;
 
     /// Kills and removes a one-off container by name, such as when its deployment is
     /// canceled. One that does not exist counts as removed.

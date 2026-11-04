@@ -10,7 +10,7 @@ use serde::Deserialize;
 use spinikus_control::{BackupScheduleChanges, Control, NewBackupSchedule, NewStorageDestination, StorageDestinationChanges};
 use spinikus_core::{
     backup::{Backup, BackupSchedule, Restore, StorageDestination},
-    id::{BackupId, BackupScheduleId, RestoreId, ServiceId, StorageDestinationId},
+    id::{BackupId, BackupScheduleId, RestoreId, ServiceId, StorageDestinationId, VolumeId},
     secret::Secret,
 };
 
@@ -73,6 +73,10 @@ pub struct UpdateSchedule {
 #[serde(deny_unknown_fields)]
 pub struct CreateBackup {
     destination_id: StorageDestinationId,
+    /// The volume to back up, for a service that isn't a database; it may be left out when
+    /// the service has only one. A database is backed up whole, with its engine's dump.
+    #[serde(default)]
+    volume_id: Option<VolumeId>,
 }
 
 /// Lists the storage destinations.
@@ -204,7 +208,7 @@ pub async fn test_destination(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Lists a database's backup schedules.
+/// Lists a database's or a service's backup schedules.
 #[utoipa::path(
     get,
     path = "/services/{id}/backup-schedules",
@@ -221,7 +225,9 @@ pub async fn list_schedules(
     Ok(Json(control.list_backup_schedules(&principal, service_id).await?))
 }
 
-/// Creates a backup schedule for a database.
+/// Creates a backup schedule for a database, or for a service with volumes: each run backs
+/// up the database, or each of the service's volumes, and `keep_last` counts each volume's
+/// backups on their own.
 #[utoipa::path(
     post,
     path = "/services/{id}/backup-schedules",
@@ -329,7 +335,9 @@ pub async fn list(
     Ok(PageBody::new(page, |backup| backup.id.to_string()))
 }
 
-/// Backs the database up now. The backup starts `queued`.
+/// Backs a database, or one of a service's volumes, up now. The backup starts `queued`.
+/// A database's backup holds its engine's dump (`engine`); a volume's, a gzipped tar of it
+/// (`volume_id`), made in a helper container while the service keeps running.
 #[utoipa::path(
     post,
     path = "/services/{id}/backups",
@@ -345,7 +353,7 @@ pub async fn create(
     Path(service_id): Path<ServiceId>,
     Body(body): Body<CreateBackup>,
 ) -> Result<Response, ApiError> {
-    let backup = control.create_backup(&principal, service_id, body.destination_id).await?;
+    let backup = control.create_backup(&principal, service_id, body.destination_id, body.volume_id).await?;
     Ok(located(format!("/api/v1/backups/{}", backup.id), backup))
 }
 
@@ -384,8 +392,10 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Restores the backup into its database, replacing the data there, after a safety backup
-/// of it. The restore starts `queued`; it runs once the safety backup succeeded.
+/// Restores the backup where it came from, replacing the data there, after a safety backup
+/// of it: a dump into its live database, or an archive into its volume, with the service's
+/// container stopped meanwhile if it runs. The restore starts `queued`; it runs once the
+/// safety backup succeeded.
 #[utoipa::path(
     post,
     path = "/backups/{id}/restore",
@@ -403,7 +413,7 @@ pub async fn restore(
     Ok(located(format!("/api/v1/restores/{}", restore.id), restore))
 }
 
-/// The database's restores, newest first.
+/// The service's restores, newest first.
 #[utoipa::path(
     get,
     path = "/services/{id}/restores",

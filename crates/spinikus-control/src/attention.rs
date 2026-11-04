@@ -54,7 +54,11 @@ impl Control {
                 });
             }
         }
-        for backup in self.store().list_failed_latest_backups().await? {
+        // One item per service: an app's volumes each have their latest backup.
+        let mut failed = self.store().list_failed_latest_backups().await?;
+        failed.sort_by_key(|backup| std::cmp::Reverse(backup.finished_at.unwrap_or(backup.created_at)));
+        let mut seen = std::collections::HashSet::new();
+        for backup in failed.into_iter().filter(|backup| seen.insert(backup.service_id)) {
             if let Some(service) = services.visible(backup.service_id).await? {
                 let at = backup.finished_at.unwrap_or(backup.created_at);
                 items.push(AttentionItem::BackupFailed { service, backup_id: backup.id, error: backup.error, at });

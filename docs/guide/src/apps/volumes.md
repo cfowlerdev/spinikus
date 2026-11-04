@@ -47,6 +47,11 @@ the database empty. To get rid of a database's data, delete the database.
 
 A volume's data lives on the server that wrote it. If you move a service to another server
 (its **Placement** setting), it starts there with empty volumes; copy the data across
-yourself first if you need it. Back up important data: for databases, see
-[Backups and restores](../data/backups.md); for files, keep a copy somewhere other than the
-server.
+yourself first if you need it: back the volume up and restore it after the move. Back up
+important data to storage elsewhere: Spinikus backs volumes up to S3-compatible storage, by
+hand or on a schedule, and restores them (see
+[An app's volumes](../data/backups.md#an-apps-volumes)):
+
+```sh
+spinikus volume backup uploads
+```

@@ -12,7 +12,7 @@ use tokio_stream::StreamExt;
 
 use crate::{
     commands::{Progress, failure, parse_id},
-    runtime::{ContainerRuntime, ExecOutput},
+    runtime::{ContainerRuntime, ExecOutput, ExecStream},
 };
 
 /// How many parts may be uploading at once; the dump waits for one to finish beyond that.
@@ -82,10 +82,29 @@ pub(crate) async fn backup_database(
 
     progress.phase("backing up");
     tracing::info!(backup = %backup_id, container = backup.container_id, "backing up a database");
-    let upload =
-        store.put_multipart(&path).await.map_err(|error| backup_failed(format!("could not start the upload: {error}")))?;
+    let output = runtime.exec(&backup.container_id, backup.command, None);
+    match upload(output, &*store, &path, "the dump").await {
+        Ok(size) => {
+            progress.line(format!("uploaded {size} bytes to {}", backup.object_key));
+            tracing::info!(backup = %backup_id, size, "backed up a database");
+            Ok(uploaded(size))
+        }
+        Err(message) => {
+            tracing::warn!(backup = %backup_id, message, "a backup failed");
+            Err(backup_failed(message))
+        }
+    }
+}
+
+pub(crate) fn uploaded(size_bytes: u64) -> pb::CommandSucceeded {
+    pb::CommandSucceeded { prepared: None, backup: Some(pb::BackupUploaded { size_bytes }) }
+}
+
+/// Uploads what a command (`what`, in errors) writes to stdout to `path`, a part at a time,
+/// and returns its size. A command that fails aborts the upload; its stderr says why.
+pub(crate) async fn upload(mut output: ExecStream, store: &dyn ObjectStore, path: &Path, what: &str) -> Result<u64, String> {
+    let upload = store.put_multipart(path).await.map_err(|error| format!("could not start the upload: {error}"))?;
     let mut upload = WriteMultipart::new(upload);
-    let mut output = runtime.exec(&backup.container_id, backup.command, None);
     let mut size: u64 = 0;
     let mut stderr = Vec::new();
     let outcome = loop {
@@ -101,26 +120,23 @@ pub(crate) async fn backup_database(
                 keep_stderr(&mut stderr, &bytes);
             }
             Some(Ok(ExecOutput::Exited(0))) => break Ok(()),
-            Some(Ok(ExecOutput::Exited(code))) => break Err(exited("the dump", code, &stderr)),
-            Some(Err(error)) => break Err(format!("the dump failed: {error}")),
-            None => break Err("the dump ended without an exit code".to_string()),
+            Some(Ok(ExecOutput::Exited(code))) => break Err(exited(what, code, &stderr)),
+            Some(Err(error)) => break Err(format!("{what} failed: {error}")),
+            None => break Err(format!("{what} ended without an exit code")),
         }
     };
     // Stop reading before the upload is finished or aborted.
     drop(output);
     match outcome {
         Ok(()) => {
-            upload.finish().await.map_err(|error| backup_failed(format!("the upload failed: {error}")))?;
-            progress.line(format!("uploaded {size} bytes to {}", backup.object_key));
-            tracing::info!(backup = %backup_id, size, "backed up a database");
-            Ok(pb::CommandSucceeded { prepared: None, backup: Some(pb::BackupUploaded { size_bytes: size }) })
+            upload.finish().await.map_err(|error| format!("the upload failed: {error}"))?;
+            Ok(size)
         }
         Err(message) => {
             if let Err(error) = upload.abort().await {
-                tracing::warn!(backup = %backup_id, %error, "could not abort an upload");
+                tracing::warn!(%error, "could not abort an upload");
             }
-            tracing::warn!(backup = %backup_id, message, "a backup failed");
-            Err(backup_failed(message))
+            Err(message)
         }
     }
 }
@@ -140,7 +156,7 @@ pub(crate) fn exited(what: &str, code: i64, stderr: &[u8]) -> String {
     }
 }
 
-fn backup_failed(message: impl Into<String>) -> pb::CommandFailed {
+pub(crate) fn backup_failed(message: impl Into<String>) -> pb::CommandFailed {
     failure(FailureReason::BackupFailed, message)
 }
 

@@ -1,6 +1,7 @@
-//! A database's backups: backing up now, schedules, the backups made, and restoring one.
-//! Viewers see them; developers back up now; admins manage schedules, restore and delete.
-//! While a backup or restore is under way, the list refreshes itself every 2 seconds.
+//! A service's backups, of a database's data or of an app's volumes: backing up now,
+//! schedules, the backups made, and restoring one. Viewers see them; developers back up now;
+//! admins manage schedules, restore and delete. While a backup or restore is under way, the
+//! list refreshes itself every 2 seconds.
 
 use std::collections::HashMap;
 
@@ -17,10 +18,11 @@ use spinikus_core::{
     backup::{Backup, BackupSchedule, BackupStatus, Restore, StorageDestination},
     database::Engine,
     environment::Environment,
-    id::{BackupId, ServiceId, StorageDestinationId},
+    id::{BackupId, ServiceId, StorageDestinationId, VolumeId},
     membership::Role,
     project::Project,
-    service::Service,
+    service::{Service, ServiceKind},
+    volume::Volume,
 };
 
 use super::{Tab, crumbs, parse_id, problem_message, redirect, service_tabs};
@@ -42,18 +44,34 @@ struct Context {
     environment: Environment,
     project: Project,
     role: Role,
-    engine: Engine,
+    /// A database's engine; `None` for an app, whose volumes are backed up.
+    engine: Option<Engine>,
+    /// An app's volumes, by name.
+    volumes: Vec<Volume>,
 }
 
 impl Context {
     async fn load(control: &Control, signed: &Signed, id: ServiceId) -> Result<Self, WebError> {
         let principal = &signed.principal;
         let service = control.get_service(principal, id).await?;
-        let engine = Engine::of(&service.config).ok_or(WebError::NoPage)?;
+        let engine = Engine::of(&service.config);
+        if engine.is_none() && service.kind != ServiceKind::App {
+            return Err(WebError::NoPage);
+        }
+        let volumes = match engine {
+            Some(_) => Vec::new(),
+            None => control.list_volumes(principal, id).await?,
+        };
         let environment = control.get_environment(principal, service.environment_id).await?;
         let role = control.environment_role(principal, &environment).await?;
         let project = control.get_project(principal, environment.project_id).await?;
-        Ok(Self { service, environment, project, role, engine })
+        Ok(Self { service, environment, project, role, engine, volumes })
+    }
+
+    /// What a backup holds, for its row: an app's volume by name.
+    fn volume_name(&self, backup: &Backup) -> Option<&str> {
+        let volume = backup.volume_id?;
+        Some(self.volumes.iter().find(|found| found.id == volume).map_or("a deleted volume", |found| found.name.as_str()))
     }
 
     fn url(&self) -> String {
@@ -103,6 +121,9 @@ pub async fn activity(State(control): State<Control>, signed: Signed, Path(id): 
 pub struct DestinationForm {
     #[serde(default)]
     destination_id: String,
+    /// An app's volume; empty or absent for a database, or an app with one volume.
+    #[serde(default)]
+    volume_id: String,
 }
 
 pub async fn back_up(
@@ -113,9 +134,16 @@ pub async fn back_up(
     Form(form): Form<DestinationForm>,
 ) -> Result<Response, WebError> {
     let context = Context::load(&control, &signed, parse_id(&id)?).await?;
-    let queued = match destination(&form.destination_id) {
-        Ok(destination) => control.create_backup(&signed.principal, context.service.id, destination).await,
-        Err(error) => Err(error),
+    let volume = match form.volume_id.trim() {
+        "" => Ok(None),
+        id => id.parse::<VolumeId>().map(Some).map_err(|_| ControlError::Invalid {
+            field: "volume_id",
+            problem: "choose one of the service's volumes".to_string(),
+        }),
+    };
+    let queued = match (destination(&form.destination_id), volume) {
+        (Ok(destination), Ok(volume)) => control.create_backup(&signed.principal, context.service.id, destination, volume).await,
+        (Err(error), _) | (_, Err(error)) => Err(error),
     };
     match queued {
         Ok(_) => Ok(redirect(&headers, &context.url())),
@@ -283,10 +311,21 @@ async fn render(
             Alert::Done(message) => (layout::notice(message)),
             Alert::Problem(message) => (layout::alert(message)),
         }
-        (layout::heading(&service.name, Some(html! { span class="font-mono" { (service.slug) } " · " (super::databases::engine_name(context.engine)) })))
+        (layout::heading(&service.name, Some(html! {
+            span class="font-mono" { (service.slug) }
+            @if let Some(engine) = context.engine { " · " (super::databases::engine_name(engine)) }
+        })))
         (service_tabs(service, context.role, Tab::Backups))
         div class="space-y-8" {
-            @if destinations.is_empty() {
+            @if context.engine.is_none() && context.volumes.is_empty() {
+                div class="rounded-lg border border-dashed border-zinc-300 px-6 py-8 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-400" {
+                    "An app's backups are of its volumes, and it has none. "
+                    @if context.role >= Role::Developer {
+                        a href={ "/services/" (service.id) "/settings#volumes" } class=(LINK) { "Add a volume" }
+                        " to keep files across deployments, then back it up here."
+                    }
+                }
+            } @else if destinations.is_empty() {
                 div class="rounded-lg border border-dashed border-zinc-300 px-6 py-8 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-400" {
                     "Backups go to S3-compatible storage, and none is set up yet. "
                     @if principal.is_instance_admin() {
@@ -310,6 +349,14 @@ fn back_up_now(signed: &Signed, context: &Context, destinations: &[StorageDestin
     html! {
         form method="post" action=(context.url()) class={ (CARD) " flex flex-wrap items-end gap-3 p-5" } {
             (csrf_field(signed))
+            @if context.volumes.len() > 1 {
+                div class="min-w-48 flex-1 space-y-1.5" {
+                    label for="backup-volume" class=(layout::LABEL) { "Volume" }
+                    select id="backup-volume" name="volume_id" class=(INPUT) {
+                        @for volume in &context.volumes { option value=(volume.id) { (volume.name) " (" (volume.mount_path) ")" } }
+                    }
+                }
+            }
             div class="min-w-48 flex-1 space-y-1.5" {
                 label for="backup-destination" class=(layout::LABEL) { "Destination" }
                 select id="backup-destination" name="destination_id" class=(INPUT) {
@@ -349,20 +396,23 @@ async fn activity_section(
                 section {
                     h2 class="mb-3 font-semibold" { "Restores" }
                     ul class={ (CARD) " divide-y divide-zinc-200 dark:divide-zinc-800" } {
-                        @for restore in &restores { (restore_row(restore, &backups.items)) }
+                        @for restore in &restores { (restore_row(context, restore, &backups.items)) }
                     }
                 }
             }
             section {
                 h2 class="mb-1 font-semibold" { "Backups" }
                 p class="mb-3 text-sm text-zinc-500 dark:text-zinc-400" {
-                    "Restoring one replaces the database's data with it, after backing up what is there now."
+                    @match context.engine {
+                        Some(_) => "Restoring one replaces the database's data with it, after backing up what is there now.",
+                        None => "Each backup is one volume's files, copied while the app runs. Restoring one replaces the volume's files with it, after backing up what is there now; the app is stopped meanwhile.",
+                    }
                 }
                 @if backups.items.is_empty() {
                     (layout::empty("No backups yet."))
                 } @else {
                     ul class={ (CARD) " divide-y divide-zinc-200 dark:divide-zinc-800" } {
-                        @for backup in &backups.items { (backup_row(signed, &context.service, backup, names, admin, safety.contains(&backup.id))) }
+                        @for backup in &backups.items { (backup_row(signed, context, backup, names, admin, safety.contains(&backup.id))) }
                     }
                     @if let (true, Some(last)) = (backups.has_more, backups.items.last()) {
                         div class="mt-3 text-sm" { a href={ (context.url()) "?after=" (last.id) } class=(LINK) { "Older backups" } }
@@ -375,17 +425,23 @@ async fn activity_section(
 
 fn backup_row(
     signed: &Signed,
-    database: &Service,
+    context: &Context,
     backup: &Backup,
     names: &HashMap<StorageDestinationId, String>,
     admin: bool,
     safety: bool,
 ) -> Markup {
     let destination = names.get(&backup.destination_id).map_or("a deleted destination", String::as_str);
+    let volume = context.volume_name(backup);
+    let confirm = match volume {
+        None => "Restore this backup? The database's current data is backed up first, then replaced. Apps using it may get errors until the restore finishes.".to_string(),
+        Some(name) => format!("Restore this backup into {name}? Its current files are backed up first, then replaced, with the app stopped meanwhile."),
+    };
     html! {
         li class="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3 text-sm" {
             span class="w-24" { (status_badge(backup.status)) }
             span { (layout::time(backup.created_at)) }
+            @if let Some(volume) = volume { span class="font-mono" { (volume) } }
             span class="text-zinc-500 dark:text-zinc-400" {
                 @if safety { "safety backup, before a restore" } @else if backup.schedule_id.is_some() { "scheduled" } @else { "by hand" }
                 " · " (destination)
@@ -394,13 +450,14 @@ fn backup_row(
             @if admin && backup.status.is_finished() {
                 div class="ml-auto flex flex-wrap gap-2" {
                     @if backup.status == BackupStatus::Succeeded {
-                        form method="post" action={ "/backups/" (backup.id) "/restore" }
-                            hx-confirm="Restore this backup? The database's current data is backed up first, then replaced. Apps using it may get errors until the restore finishes." {
+                        form method="post" action={ "/backups/" (backup.id) "/restore" } hx-confirm=(confirm) {
                             (csrf_field(signed))
                             button type="submit" class={ (BUTTON_SECONDARY) " py-1" } { "Restore" }
                         }
-                        a href={ "/environments/" (database.environment_id) "/databases/new?from_backup=" (backup.id) }
-                            class={ (BUTTON_SECONDARY) " py-1" } { "Restore into a new database" }
+                        @if backup.engine.is_some() {
+                            a href={ "/environments/" (context.service.environment_id) "/databases/new?from_backup=" (backup.id) }
+                                class={ (BUTTON_SECONDARY) " py-1" } { "Restore into a new database" }
+                        }
                     }
                     form method="post" action={ "/backups/" (backup.id) "/delete" } hx-confirm="Delete this backup? Its file is deleted from the storage too." {
                         (csrf_field(signed))
@@ -416,7 +473,7 @@ fn backup_row(
 }
 
 /// A restore, naming its backup by when it was made if it is in `backups`.
-fn restore_row(restore: &Restore, backups: &[Backup]) -> Markup {
+fn restore_row(context: &Context, restore: &Restore, backups: &[Backup]) -> Markup {
     let backup = backups.iter().find(|backup| backup.id == restore.backup_id);
     html! {
         li class="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3 text-sm" {
@@ -428,7 +485,7 @@ fn restore_row(restore: &Restore, backups: &[Backup]) -> Markup {
                     None => { "of the backup " span class="font-mono" { (restore.backup_id) } },
                 }
                 @if restore.status == BackupStatus::Queued {
-                    @if restore.safety_backup_id.is_some() { " · waiting for the safety backup" } @else { " · waiting for the database to start" }
+                    @if restore.safety_backup_id.is_some() { " · waiting for the safety backup" } @else if context.engine.is_some() { " · waiting for the database to start" }
                 }
             }
             @if let Some(error) = &restore.error {
@@ -457,7 +514,10 @@ fn schedules_section(
             (Input::text("schedule-cron", "cron", "When", &form.cron).required().mono().placeholder("0 3 * * *")
                 .hint("A cron expression in UTC: minute, hour, day, month, weekday. 0 3 * * * is every day at 03:00.").render())
             (Input::text("schedule-keep", "keep_last", "Backups kept", &form.keep_last).kind("number").mono()
-                .hint("Older backups of this schedule are deleted.").render())
+                .hint(match context.engine {
+                    Some(_) => "Older backups of this schedule are deleted.",
+                    None => "Each run backs up every volume; this many of each are kept, and older ones deleted.",
+                }).render())
         }
     };
     html! {

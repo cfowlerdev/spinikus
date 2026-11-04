@@ -1,17 +1,21 @@
-//! Backups of database services to S3-compatible storage.
+//! Backups of databases and of other services' volumes to S3-compatible storage.
 //!
 //! Storage destinations belong to the instance: instance admins add, change and delete them,
-//! and anyone signed in sees them (never the secret access key), to pick one. A database's
-//! backups are made by the agent of its server, which dumps the database inside its
-//! container and uploads the dump straight to the destination (`runner.rs`); the control
-//! plane only sends the command, with the destination's credentials, and records the result.
+//! and anyone signed in sees them (never the secret access key), to pick one. Backups are
+//! made by the agent of the service's server, which dumps a database inside its container,
+//! or archives one volume of any other service in a helper container, and uploads the result
+//! straight to the destination (`runner.rs`); the control plane only sends the command, with
+//! the destination's credentials, and records the result. A database has one kind of backup,
+//! its dump; its data volume isn't archived, since a copy of a running database's files may
+//! not open.
 //!
-//! Admins of a database's environment restore its backups (`restores.rs`), after a safety
+//! Admins of the service's environment restore its backups (`restores.rs`), after a safety
 //! backup of the data the restore replaces.
 //!
-//! Admins of a database's environment manage its schedules (a cron expression in UTC, and
-//! how many of its own successful backups to keep); developers make a backup by hand, viewers
-//! list them, and admins delete them, the object included.
+//! Admins of the service's environment manage its schedules (a cron expression in UTC, and
+//! how many of its own successful backups to keep, of each volume); each run backs up the
+//! database, or each volume. Developers make a backup by hand, viewers list them, and admins
+//! delete them, the object included.
 
 pub mod instance;
 mod restores;
@@ -33,17 +37,19 @@ pub(crate) fn is_backup_command(id: &str) -> bool {
 }
 use spinikus_core::{
     backup::{
-        Backup, BackupSchedule, BackupScheduleFields, MAX_KEEP_LAST, NewBackup, StorageDestination, StorageDestinationFields,
-        object_key,
+        Backup, BackupSchedule, BackupScheduleFields, BackupSource, MAX_KEEP_LAST, NewBackup, StorageDestination,
+        StorageDestinationFields, object_key,
     },
     database::Engine,
     environment::Environment,
-    id::{BackupId, BackupScheduleId, ServiceId, StorageDestinationId},
+    id::{BackupId, BackupScheduleId, ServiceId, StorageDestinationId, VolumeId},
     membership::Role,
     secret::Secret,
     service::Service,
 };
-use spinikus_store::{BackupRepository, BackupScheduleRepository, RestoreRepository, StorageDestinationRepository};
+use spinikus_store::{
+    BackupRepository, BackupScheduleRepository, RestoreRepository, StorageDestinationRepository, VolumeRepository,
+};
 
 use crate::{
     Control, ControlError, Principal,
@@ -235,7 +241,7 @@ impl Control {
         new: NewBackupSchedule,
     ) -> Result<BackupSchedule, ControlError> {
         let (service, environment) = self.service_with_access(principal, service_id, Role::Admin).await?;
-        database_engine(&service)?;
+        self.backup_sources(&service).await?;
         let cron = cron(&new.cron)?;
         let fields = BackupScheduleFields {
             destination_id: new.destination_id,
@@ -320,34 +326,70 @@ impl Control {
         }
     }
 
-    /// Queues a backup of the database to `destination_id` now. The runner sends it to the
-    /// database's agent; it fails if the database has nothing live.
+    /// Queues a backup to `destination_id` now: of the database, or of one of the service's
+    /// volumes, `volume_id` (which may be left out when it has only one). The runner sends
+    /// it to the service's agent; a database's fails if it has nothing live.
     pub async fn create_backup(
         &self,
         principal: &Principal,
         service_id: ServiceId,
         destination_id: StorageDestinationId,
+        volume_id: Option<VolumeId>,
     ) -> Result<Backup, ControlError> {
         let (service, environment) = self.service_with_access(principal, service_id, Role::Developer).await?;
-        if service.stopped_at.is_some() {
+        let sources = self.backup_sources(&service).await?;
+        let source = match (sources.as_slice(), volume_id) {
+            ([BackupSource::Database(_)], Some(_)) => {
+                return Err(invalid("volume_id", "a database is backed up whole, with its engine's dump; leave it out"));
+            }
+            ([source @ BackupSource::Database(_)], None) => *source,
+            (_, Some(volume)) => *sources
+                .iter()
+                .find(|source| **source == BackupSource::Volume(volume))
+                .ok_or_else(|| invalid("volume_id", "is not one of the service's volumes"))?,
+            ([source], None) => *source,
+            (_, None) => return Err(invalid("volume_id", "the service has several volumes; name the one to back up")),
+        };
+        if matches!(source, BackupSource::Database(_)) && service.stopped_at.is_some() {
             let problem = "the database is stopped; start it first".to_string();
             return Err(ControlError::Rejected { entity: "service", id: service_id.to_string(), problem });
         }
-        let backup = self.queue_backup(&service, destination_id, None).await?;
-        let details = json!({ "service_id": service_id.to_string(), "destination_id": destination_id.to_string() });
+        let backup = self.queue_backup(&service, destination_id, None, source).await?;
+        let mut details = json!({ "service_id": service_id.to_string(), "destination_id": destination_id.to_string() });
+        if let BackupSource::Volume(volume) = source {
+            details["volume_id"] = json!(volume.to_string());
+        }
         self.audit_by(principal, "backup.create", backup.id, Some(environment.project_id), details).await?;
         self.wake_backups();
         Ok(backup)
     }
 
-    /// Records a queued backup of a database service.
+    /// What a backup of the service holds: a database's dump, or each of the service's
+    /// volumes. `Rejected` when there is nothing to back up.
+    pub(crate) async fn backup_sources(&self, service: &Service) -> Result<Vec<BackupSource>, ControlError> {
+        if let Some(engine) = Engine::of(&service.config) {
+            return Ok(vec![BackupSource::Database(engine)]);
+        }
+        let volumes = self.store().list_volumes(service.id).await?;
+        if volumes.is_empty() {
+            return Err(ControlError::Rejected {
+                entity: "service",
+                id: service.id.to_string(),
+                problem: "it has no volumes, so nothing to back up; only databases and services with volumes have backups"
+                    .to_string(),
+            });
+        }
+        Ok(volumes.into_iter().map(|volume| BackupSource::Volume(volume.id)).collect())
+    }
+
+    /// Records a queued backup of the service.
     pub(crate) async fn queue_backup(
         &self,
         service: &Service,
         destination_id: StorageDestinationId,
         schedule_id: Option<BackupScheduleId>,
+        source: BackupSource,
     ) -> Result<Backup, ControlError> {
-        let engine = database_engine(service)?;
         let destination = self.store().get_storage_destination(destination_id).await?;
         let id = BackupId::new();
         let new = NewBackup {
@@ -355,8 +397,8 @@ impl Control {
             service_id: service.id,
             destination_id,
             schedule_id,
-            engine,
-            object_key: object_key(&destination.fields.path_prefix, service.id, id, engine),
+            source,
+            object_key: object_key(&destination.fields.path_prefix, service.id, id, source),
         };
         Ok(self.store().create_backup(new).await?)
     }
@@ -441,15 +483,6 @@ impl Control {
 
 pub(crate) fn require_instance_admin(principal: &Principal) -> Result<(), ControlError> {
     if principal.is_instance_admin() { Ok(()) } else { Err(ControlError::Forbidden) }
-}
-
-/// The engine of a database service; other services have no backups.
-pub(crate) fn database_engine(service: &Service) -> Result<Engine, ControlError> {
-    Engine::of(&service.config).ok_or_else(|| ControlError::Rejected {
-        entity: "service",
-        id: service.id.to_string(),
-        problem: "only databases have backups".to_string(),
-    })
 }
 
 /// Parses a five-field cron expression.

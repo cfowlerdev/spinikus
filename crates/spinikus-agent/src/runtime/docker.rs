@@ -34,8 +34,8 @@ use tokio_stream::StreamExt;
 
 use super::{
     BuildSpec, ContainerCounters, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, ExecInput, ExecOutput,
-    ExecStream, LogLine, LogLines, LogOptions, Network, ONE_OFF_LABEL, OneOffExit, OneOffSpec, PORT_LABEL, RuntimeError,
-    SERVICE_LABEL, TERMINAL_TYPE, TerminalInput, TerminalInputs, TerminalSize, owner, session,
+    ExecStream, HelperSpec, LogLine, LogLines, LogOptions, Network, ONE_OFF_LABEL, OneOffExit, OneOffSpec, PORT_LABEL,
+    RuntimeError, SERVICE_LABEL, TERMINAL_TYPE, TerminalInput, TerminalInputs, TerminalSize, owner, session,
 };
 
 /// Aborts a task when dropped, such as stdin's writer once the command's output ends.
@@ -629,6 +629,47 @@ impl ContainerRuntime for DockerRuntime {
         let exit = exit?;
         removed?;
         Ok(exit)
+    }
+
+    async fn start_helper(&self, spec: &HelperSpec) -> Result<String, RuntimeError> {
+        self.remove_one_off(&spec.name).await?;
+        let docker = self.client()?;
+        // Pulled once: a backup shouldn't depend on reaching the registry every time.
+        let reference = with_tag(&spec.image);
+        match docker.inspect_image(&reference).await.map_err(runtime_error) {
+            Ok(_) => {}
+            Err(RuntimeError::NotFound) => {
+                self.pull(&reference, &|_| {}).await?;
+            }
+            Err(error) => return Err(error),
+        }
+        let labels = HashMap::from([
+            (SERVICE_LABEL.to_string(), spec.service_id.to_string()),
+            (ONE_OFF_LABEL.to_string(), spec.label.clone()),
+        ]);
+        let access = if spec.read_only { ":ro" } else { "" };
+        let body = ContainerCreateBody {
+            image: Some(reference),
+            // Idle until removed; the work runs through exec.
+            cmd: Some(vec!["sleep".to_string(), "86400".to_string()]),
+            labels: Some(labels),
+            host_config: Some(HostConfig {
+                binds: Some(vec![format!("{}:{}{access}", spec.volume, spec.mount)]),
+                network_mode: Some("none".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let options = CreateContainerOptionsBuilder::new().name(&spec.name).build();
+        let created = docker.create_container(Some(options), body).await.map_err(|error| match error {
+            Error::DockerResponseServerError { status_code: 404, message } => RuntimeError::Failed(message),
+            error => runtime_error(error),
+        })?;
+        if let Err(error) = docker.start_container(&created.id, None).await.map_err(runtime_error) {
+            let _ = self.remove_one_off(&spec.name).await;
+            return Err(error);
+        }
+        Ok(created.id)
     }
 
     async fn remove_one_off(&self, name: &str) -> Result<(), RuntimeError> {

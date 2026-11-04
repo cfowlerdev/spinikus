@@ -37,7 +37,7 @@ whether it got through, with the server's answer when it didn't.
 | `deployment.failed`      | A deployment failed, with its reason (`build_failed`, `health_check_failed`, …)        |
 | `service.crashing`       | A live container restarted three times in ten minutes, or hasn't run for a minute      |
 | `service.recovered`      | A crashing service's container has run ten minutes without a restart                   |
-| `backup.failed`          | A database backup failed, scheduled or not                                             |
+| `backup.failed`          | A backup of a database or an app's volume failed, scheduled or not                     |
 | `instance_backup.failed` | A backup of Spinikus itself failed                                                     |
 | `certificate.failed`     | Ordering an HTTPS certificate failed (once per run of failures, not on every retry)    |
 | `certificate.expiring`   | A certificate in use expires within 14 days (renewal starts well before, so this means renewal keeps failing) |

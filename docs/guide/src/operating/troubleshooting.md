@@ -25,7 +25,7 @@ each with a link to where to look or fix it. Nothing is listed while all is well
 | A server whose disk is 90% full or more                                                            | Instance admins                                |
 | A service that is [crashing](#a-service-is-marked-crashing)                                        | Anyone with a role in the service's environment |
 | A service whose latest deployment failed (canceled ones don't count), until one goes live         | The same                                       |
-| A database whose latest finished backup failed, until one succeeds                                 | The same                                       |
+| A database, or an app's volume, whose latest finished backup failed, until one succeeds            | The same                                       |
 | An app's hostname that has no HTTPS certificate, or whose renewal failed, or whose certificate expires within 14 days | The same, while HTTPS is on        |
 | The latest backup of Spinikus itself, if it failed                                                 | Instance admins                                |
 | A notification channel whose latest notification couldn't be sent                                | Instance admins                                |

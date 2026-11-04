@@ -46,7 +46,7 @@ pub enum AttentionItem {
         message: Option<String>,
         at: Timestamp,
     },
-    /// A database's latest finished backup failed.
+    /// A service's latest finished backup failed: a database's, or the newest of an app's volumes'.
     BackupFailed { service: ServiceRef, backup_id: BackupId, error: Option<String>, at: Timestamp },
     /// Getting an HTTPS certificate for a service's hostname failed, the last time it was
     /// tried; `expires_at` is when the certificate it has now, if any, expires.

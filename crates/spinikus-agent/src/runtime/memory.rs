@@ -19,8 +19,8 @@ use tokio::sync::broadcast;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 use super::{
-    BuildSpec, ContainerCounters, ContainerEvents, ContainerRuntime, ContainerSpec, ExecInput, ExecOutput, ExecStream, LogLine,
-    LogLines, LogOptions, OneOffExit, OneOffSpec, RuntimeError, TerminalInput, TerminalInputs, TerminalSize,
+    BuildSpec, ContainerCounters, ContainerEvents, ContainerRuntime, ContainerSpec, ExecInput, ExecOutput, ExecStream,
+    HelperSpec, LogLine, LogLines, LogOptions, OneOffExit, OneOffSpec, RuntimeError, TerminalInput, TerminalInputs, TerminalSize,
 };
 
 /// A terminal opened in a container, as [`MemoryRuntime::terminals`] lists it.
@@ -68,6 +68,8 @@ pub struct MemoryRuntime {
     one_offs: Mutex<Vec<OneOffSpec>>,
     one_off_outcomes: Mutex<VecDeque<(Vec<String>, OneOffExit)>>,
     removed_one_offs: Mutex<Vec<String>>,
+    /// Helper containers started so far, by ID.
+    helpers: Mutex<Vec<(String, HelperSpec)>>,
     /// The networks containers were created on, and the build cache prunes so far.
     networks: Mutex<std::collections::BTreeSet<String>>,
     build_cache_prunes: Mutex<Vec<Duration>>,
@@ -106,6 +108,7 @@ impl MemoryRuntime {
             one_offs: Mutex::default(),
             one_off_outcomes: Mutex::default(),
             removed_one_offs: Mutex::default(),
+            helpers: Mutex::default(),
             networks: Mutex::default(),
             build_cache_prunes: Mutex::default(),
             stats: Mutex::default(),
@@ -196,6 +199,11 @@ impl MemoryRuntime {
     }
 
     /// The one-off containers removed by name so far.
+    /// The helper containers started so far, oldest first.
+    pub fn helpers(&self) -> Vec<HelperSpec> {
+        lock(&self.helpers).iter().map(|(_, spec)| spec.clone()).collect()
+    }
+
     pub fn removed_one_offs(&self) -> Vec<String> {
         lock(&self.removed_one_offs).clone()
     }
@@ -335,7 +343,8 @@ impl ContainerRuntime for MemoryRuntime {
         if let Err(error) = self.check() {
             return Box::pin(tokio_stream::once(Err(error)));
         }
-        if self.get(container_id).is_none() {
+        let helper = lock(&self.helpers).iter().any(|(id, _)| id == container_id);
+        if self.get(container_id).is_none() && !helper {
             return Box::pin(tokio_stream::once(Err(RuntimeError::NotFound)));
         }
         lock(&self.execs).push((container_id.to_string(), command));
@@ -528,6 +537,13 @@ impl ContainerRuntime for MemoryRuntime {
             output(LogLine { at: Some(Timestamp::now()), stderr: false, text });
         }
         Ok(exit)
+    }
+
+    async fn start_helper(&self, spec: &HelperSpec) -> Result<String, RuntimeError> {
+        self.check()?;
+        let id = format!("helper-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        lock(&self.helpers).push((id.clone(), spec.clone()));
+        Ok(id)
     }
 
     async fn remove_one_off(&self, name: &str) -> Result<(), RuntimeError> {

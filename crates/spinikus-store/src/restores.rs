@@ -194,7 +194,7 @@ impl RestoreRepository for SqliteStore {
 #[cfg(test)]
 mod tests {
     use spinikus_core::{
-        backup::{BackupScheduleFields, NewBackup, StorageDestinationFields, object_key},
+        backup::{BackupScheduleFields, BackupSource, NewBackup, StorageDestinationFields, object_key},
         database::Engine,
         environment::{EnvironmentFields, EnvironmentKind},
         id::{BackupId, BackupScheduleId, StorageDestinationId},
@@ -247,8 +247,8 @@ mod tests {
             service_id: service,
             destination_id: destination,
             schedule_id: schedule,
-            engine: Engine::Postgres,
-            object_key: object_key("", service, id, Engine::Postgres),
+            source: BackupSource::Database(Engine::Postgres),
+            object_key: object_key("", service, id, BackupSource::Database(Engine::Postgres)),
         };
         store.create_backup(new).await.unwrap();
         store.finish_backup(id, Ok(10)).await.unwrap();

@@ -9,6 +9,7 @@ use super::{
     confirm,
     error::{Exit, fail},
     output::{Style, ago, status_style},
+    storage,
     views::{self, Deployment, Environment, Project, Service, ServiceDomains, Volume},
 };
 
@@ -361,6 +362,23 @@ pub async fn volume(session: &Session, command: VolumeCommand) -> anyhow::Result
                 current.name, service.slug
             ))
         }
+        VolumeCommand::Backup { volume, service, destination, detach } => {
+            let service = session.service(service.as_deref()).await?;
+            let volume = find_volume(session, &service, &volume).await?;
+            let what = format!("{}'s volume {}", service.slug, volume.name);
+            storage::back_up(session, &service, Some(&volume.id), &what, destination.as_deref(), detach).await
+        }
+        VolumeCommand::Backups { volume, service } => {
+            let service = session.service(service.as_deref()).await?;
+            let volumes: Vec<Volume> =
+                views::read(&session.api.get::<Value>(&format!("/services/{}/volumes", service.id)).await?)?;
+            let only = match volume {
+                Some(volume) => Some(find_volume(session, &service, &volume).await?.id),
+                None => None,
+            };
+            storage::list_backups(session, &service, Some(&volumes), only.as_deref()).await
+        }
+        VolumeCommand::Restore { backup, yes, detach } => storage::restore(session, &backup, yes, detach).await,
     }
 }
 

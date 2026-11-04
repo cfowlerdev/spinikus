@@ -284,6 +284,10 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
         "{volumes}"
     );
     assert_eq!(cli(&["volume", "list", "-o", "json"]).await.json()[0]["mount_path"], "/srv/uploads");
+    assert_eq!(cli(&["volume", "backups"]).await.stdout, "ID  VOLUME  STATUS  MADE  SIZE  CREATED\n");
+    assert_eq!(cli(&["volume", "backups", "missing"]).await.code, 5);
+    let no_destination = cli(&["volume", "backup", "uploads"]).await;
+    assert!(no_destination.stderr.contains("there are no storage destinations"), "{}", no_destination.stderr);
     assert_eq!(cli(&["volume", "remove", "missing"]).await.code, 5);
     let removed = cli(&["volume", "remove", "uploads"]).await;
     assert!(removed.stdout.contains("its data stays on the server"), "{}", removed.stdout);

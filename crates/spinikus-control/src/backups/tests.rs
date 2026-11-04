@@ -243,9 +243,9 @@ async fn manual_backups_fail_without_a_live_database_and_report_why() {
     let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
     let other = control.create_server(admin, crate::NewServer { name: "db-2".to_string() }).await.unwrap();
 
-    let by_viewer = control.create_backup(&viewer, database.id, destination.id).await;
-    let of_an_app = control.create_backup(admin, fixture.setup.service.id, destination.id).await;
-    let backup = control.create_backup(admin, database.id, destination.id).await.unwrap();
+    let by_viewer = control.create_backup(&viewer, database.id, destination.id, None).await;
+    let of_an_app = control.create_backup(admin, fixture.setup.service.id, destination.id, None).await;
+    let backup = control.create_backup(admin, database.id, destination.id, None).await.unwrap();
     control.advance_backups().await;
     let (command_id, _) = backup_commands(&mut fixture.agent).pop().unwrap();
     let running = control.delete_backup(admin, backup.id).await;
@@ -259,7 +259,7 @@ async fn manual_backups_fail_without_a_live_database_and_report_why() {
 
     let draining = DeploymentStatus::Draining;
     control.store().transition_deployment(deployment.id, draining, None, None, Actor::System).await.unwrap();
-    let nothing_live = control.create_backup(admin, database.id, destination.id).await.unwrap();
+    let nothing_live = control.create_backup(admin, database.id, destination.id, None).await.unwrap();
     control.advance_backups().await;
     let nothing_live = control.get_backup(admin, nothing_live.id).await.unwrap();
 
@@ -284,14 +284,14 @@ async fn backups_wait_for_the_agent_then_fail_and_are_resent_while_unanswered() 
     let (control, admin, server) = (&fixture.setup.control, &fixture.setup.admin, fixture.setup.server.id);
     let destination = control.create_storage_destination(admin, destination("Primary")).await.unwrap();
 
-    let resent = control.create_backup(admin, database.id, destination.id).await.unwrap();
+    let resent = control.create_backup(admin, database.id, destination.id, None).await.unwrap();
     control.advance_backups().await;
     control.advance_backups().await;
     let sent = backup_commands(&mut fixture.agent);
     control.backup_result(server, result(&sent[0].0, uploaded(5))).await;
 
     control.agents().unregister(server, fixture.connection);
-    let waiting = control.create_backup(admin, database.id, destination.id).await.unwrap();
+    let waiting = control.create_backup(admin, database.id, destination.id, None).await.unwrap();
     control.advance_backups().await;
     let before = control.get_backup(admin, waiting.id).await.unwrap().status;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -331,7 +331,7 @@ fn kinds(commands: &[pb::Command]) -> Vec<(String, char)> {
 /// A backup of the database that succeeded, made through the fake agent.
 async fn backed_up(fixture: &mut Fixture, database: ServiceId, destination: StorageDestinationId) -> Backup {
     let control = &fixture.setup.control;
-    let backup = control.create_backup(&fixture.setup.admin, database, destination).await.unwrap();
+    let backup = control.create_backup(&fixture.setup.admin, database, destination, None).await.unwrap();
     control.advance_backups().await;
     let (command_id, _) = backup_commands(&mut fixture.agent).pop().unwrap();
     control.backup_result(fixture.setup.server.id, result(&command_id, uploaded(42))).await;
@@ -526,4 +526,116 @@ async fn backups_restore_into_a_new_database_once_it_runs() {
     assert_eq!(failed.status, BackupStatus::Failed);
     let error = failed.error.unwrap();
     assert!(error.starts_with("the database's deployment") && error.ends_with("ended as failed"), "{error}");
+}
+
+/// The volume commands sent so far, by command ID.
+fn volume_commands(agent: &mut mpsc::Receiver<pb::ControlMessage>) -> Vec<(String, Kind)> {
+    commands(agent)
+        .into_iter()
+        .filter_map(|command| match command.kind {
+            Some(kind @ (Kind::BackupVolume(_) | Kind::RestoreVolume(_))) => Some((command.command_id, kind)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn backs_up_and_restores_an_apps_volumes_in_a_helper() {
+    let mut fixture = fixture(BackupTimings::default()).await;
+    let control = fixture.setup.control.clone();
+    let (admin, server, app) = (fixture.setup.admin.clone(), fixture.setup.server.id, fixture.setup.service.id);
+    let volume = |name: &str| crate::NewVolume { name: name.to_string(), mount_path: format!("/app/{name}") };
+    let uploads = control.create_volume(&admin, app, volume("uploads")).await.unwrap();
+    let destination = control.create_storage_destination(&admin, destination("Primary")).await.unwrap();
+
+    // Never deployed: its volume is on no server yet.
+    let early = control.create_backup(&admin, app, destination.id, None).await.unwrap();
+    control.advance_backups().await;
+    let early = control.get_backup(&admin, early.id).await.unwrap();
+
+    let live = crate::deployments::tests::deploy(&fixture.setup, &mut fixture.agent).await;
+    let container = ObservedInstance {
+        service_id: app,
+        deployment_id: live.id,
+        container_id: "web-container".to_string(),
+        status: InstanceStatus::Running,
+        health: InstanceHealth::None,
+        restart_count: 0,
+        started_at: None,
+    };
+    control.store().upsert_instance(server, container).await.unwrap();
+    let cache = control.create_volume(&admin, app, volume("cache")).await.unwrap();
+    let unnamed = control.create_backup(&admin, app, destination.id, None).await;
+    let other = VolumeId::new();
+    let not_its = control.create_backup(&admin, app, destination.id, Some(other)).await;
+    let backup = control.create_backup(&admin, app, destination.id, Some(uploads.id)).await.unwrap();
+    control.advance_backups().await;
+    let sent = volume_commands(&mut fixture.agent);
+    control.backup_result(server, result(&sent[0].0, uploaded(2048))).await;
+    let backup = control.get_backup(&admin, backup.id).await.unwrap();
+
+    assert_eq!(early.status, BackupStatus::Failed);
+    assert_eq!(early.error.as_deref(), Some("the service has never run, so its volumes aren't on any server yet"));
+    assert!(matches!(unnamed, Err(ControlError::Invalid { field: "volume_id", .. })), "{unnamed:?}");
+    assert!(matches!(not_its, Err(ControlError::Invalid { field: "volume_id", .. })), "{not_its:?}");
+    match &sent[..] {
+        [(_, Kind::BackupVolume(command))] => {
+            assert_eq!((command.volume_id.as_str(), command.service_id.as_str()), (&*uploads.id.to_string(), &*app.to_string()));
+            assert_eq!(command.image, spinikus_core::backup::HELPER_IMAGE);
+            assert_eq!(command.command, spinikus_core::backup::volume_archive_command());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!((backup.status, backup.volume_id, backup.engine), (BackupStatus::Succeeded, Some(uploads.id), None));
+    assert!(backup.object_key.ends_with(".tar.gz"), "{}", backup.object_key);
+
+    // Restoring: a safety backup of the same volume first, then the archive goes back with
+    // the app's container stopped meanwhile.
+    let restore = control.restore_backup(&admin, backup.id).await.unwrap();
+    control.advance_backups().await;
+    let safety = volume_commands(&mut fixture.agent);
+    control.backup_result(server, result(&safety[0].0, uploaded(4096))).await;
+    control.advance_backups().await;
+    let restoring = volume_commands(&mut fixture.agent);
+    control.backup_result(server, result(&restoring[0].0, done())).await;
+    let restored = control.get_restore(&admin, restore.id).await.unwrap();
+    let safety_backup = control.get_backup(&admin, restore.safety_backup_id.unwrap()).await.unwrap();
+
+    assert!(matches!(&safety[..], [(_, Kind::BackupVolume(command))] if command.volume_id == uploads.id.to_string()));
+    assert_eq!(safety_backup.volume_id, Some(uploads.id));
+    match &restoring[..] {
+        [(id, Kind::RestoreVolume(command))] => {
+            assert_eq!(*id, format!("{}/restore", restore.id));
+            assert_eq!((command.container_id.as_str(), command.volume_id.clone()), ("web-container", uploads.id.to_string()));
+            assert_eq!(command.grace_period, Some(prost_types::Duration { seconds: 20, nanos: 0 }));
+            assert_eq!(command.command, spinikus_core::backup::volume_restore_command());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(restored.status, BackupStatus::Succeeded);
+
+    // A schedule backs up every volume each run; a deleted volume can't be restored into.
+    let schedule = control.create_backup_schedule(&admin, app, hourly(destination.id, 3)).await.unwrap();
+    let due = Timestamp::now() - jiff::SignedDuration::from_mins(1);
+    control.store().set_backup_schedule_next_run(schedule.id, Some(due)).await.unwrap();
+    control.advance_backups().await;
+    let mut scheduled: Vec<String> = volume_commands(&mut fixture.agent)
+        .into_iter()
+        .filter_map(|(_, kind)| match kind {
+            Kind::BackupVolume(command) => Some(command.volume_id),
+            _ => None,
+        })
+        .collect();
+    scheduled.sort();
+    control.delete_volume(&admin, uploads.id).await.unwrap();
+    let into_deleted = control.restore_backup(&admin, backup.id).await;
+
+    let mut expected = vec![uploads.id.to_string(), cache.id.to_string()];
+    expected.sort();
+    assert_eq!(scheduled, expected);
+    match into_deleted {
+        Err(ControlError::Rejected { problem, .. }) => assert!(problem.contains("its volume was deleted"), "{problem}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(control.get_backup(&admin, backup.id).await.unwrap().volume_id, Some(uploads.id), "kept with its volume gone");
 }
