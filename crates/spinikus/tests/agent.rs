@@ -1649,10 +1649,10 @@ async fn backs_up_and_restores_an_apps_volume_through_s3() {
     assert!(archive.stdout.starts_with(&[0x1f, 0x8b]), "gzip: {:?}", String::from_utf8_lossy(&archive.stderr));
     assert_eq!(backup.size_bytes, Some(archive.stdout.len() as u64));
     assert_eq!(restore.status, BackupStatus::Succeeded, "{restore:?}");
-    assert_eq!(after_restore, "before\n.dotfile note sub \nnested", "added files are gone, the rest as backed up");
+    assert_eq!(after_restore, "before\n.dotfile note sub nested", "added files are gone, the rest as backed up");
     assert!(restarted, "the app was stopped for the restore and started again");
     assert_eq!(undo.status, BackupStatus::Succeeded, "{undo:?}");
-    assert_eq!(after_undo, "after\n.dotfile added note sub \nnested");
+    assert_eq!(after_undo, "after\n.dotfile added note sub nested");
     assert!(String::from_utf8_lossy(&helpers.stdout).trim().is_empty(), "helpers are removed");
     assert_eq!(live, DeploymentStatus::Live);
 }
