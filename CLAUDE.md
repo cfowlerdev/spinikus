@@ -56,6 +56,7 @@ The OpenAPI document (utoipa 6, utoipa-axum): `routes::v1()`/`hooks()` are `Open
 ### Store conventions
 
 Each entity gets a repository trait in `spinikus-store` (methods named after the entity, e.g. `create_project`, since `SqliteStore` implements them all) with:
+
 - soft delete (`deleted_at`) for projects, environments, services and domains, with slugs and hostnames unique only among non-deleted rows; creating under a deleted parent is `NotFound`, deleting a parent with active children is `HasChildren`;
 - a `revision` column bumped on every user-facing update, and updates that take the expected revision (`RevisionMismatch` otherwise);
 - cursor pagination by ID; IDs come from a process-wide monotonic ULID generator, so they sort in creation order;
@@ -67,6 +68,7 @@ Each entity gets a repository trait in `spinikus-store` (methods named after the
 ## Commands
 
 ```sh
+cargo clean                          # clean the target directory before building
 cargo build                          # build the whole workspace
 cargo check --workspace
 cargo test --workspace               # all tests
@@ -99,6 +101,7 @@ Planned but not yet present (per the design doc): `deny.toml`, `[workspace.lints
 ## Architecture
 
 One binary, two runtime roles:
+
 - **Control plane** owns state and decisions: service layer, reconciler (desired state in DB vs. state reported by agents), durable deployment state machine, job queue, internal CA/enrollment, SSE event stream.
 - **Agent** owns containers, builds and traffic on one server: runtime driver (bollard), builder (Dockerfile/Compose via runtime, Railpack for auto-detect), hyper+rustls proxy with ACME, reporter.
 
@@ -106,17 +109,17 @@ Agents **dial out** to the control plane over a long-lived mTLS gRPC stream (`sp
 
 ### Crate dependency rules (enforced by crate boundaries — keep them)
 
-| Crate | Role | Internal deps |
-| --- | --- | --- |
-| `spinikus-proto` | `.proto` + generated code | none |
-| `spinikus-core` | domain types, prefixed ULID IDs, deployment state machine as pure logic, `spinikus.json`/`spinikus.toml` schemas; **no I/O** | none |
-| `spinikus-store` | repository traits, SQLite (sqlx) impl, migrations, envelope encryption | core |
-| `spinikus-control` | control plane (see above) | core, store, proto |
-| `spinikus-api` | Axum JSON API under `/api/v1`, auth, OpenAPI | control |
-| `spinikus-web` | Maud + HTMX (SSE) UI, embedded vendored assets | control |
-| `spinikus-proxy` | proxy, route table, SNI resolver, ACME | core |
-| `spinikus-agent` | runtime trait, builder, command handlers, local persistence | core, proto, proxy |
-| `spinikus` | binary: clap CLI, hand-written API client, wiring | all |
+| Crate              | Role                                                                                                                         | Internal deps      |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `spinikus-proto`   | `.proto` + generated code                                                                                                    | none               |
+| `spinikus-core`    | domain types, prefixed ULID IDs, deployment state machine as pure logic, `spinikus.json`/`spinikus.toml` schemas; **no I/O** | none               |
+| `spinikus-store`   | repository traits, SQLite (sqlx) impl, migrations, envelope encryption                                                       | core               |
+| `spinikus-control` | control plane (see above)                                                                                                    | core, store, proto |
+| `spinikus-api`     | Axum JSON API under `/api/v1`, auth, OpenAPI                                                                                 | control            |
+| `spinikus-web`     | Maud + HTMX (SSE) UI, embedded vendored assets                                                                               | control            |
+| `spinikus-proxy`   | proxy, route table, SNI resolver, ACME                                                                                       | core               |
+| `spinikus-agent`   | runtime trait, builder, command handlers, local persistence                                                                  | core, proto, proxy |
+| `spinikus`         | binary: clap CLI, hand-written API client, wiring                                                                            | all                |
 
 - `api` and `web` never depend on each other; both are thin layers over the shared service layer in `control`, so the UI can never do something the API can't.
 - `agent` and `control` never depend on each other; they share only `proto`.
@@ -128,7 +131,7 @@ Internal crates are referenced via `[workspace.dependencies]` (`spinikus-core.wo
 ### Key design invariants
 
 - `spinikus.toml` is instance config only (data dir/DB, listen addresses, log level, master key source). Everything else lives in the database and is managed via API/UI.
-- Per-repo `spinikus.json` holds only settings that change with the code version (build, runtime, health check, env var *names*, cron, monorepo `apps`). Never domains, secret values, placement or credentials. When it sets a field, the file wins over the DB.
+- Per-repo `spinikus.json` holds only settings that change with the code version (build, runtime, health check, env var _names_, cron, monorepo `apps`). Never domains, secret values, placement or credentials. When it sets a field, the file wins over the DB.
 - Desired state and observed state live in separate tables; agents write only observed state.
 - Deployments are immutable records with a config snapshot. States: `queued → preparing → releasing → starting → verifying → live → draining → superseded`, plus terminal `failed` (with reason code) and `canceled`. Each transition writes a deployment-event row in the same transaction. Rollback = new deployment reusing an old image + snapshot, starting at `starting`.
 - IDs are prefixed ULIDs (`svc_…`, `srv_…`); cursor pagination uses the ID.
