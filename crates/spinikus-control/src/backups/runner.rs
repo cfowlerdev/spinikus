@@ -453,8 +453,24 @@ impl Control {
 
     async fn fail_backup(&self, backup: &Backup, problem: &str) -> Result<(), ControlError> {
         tracing::warn!(backup = %backup.id, problem, "backup failed");
-        self.store().finish_backup(backup.id, Err(problem.to_string())).await?;
+        if self.store().finish_backup(backup.id, Err(problem.to_string())).await? {
+            self.notify_backup_failed(backup, problem).await;
+        }
         Ok(())
+    }
+
+    async fn notify_backup_failed(&self, backup: &Backup, problem: &str) {
+        let (subject, mut details) = self.service_subject(backup.service_id).await;
+        details.insert("backup_id".to_string(), backup.id.to_string());
+        let what = if backup.schedule_id.is_some() { "A scheduled backup" } else { "A backup" };
+        self.notify(spinikus_core::notification::Message {
+            event: spinikus_core::notification::NotificationEvent::BackupFailed,
+            title: format!("{what} of {subject} failed"),
+            text: problem.to_string(),
+            path: Some(format!("/services/{}/backups", backup.service_id)),
+            details,
+        })
+        .await;
     }
 
     async fn fail_restore(&self, restore: &Restore, problem: &str) -> Result<(), ControlError> {
@@ -499,7 +515,14 @@ impl Control {
                     Ok(size) => tracing::info!(backup = %id, size, "backup succeeded"),
                     Err(problem) => tracing::warn!(backup = %id, problem, "backup failed"),
                 }
-                self.store().finish_backup(id, outcome).await
+                let problem = outcome.as_ref().err().cloned();
+                let finished = self.store().finish_backup(id, outcome).await;
+                if let (Ok(true), Some(problem)) = (&finished, problem)
+                    && let Ok(backup) = self.store().get_backup(id).await
+                {
+                    self.notify_backup_failed(&backup, &problem).await;
+                }
+                finished.map(|_| ())
             }
             RunId::Restore(id) => {
                 let outcome = outcome.map(|_| ());
@@ -507,7 +530,7 @@ impl Control {
                     Ok(()) => tracing::info!(restore = %id, "restore succeeded"),
                     Err(problem) => tracing::warn!(restore = %id, problem, "restore failed"),
                 }
-                self.store().finish_restore(id, outcome).await
+                self.store().finish_restore(id, outcome).await.map(|_| ())
             }
         };
         if let Err(error) = recorded {

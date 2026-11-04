@@ -9,6 +9,7 @@ pub mod instance_backups;
 pub mod logs;
 pub mod manage;
 pub mod members;
+pub mod notifications;
 pub mod overview;
 pub mod palette;
 pub mod projects;

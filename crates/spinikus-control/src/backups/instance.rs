@@ -231,6 +231,18 @@ impl Control {
         }
     }
 
+    async fn notify_instance_backup_failed(&self, backup: &InstanceBackup, problem: &str) {
+        let what = if backup.scheduled { "A scheduled backup of Spinikus failed" } else { "A backup of Spinikus failed" };
+        self.notify(spinikus_core::notification::Message {
+            event: spinikus_core::notification::NotificationEvent::InstanceBackupFailed,
+            title: what.to_string(),
+            text: problem.to_string(),
+            path: Some("/settings/backups".to_string()),
+            details: std::collections::BTreeMap::from([("instance_backup_id".to_string(), backup.id.to_string())]),
+        })
+        .await;
+    }
+
     fn wake_instance_backups(&self) {
         self.instance_backups.wake.notify_one();
     }
@@ -242,9 +254,11 @@ impl Control {
             Err(error) => return tracing::error!(%error, "could not list instance backups"),
         };
         for backup in active.iter().filter(|backup| backup.status == BackupStatus::Running) {
-            let outcome = Err("Spinikus stopped while it ran".to_string());
-            if let Err(error) = self.store().finish_instance_backup(backup.id, outcome).await {
-                tracing::error!(backup = %backup.id, %error, "could not record an interrupted instance backup");
+            let problem = "Spinikus stopped while it ran";
+            match self.store().finish_instance_backup(backup.id, Err(problem.to_string())).await {
+                Ok(true) => self.notify_instance_backup_failed(backup, problem).await,
+                Ok(false) => {}
+                Err(error) => tracing::error!(backup = %backup.id, %error, "could not record an interrupted instance backup"),
             }
         }
     }
@@ -294,8 +308,14 @@ impl Control {
             Ok(size) => tracing::info!(backup = %backup.id, size, key = backup.object_key, "backed up the instance"),
             Err(error) => tracing::warn!(backup = %backup.id, %error, "an instance backup failed"),
         }
-        if let Err(error) = self.store().finish_instance_backup(backup.id, outcome).await {
-            return tracing::error!(backup = %backup.id, %error, "could not record an instance backup");
+        let problem = outcome.as_ref().err().cloned();
+        match self.store().finish_instance_backup(backup.id, outcome).await {
+            Ok(finished) => {
+                if let (true, Some(problem)) = (finished, problem) {
+                    self.notify_instance_backup_failed(backup, &problem).await;
+                }
+            }
+            Err(error) => return tracing::error!(backup = %backup.id, %error, "could not record an instance backup"),
         }
         if backup.scheduled
             && let Err(error) = self.apply_instance_backup_retention().await

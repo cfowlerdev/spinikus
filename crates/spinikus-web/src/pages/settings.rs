@@ -34,6 +34,7 @@ pub(super) enum SettingsTab {
     Servers,
     Storage,
     Backups,
+    Notifications,
     Users,
     AuditLog,
     Account,
@@ -48,6 +49,7 @@ pub(super) fn tabs(signed: &Signed, current: SettingsTab) -> Markup {
         tabs.push(("Servers", "/settings/servers".to_string(), current == SettingsTab::Servers));
         tabs.push(("Storage", "/settings/storage".to_string(), current == SettingsTab::Storage));
         tabs.push(("Backups", "/settings/backups".to_string(), current == SettingsTab::Backups));
+        tabs.push(("Notifications", "/settings/notifications".to_string(), current == SettingsTab::Notifications));
         tabs.push(("Users", "/settings/users".to_string(), current == SettingsTab::Users));
         tabs.push(("Audit log", "/settings/audit-log".to_string(), current == SettingsTab::AuditLog));
     }

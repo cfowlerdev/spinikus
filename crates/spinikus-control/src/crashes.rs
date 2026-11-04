@@ -15,9 +15,10 @@ use std::{
 
 use jiff::Timestamp;
 use spinikus_core::{
-    crash::{Assessment, CrashLoop, CrashRules, Watch},
+    crash::{Assessment, CrashLoop, CrashReason, CrashRules, Watch},
     id::{CrashLoopId, DeploymentId, EnvironmentId, ServerId, ServiceId},
     membership::Role,
+    notification::{Message, NotificationEvent},
     server::Instance,
 };
 use spinikus_store::{
@@ -171,6 +172,13 @@ impl Control {
                     };
                     let crash = self.store().create_crash_loop(new).await?;
                     tracing::warn!(service = %crash.service_id, deployment = %deployment.id, reason = %reason, restarts, "a service is crashing");
+                    let what = match reason {
+                        CrashReason::Restarting => format!("Its container was restarted {restarts} times in a short while."),
+                        CrashReason::NotRunning => "Its container isn't running.".to_string(),
+                    };
+                    let text = format!("{what} Its logs usually say why; fix it and deploy, or roll back.");
+                    let path = format!("/services/{}/logs?deployment_id={}", crash.service_id, deployment.id);
+                    self.notify_crash(&crash, NotificationEvent::ServiceCrashing, "is crashing", text, path).await;
                 }
                 (Assessment::Crashing { reason, .. }, Some(crash)) => {
                     // After the control plane starts, carry on from what the loop counted.
@@ -184,6 +192,10 @@ impl Control {
                     watched.baseline = None;
                     self.store().end_crash_loop(crash.id).await?;
                     tracing::info!(service = %crash.service_id, deployment = %deployment.id, "a service has recovered");
+                    let minutes = rules.recovered_after.as_secs() / 60;
+                    let text = format!("Its container has run for {minutes} minutes without a restart.");
+                    let path = format!("/services/{}", crash.service_id);
+                    self.notify_crash(&crash, NotificationEvent::ServiceRecovered, "has recovered", text, path).await;
                 }
                 (Assessment::Healthy | Assessment::Unsure, None) | (Assessment::Unsure, Some(_)) => {}
             }
@@ -202,6 +214,16 @@ impl Control {
             self.store().prune_crash_loops(now - KEEP_ENDED_FOR).await?;
         }
         Ok(())
+    }
+}
+
+impl Control {
+    async fn notify_crash(&self, crash: &CrashLoop, event: NotificationEvent, what: &str, text: String, path: String) {
+        let (subject, mut details) = self.service_subject(crash.service_id).await;
+        details.insert("deployment_id".to_string(), crash.deployment_id.to_string());
+        details.insert("crash_loop_id".to_string(), crash.id.to_string());
+        let message = Message { event, title: format!("{subject} {what}"), text, path: Some(path), details };
+        self.notify(message).await;
     }
 }
 

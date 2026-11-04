@@ -1082,6 +1082,91 @@ async fn instance_admins_manage_storage_destinations() {
 }
 
 #[tokio::test]
+async fn instance_admins_manage_notification_channels() {
+    use spinikus_core::notification::{ChannelSettings, NotificationEvent};
+    use spinikus_store::NotificationRepository;
+
+    let web = Web::new().await;
+    shop_with_team(&web).await;
+    let ada = web.sign_in("ada%40example.com").await;
+    let dev = web.sign_in("dev%40example.com").await;
+    let page = web.get("/settings/notifications", Some(&ada)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("No notification channels yet.") && page.body.contains(r#"id="channel-kind-email""#));
+    let token = page.csrf();
+    assert_eq!(web.get("/settings/notifications", Some(&dev)).await.status, StatusCode::FORBIDDEN);
+
+    let secret = "https://hooks.slack.com/services/T0/B0/s3cr3t";
+    let slack = |name: &str, secret: &str| {
+        form(&[
+            ("_csrf", &token),
+            ("name", name),
+            ("kind", "slack"),
+            ("slack_url", secret),
+            ("bot_token", "not-this-one"),
+            ("events", "deployment.failed"),
+            ("events", "service.crashing"),
+            ("enabled", "on"),
+        ])
+    };
+    let refused = web.post("/settings/notifications", Some(&ada), &slack("On-call", "")).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.body.contains("needs its webhook URL"), "{}", refused.body);
+    assert!(refused.body.contains(r#"value="On-call""#), "what was typed stays");
+    let no_events = form(&[("_csrf", &token), ("name", "Quiet"), ("kind", "slack"), ("slack_url", secret)]);
+    let refused = web.post("/settings/notifications", Some(&ada), &no_events).await;
+    assert!(refused.body.contains("Choose at least one event") && !refused.body.contains("s3cr3t"));
+    assert_eq!(web.post("/settings/notifications", Some(&ada), &slack("On-call", secret)).await.status, StatusCode::SEE_OTHER);
+
+    let admin = web.control.authenticate_session(&ada).await.unwrap();
+    let channel = web.control.list_notification_channels(&admin).await.unwrap().remove(0);
+    assert_eq!(channel.fields.settings, ChannelSettings::Slack {});
+    assert_eq!(channel.fields.events, [NotificationEvent::DeploymentFailed, NotificationEvent::ServiceCrashing]);
+    assert_eq!(web.control.store().notification_channel_secret(channel.id).await.unwrap().unwrap().expose(), secret);
+    let page = web.get("/settings/notifications", Some(&ada)).await;
+    assert!(page.body.contains("On-call") && page.body.contains("2 events") && !page.body.contains("s3cr3t"));
+
+    // Editing keeps the secret when it is left empty; every event checked is every event.
+    let edit = format!("/settings/notifications/{}", channel.id);
+    let edit_page = web.get(&edit, Some(&ada)).await;
+    assert!(edit_page.body.contains("Nothing sent to this channel yet.") && !edit_page.body.contains("s3cr3t"));
+    assert!(edit_page.body.contains(r#"id="channel-kind-slack" type="radio" name="kind" value="slack" checked"#));
+    let mut every = vec![("_csrf", token.as_str()), ("name", "Team"), ("kind", "slack"), ("slack_url", "")];
+    every.extend(NotificationEvent::ALL.iter().map(|event| ("events", event.as_str())));
+    let revision = channel.revision.to_string();
+    every.push(("revision", &revision));
+    assert_eq!(web.post(&edit, Some(&ada), &form(&every)).await.status, StatusCode::SEE_OTHER);
+    let updated = web.control.get_notification_channel(&admin, channel.id).await.unwrap();
+    assert_eq!((updated.fields.name.as_str(), updated.fields.events.is_empty(), updated.fields.enabled), ("Team", true, false));
+    assert!(updated.has_secret);
+    let stale = web.post(&edit, Some(&ada), &form(&every)).await;
+    assert!(stale.body.contains("Someone changed this"));
+
+    // A webhook nothing listens on: the test says it wasn't delivered.
+    let revision = updated.revision.to_string();
+    let webhook = form(&[
+        ("_csrf", &token),
+        ("name", "Hook"),
+        ("kind", "webhook"),
+        ("url", "http://127.0.0.1:9/hook"),
+        ("events", "backup.failed"),
+        ("enabled", "on"),
+        ("revision", &revision),
+    ]);
+    assert_eq!(web.post(&edit, Some(&ada), &webhook).await.status, StatusCode::SEE_OTHER);
+    let updated = web.control.get_notification_channel(&admin, channel.id).await.unwrap();
+    assert!(!updated.has_secret, "a new kind drops the old secret");
+    let tested = web.post(&format!("{edit}/test"), Some(&ada), &format!("_csrf={token}")).await;
+    assert_eq!(tested.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(tested.body.contains("Hook: The test was not delivered"), "{}", tested.body);
+    assert_eq!(tested.header("hx-replace-url"), Some("/settings/notifications"));
+
+    let deleted = web.post(&format!("{edit}/delete"), Some(&ada), &format!("_csrf={token}")).await;
+    assert_eq!(deleted.status, StatusCode::SEE_OTHER);
+    assert!(web.control.list_notification_channels(&admin).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn creates_databases_and_backs_them_up_and_restores_them() {
     use spinikus_control::NewStorageDestination;
     use spinikus_core::{backup::BackupStatus, server::ServerFields};

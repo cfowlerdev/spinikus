@@ -33,6 +33,7 @@
 - [Users, roles and API tokens](operating/access.md)
 - [Settings](operating/settings.md)
 - [Backing up Spinikus](operating/instance-backups.md)
+- [Notifications](operating/notifications.md)
 - [Upgrading and uninstalling](operating/upgrading.md)
 - [Configuration file](operating/configuration.md)
 - [Security](operating/security.md)

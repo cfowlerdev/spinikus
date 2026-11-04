@@ -9,6 +9,7 @@ async-trait.workspace = true
 croner.workspace = true
 instant-acme.workspace = true
 jiff.workspace = true
+lettre.workspace = true
 object_store.workspace = true
 reqwest.workspace = true
 prost-types.workspace = true

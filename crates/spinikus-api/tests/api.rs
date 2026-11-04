@@ -904,3 +904,57 @@ async fn instance_admins_schedule_backups_of_the_instance() {
     let denied = api.send(Method::GET, "/api/v1/instance-backups", Some(&grace), &[], None).await;
     assert_eq!(denied.status, StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn instance_admins_manage_notification_channels() {
+    let api = Api::new().await;
+    let bearer = api.admin_token().await;
+    let token = Some(bearer.as_str());
+    let channels = "/api/v1/notification-channels";
+
+    let new = json!({
+        "name": "Ops", "settings": { "kind": "discord" }, "events": ["deployment.failed", "service.crashing"],
+        "secret": "https://discord.com/api/webhooks/1/token",
+    });
+    let created = api.send(Method::POST, channels, token, &[], Some(new)).await;
+    let location = created.header(header::LOCATION).to_string();
+    let no_secret =
+        api.send(Method::POST, channels, token, &[], Some(json!({ "name": "X", "settings": { "kind": "slack" } }))).await;
+    let unknown_event = api
+        .send(
+            Method::POST,
+            channels,
+            token,
+            &[],
+            Some(json!({ "name": "X", "settings": { "kind": "slack" }, "events": ["nope"] })),
+        )
+        .await;
+    let email = json!({
+        "name": "Mail",
+        "settings": {
+            "kind": "email", "host": "smtp.example.com", "port": 587, "security": "starttls",
+            "username": "spinikus", "from": "spinikus@example.com", "to": ["ops@example.com"]
+        },
+        "secret": "password", "enabled": false,
+    });
+    let mail = api.send(Method::POST, channels, token, &[], Some(email)).await;
+    let listed = api.send(Method::GET, channels, token, &[], None).await;
+    let to_webhook = json!({ "settings": { "kind": "webhook", "url": "https://example.com/hook" }, "secret": null });
+    let changed = api.send(Method::PATCH, &location, token, &[(header::IF_MATCH, "\"1\"")], Some(to_webhook)).await;
+    let sent = api.send(Method::GET, &format!("{location}/notifications"), token, &[], None).await;
+    let deleted = api.send(Method::DELETE, &location, token, &[], None).await;
+
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert_eq!(created.body["settings"], json!({ "kind": "discord" }));
+    assert_eq!(created.body["has_secret"], true);
+    assert!(!created.body.to_string().contains("token"), "{}", created.body);
+    assert_eq!((no_secret.status, &no_secret.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("secret")));
+    assert_eq!((unknown_event.status, &unknown_event.body["code"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("invalid_body")));
+    assert_eq!((mail.status, &mail.body["enabled"], &mail.body["events"]), (StatusCode::CREATED, &json!(false), &json!([])));
+    assert!(!mail.body.to_string().contains("password\""), "{}", mail.body);
+    assert_eq!(listed.body.as_array().unwrap().len(), 2);
+    assert_eq!((changed.status, &changed.body["has_secret"]), (StatusCode::OK, &json!(false)));
+    assert_eq!(changed.header(header::ETAG), "\"2\"");
+    assert_eq!((sent.status, &sent.body["items"]), (StatusCode::OK, &json!([])));
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+}

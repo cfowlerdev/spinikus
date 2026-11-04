@@ -48,6 +48,7 @@ const TAGS: &[(&str, &str)] = &[
     ("domains", "A service's custom domains."),
     ("backups", "Storage destinations, backup schedules, database backups and restores."),
     ("instance-backups", "Backups of Spinikus itself."),
+    ("notifications", "Notification channels (webhook, Slack, Discord, Telegram, email) and what was sent to them."),
     ("settings", "Instance settings."),
     ("servers", "Servers and their agents' enrollment."),
     ("audit-log", "Who changed what."),

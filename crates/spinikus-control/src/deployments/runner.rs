@@ -322,6 +322,17 @@ impl Control {
         let failed = DeploymentStatus::Failed;
         self.store().transition_deployment(deployment.id, failed, Some(reason), Some(problem), actor).await?;
         self.log_line(deployment.id, &format!("failed ({reason}): {problem}")).await;
+        let (subject, mut details) = self.service_subject(deployment.service_id).await;
+        details.insert("deployment_id".to_string(), deployment.id.to_string());
+        details.insert("reason".to_string(), reason.to_string());
+        self.notify(spinikus_core::notification::Message {
+            event: spinikus_core::notification::NotificationEvent::DeploymentFailed,
+            title: format!("A deployment of {subject} failed"),
+            text: format!("{reason}: {problem}"),
+            path: Some(format!("/deployments/{}", deployment.id)),
+            details,
+        })
+        .await;
         Ok(())
     }
 

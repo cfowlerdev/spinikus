@@ -70,6 +70,10 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
         let (control, shutdown) = (control.clone(), until(stopped.clone()));
         tokio::spawn(async move { control.run_instance_backups(shutdown).await })
     };
+    let notifications = {
+        let (control, shutdown) = (control.clone(), until(stopped.clone()));
+        tokio::spawn(async move { control.run_notifications(shutdown).await })
+    };
     let agents = spinikus_control::agents::serve(control, agent_listener, until(stopped));
     tracing::info!(dashboard = %format!("http://{http_address}/"), "Server started");
 
@@ -97,6 +101,7 @@ pub async fn run(config: &SpinikusConfig, args: ServerRunArgs) -> anyhow::Result
     let _ = certificates.await;
     let _ = backups.await;
     let _ = instance_backups.await;
+    let _ = notifications.await;
     if let Some(embedded) = embedded {
         let _ = embedded.await;
     }

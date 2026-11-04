@@ -16,7 +16,7 @@ mod challenges;
 mod tests;
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     future::Future,
     sync::Arc,
     time::Duration,
@@ -27,6 +27,7 @@ use spinikus_core::{
     certificate::{Certificate, HostnameCertificate, NewAcmeAccount, NewCertificate},
     domain::Hostname,
     id::{CertificateId, ServerId},
+    notification::{Message, NotificationEvent},
     route::Route,
 };
 use spinikus_proto::agent::v1::{self as pb, control_message};
@@ -72,13 +73,25 @@ pub(crate) struct Certificates {
     challenges: Challenges,
     /// The certificates revision last sent to each server's agent, and when.
     sent: Mutex<HashMap<ServerId, (u64, Instant)>>,
+    /// Certificates already reported as expiring soon, so each is reported once.
+    expiring: std::sync::Mutex<HashSet<(Hostname, CertificateId)>>,
 }
 
 impl Certificates {
     pub(crate) fn new(acme: Arc<dyn AcmeClient>, timings: CertificateTimings) -> Self {
-        Self { acme, timings, wake: Notify::new(), challenges: Challenges::default(), sent: Mutex::default() }
+        Self {
+            acme,
+            timings,
+            wake: Notify::new(),
+            challenges: Challenges::default(),
+            sent: Mutex::default(),
+            expiring: std::sync::Mutex::default(),
+        }
     }
 }
+
+/// How close to expiring a certificate is reported, if it hasn't been renewed.
+const EXPIRING_WITHIN: SignedDuration = SignedDuration::from_hours(14 * 24);
 
 /// Hostnames that can get a certificate: public names, not wildcards.
 fn certifiable(hostname: &Hostname) -> bool {
@@ -134,10 +147,15 @@ impl Control {
         for hostname in hostnames {
             let record = records.get(&hostname);
             let now = Timestamp::now();
+            let current = record.and_then(|record| record.certificate_id).and_then(|id| certificates.get(&id));
+            if let Some(certificate) = current
+                && certificate.not_after - EXPIRING_WITHIN <= now
+            {
+                self.notify_expiring(&hostname, certificate, record.and_then(|record| record.last_error.as_deref())).await;
+            }
             if record.and_then(|record| record.retry_at).is_some_and(|retry_at| retry_at > now) {
                 continue;
             }
-            let current = record.and_then(|record| record.certificate_id).and_then(|id| certificates.get(&id));
             if current.is_some_and(|certificate| certificate.renewal_due() > now) {
                 continue;
             }
@@ -163,9 +181,48 @@ impl Control {
                 let retry_at = Timestamp::now() + SignedDuration::try_from(delay).expect("delays fit");
                 tracing::warn!(%hostname, %error, retry_in = ?delay, "failed to get a certificate");
                 self.store().record_certificate_failure(hostname, &error.0, retry_at).await?;
+                // Once per run of failures: it is retried with backoff, often.
+                if failures == 0 {
+                    self.notify(Message {
+                        event: NotificationEvent::CertificateFailed,
+                        title: format!("No HTTPS certificate for {hostname}"),
+                        text: format!(
+                            "Getting one failed: {}\n\nCheck that its DNS points at the server and that port 80 is open. \
+                             Spinikus keeps trying.",
+                            error.0
+                        ),
+                        path: None,
+                        details: BTreeMap::from([("hostname".to_string(), hostname.to_string())]),
+                    })
+                    .await;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Reports a certificate that expires within [`EXPIRING_WITHIN`], once.
+    async fn notify_expiring(&self, hostname: &Hostname, certificate: &Certificate, last_error: Option<&str>) {
+        let key = (hostname.clone(), certificate.id);
+        if !self.certificates().expiring.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(key) {
+            return;
+        }
+        let renewal = match last_error {
+            Some(error) => format!("Renewing it failed: {error}"),
+            None => "It hasn't been renewed yet.".to_string(),
+        };
+        let expires = certificate.not_after.round(jiff::Unit::Second).unwrap_or(certificate.not_after);
+        self.notify(Message {
+            event: NotificationEvent::CertificateExpiring,
+            title: format!("The HTTPS certificate for {hostname} expires {expires}"),
+            text: format!("{renewal} Spinikus keeps trying; once it expires, browsers refuse the site."),
+            path: None,
+            details: BTreeMap::from([
+                ("hostname".to_string(), hostname.to_string()),
+                ("certificate_id".to_string(), certificate.id.to_string()),
+            ]),
+        })
+        .await;
     }
 
     async fn order_certificate(&self, settings: &AcmeSettings, hostname: &Hostname) -> Result<NewCertificate, AcmeError> {

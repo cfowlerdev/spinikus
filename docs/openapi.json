@@ -5217,6 +5217,337 @@
         }
       }
     },
+    "/api/v1/notification-channels": {
+      "get": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Lists the notification channels, for instance admins.",
+        "operationId": "notifications_list",
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NotificationChannel"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Creates a notification channel.",
+        "operationId": "notifications_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationsCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The revision, for `If-Match`."
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Where the new resource is."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationChannel"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notification-channels/{id}": {
+      "get": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Gets a notification channel.",
+        "operationId": "notifications_show",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NotificationChannelId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The revision, for `If-Match`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationChannel"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Deletes a notification channel and what was sent to it.",
+        "operationId": "notifications_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NotificationChannelId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Done."
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Updates a notification channel.",
+        "operationId": "notifications_update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NotificationChannelId"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The revision this update expects, as the resource's `ETag` gave it, such as `\"3\"`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The revision, for `If-Match`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationChannel"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notification-channels/{id}/test": {
+      "post": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Sends a test message to the channel now, enabled or not.",
+        "description": "Sends a test message to the channel now, enabled or not. `204` if it was delivered; a `rejected` problem says what went wrong.",
+        "operationId": "notifications_test",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NotificationChannelId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Done."
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notification-channels/{id}/notifications": {
+      "get": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "What was sent to the channel, or is waiting to be, newest first.",
+        "description": "What was sent to the channel, or is waiting to be, newest first. Kept for 30 days.",
+        "operationId": "notifications_list_sent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NotificationChannelId"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "The `next_cursor` of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many items, 50 by default and at most 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageBody_Notification"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/settings/{key}": {
       "get": {
         "tags": [
@@ -6024,6 +6355,153 @@
           "crt_01J9ZX4Q8V6T3N2M1K0H9G8F7E"
         ],
         "pattern": "^crt_[0-9A-HJKMNP-TV-Z]{26}$"
+      },
+      "ChannelFields": {
+        "type": "object",
+        "description": "What a user sets on a channel, besides its secret.",
+        "required": [
+          "name",
+          "settings",
+          "events",
+          "enabled"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/ChannelSettings"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotificationEvent"
+            },
+            "description": "The events it gets; every event if empty."
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ChannelSettings": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A JSON `POST` to `url`, signed with the secret if there is one.",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "url": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "webhook"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A Slack incoming webhook (the secret is its URL).",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "slack"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A Discord webhook (the secret is its URL).",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "discord"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A Telegram bot's message to a chat (the secret is the bot's token).",
+            "required": [
+              "chat_id",
+              "kind"
+            ],
+            "properties": {
+              "chat_id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "telegram"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Email over SMTP (the secret is the password, if the server needs one).",
+            "required": [
+              "host",
+              "port",
+              "security",
+              "from",
+              "to",
+              "kind"
+            ],
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "security": {
+                "$ref": "#/components/schemas/SmtpSecurity"
+              },
+              "username": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "email"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How to reach a channel, by kind. The secret each kind takes is in [`ChannelKind::secret`]."
       },
       "CrashLoop": {
         "type": "object",
@@ -7470,6 +7948,241 @@
           "/app/uploads"
         ]
       },
+      "Notification": {
+        "type": "object",
+        "description": "A message queued for one channel, and how sending it went.",
+        "required": [
+          "id",
+          "channel_id",
+          "event",
+          "title",
+          "text",
+          "details",
+          "status",
+          "attempts",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/NotificationId"
+          },
+          "channel_id": {
+            "$ref": "#/components/schemas/NotificationChannelId"
+          },
+          "event": {
+            "$ref": "#/components/schemas/NotificationEvent"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A link to the dashboard, when its domain is set."
+          },
+          "details": {
+            "type": "object"
+          },
+          "status": {
+            "$ref": "#/components/schemas/NotificationStatus"
+          },
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last attempt failed."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "next_attempt_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it is tried next, while queued."
+          },
+          "sent_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "NotificationChannel": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ChannelFields"
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "has_secret",
+              "revision",
+              "created_at",
+              "updated_at"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/NotificationChannelId"
+              },
+              "has_secret": {
+                "type": "boolean"
+              },
+              "revision": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "updated_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        ],
+        "description": "A place notifications go. Its secret (a webhook URL with a token in it, a bot token, a\npassword or a signing key) is write-only: only whether it has one is shown."
+      },
+      "NotificationChannelId": {
+        "type": "string",
+        "description": "An ID: `ntc_` and a ULID, which sorts by creation time.",
+        "examples": [
+          "ntc_01J9ZX4Q8V6T3N2M1K0H9G8F7E"
+        ],
+        "pattern": "^ntc_[0-9A-HJKMNP-TV-Z]{26}$"
+      },
+      "NotificationEvent": {
+        "type": "string",
+        "description": "What a notification is about.",
+        "enum": [
+          "deployment.failed",
+          "service.crashing",
+          "service.recovered",
+          "backup.failed",
+          "instance_backup.failed",
+          "certificate.failed",
+          "certificate.expiring",
+          "server.disconnected",
+          "server.reconnected"
+        ]
+      },
+      "NotificationId": {
+        "type": "string",
+        "description": "An ID: `ntf_` and a ULID, which sorts by creation time.",
+        "examples": [
+          "ntf_01J9ZX4Q8V6T3N2M1K0H9G8F7E"
+        ],
+        "pattern": "^ntf_[0-9A-HJKMNP-TV-Z]{26}$"
+      },
+      "NotificationStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "sent",
+          "failed"
+        ]
+      },
+      "NotificationsCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "settings"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/ChannelSettings"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotificationEvent"
+            },
+            "description": "The events it gets; every event if omitted or empty."
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "On unless `false`."
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the kind needs: Slack's or Discord's webhook URL, Telegram's bot token, the SMTP\npassword, or the signing secret for a webhook. Write-only."
+          }
+        },
+        "additionalProperties": false
+      },
+      "NotificationsUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "settings": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChannelSettings",
+                "description": "Replaces the settings; a different kind drops the secret unless one is given."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "events": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/NotificationEvent"
+            }
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Replaces the secret; `null` removes it; omitted keeps it."
+          }
+        },
+        "additionalProperties": false
+      },
       "PageBody_Backup": {
         "type": "object",
         "description": "A page of a list: pass `next_cursor` as `after` to get the next one. It is `null` on the last page.",
@@ -7904,6 +8617,100 @@
                   "format": "date-time"
                 },
                 "finished_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PageBody_Notification": {
+        "type": "object",
+        "description": "A page of a list: pass `next_cursor` as `after` to get the next one. It is `null` on the last page.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A message queued for one channel, and how sending it went.",
+              "required": [
+                "id",
+                "channel_id",
+                "event",
+                "title",
+                "text",
+                "details",
+                "status",
+                "attempts",
+                "created_at"
+              ],
+              "properties": {
+                "id": {
+                  "$ref": "#/components/schemas/NotificationId"
+                },
+                "channel_id": {
+                  "$ref": "#/components/schemas/NotificationChannelId"
+                },
+                "event": {
+                  "$ref": "#/components/schemas/NotificationEvent"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "A link to the dashboard, when its domain is set."
+                },
+                "details": {
+                  "type": "object"
+                },
+                "status": {
+                  "$ref": "#/components/schemas/NotificationStatus"
+                },
+                "attempts": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why the last attempt failed."
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "next_attempt_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "description": "When it is tried next, while queued."
+                },
+                "sent_at": {
                   "type": [
                     "string",
                     "null"
@@ -8955,6 +9762,15 @@
         ],
         "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
       },
+      "SmtpSecurity": {
+        "type": "string",
+        "description": "How email reaches the SMTP server.",
+        "enum": [
+          "tls",
+          "starttls",
+          "none"
+        ]
+      },
       "Source": {
         "allOf": [
           {
@@ -9951,6 +10767,10 @@
     {
       "name": "instance-backups",
       "description": "Backups of Spinikus itself."
+    },
+    {
+      "name": "notifications",
+      "description": "Notification channels (webhook, Slack, Discord, Telegram, email) and what was sent to them."
     },
     {
       "name": "settings",

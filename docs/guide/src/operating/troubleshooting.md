@@ -67,7 +67,8 @@ usually say why: a missing variable, a database it can't reach, a wrong start co
 
 Fix the cause and deploy, or roll back to the previous deployment. The mark goes away once
 the container has run for 10 minutes without a restart, or when another deployment goes
-live. Stopping the service removes it too.
+live. Stopping the service removes it too. To hear about it as it happens, set up a
+[notification channel](notifications.md) for `service.crashing`.
 
 Nothing is done to the container while it crashes, apart from Docker's restarts. A server
 whose agent is disconnected keeps its marks as they were until it reconnects. The service's

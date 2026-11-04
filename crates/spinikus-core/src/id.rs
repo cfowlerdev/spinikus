@@ -116,6 +116,8 @@ define_id!(BackupId, "bkp");
 define_id!(RestoreId, "rst");
 define_id!(InstanceBackupId, "ibk");
 define_id!(CrashLoopId, "crl");
+define_id!(NotificationChannelId, "ntc");
+define_id!(NotificationId, "ntf");
 define_id!(
     /// A data key for envelope encryption of secrets.
     DataKeyId,

@@ -45,7 +45,7 @@ accepts for now. Report vulnerabilities privately to the maintainers rather than
   token and browsers send cookies with any site's WebSocket; the API's needs a bearer token.
   Messages from the client are limited to 64 KiB, terminals to 500 by 1000 characters.
 - **Secrets** (variables marked secret, deploy keys, storage credentials, webhook secrets,
-  certificates' keys, the instance backup passphrase) are encrypted with envelope
+  notification channels' secrets, certificates' keys, the instance backup passphrase) are encrypted with envelope
   encryption under the master key, which lives outside the database, and each is bound to
   its row. The API never returns them, except a reveal of a variable by a scope admin,
   which is audited. Build output is redacted of secret build variables.
@@ -59,6 +59,11 @@ accepts for now. Report vulnerabilities privately to the maintainers rather than
   only the `https`, `http` and `ssh` protocols.
 - **The proxy** times out TLS handshakes after 10 seconds and request headers after 30.
 - **Every change** a user makes is in the audit log, with the acting user or token.
+- **Notifications** go only to channels instance admins set up. Requests follow no
+  redirects and time out after 15 seconds; errors are recorded without the URL, since Slack
+  and Discord webhook URLs and Telegram's API URL hold the secret. Webhooks are signed with
+  HMAC-SHA256 when the channel has a signing secret. Email with STARTTLS refuses a server
+  that doesn't offer it.
 
 ## The first review (November 2026)
 
@@ -94,6 +99,10 @@ Fixed:
   dropped capabilities and resource limits are on the roadmap with service settings.
 - **Builds and apps can reach your private network**, including cloud metadata endpoints,
   like any process on the server. Restrict it with the host's firewall if that matters.
+- **Notification channels can point anywhere**, including the private network, like
+  storage destinations: an instance admin can make the control plane send requests to
+  any http(s) URL or SMTP server. Only instance admins manage them. Messages hold names
+  and failure reasons (which may quote a build or health check), never secret values.
 - **Runtime logs are not redacted**; an app that prints its secrets shows them to viewers.
 - **`X-Forwarded-For` is believed from any process on the same machine**, since that is
   where the proxy runs. Anything else on the host could set the address recorded for

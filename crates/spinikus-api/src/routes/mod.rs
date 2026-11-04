@@ -7,6 +7,7 @@ mod environments;
 mod hooks;
 mod instance_backups;
 mod members;
+mod notifications;
 mod projects;
 mod servers;
 mod service_logs;
@@ -89,6 +90,10 @@ pub fn v1() -> OpenApiRouter<Control> {
         .routes(routes!(instance_backups::show_schedule, instance_backups::put_schedule))
         .routes(routes!(instance_backups::list, instance_backups::create))
         .routes(routes!(instance_backups::show, instance_backups::delete))
+        .routes(routes!(notifications::list, notifications::create))
+        .routes(routes!(notifications::show, notifications::update, notifications::delete))
+        .routes(routes!(notifications::test))
+        .routes(routes!(notifications::list_sent))
         .routes(routes!(settings::show, settings::put))
         .routes(routes!(servers::list, servers::create))
         .routes(routes!(servers::show))

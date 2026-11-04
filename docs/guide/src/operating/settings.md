@@ -9,6 +9,7 @@ Instance admins manage the instance under **Settings**. Everyone else sees only 
 | **Servers**   | Servers and their agents (see [Servers](servers.md))                           |
 | **Storage**   | Storage destinations for backups (see [Backups and restores](../data/backups.md)) |
 | **Backups**   | Backups of Spinikus itself (see [Backing up Spinikus](instance-backups.md))   |
+| **Notifications** | Where messages about failures go (see [Notifications](notifications.md)) |
 | **Users**     | Users (see [Users, roles and API tokens](access.md))                           |
 | **Audit log** | Every change, by whom                                                          |
 | **Account**   | Your name and password                                                         |

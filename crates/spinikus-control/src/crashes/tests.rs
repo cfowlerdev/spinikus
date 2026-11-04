@@ -49,6 +49,14 @@ async fn restarts_begin_a_crash_loop_that_ends_once_the_container_runs_again() {
     let control = &setup.control;
     let (deployment, _agent) = live(&setup).await;
     let base = Timestamp::now();
+    let channel = crate::notifications::NewChannel {
+        name: "Ops".to_string(),
+        settings: spinikus_core::notification::ChannelSettings::Webhook { url: "http://127.0.0.1:9/".to_string() },
+        events: Vec::new(),
+        enabled: true,
+        secret: None,
+    };
+    let channel = control.create_notification_channel(&setup.admin, channel).await.unwrap();
 
     report(&setup, &deployment, InstanceStatus::Running, 0).await;
     control.watch_crashes_at(base).await.unwrap();
@@ -71,6 +79,13 @@ async fn restarts_begin_a_crash_loop_that_ends_once_the_container_runs_again() {
     assert_eq!((going_on.id, going_on.restarts), (begun.id, 5), "counted from before the loop began");
     assert_eq!(recovered.items.len(), 1);
     assert!(recovered.items[0].ended_at.is_some(), "{recovered:?}");
+    let notified = control.list_notifications(&setup.admin, channel.id, None, 10).await.unwrap().items;
+    let titles: Vec<_> = notified.iter().rev().map(|notification| notification.title.as_str()).collect();
+    assert_eq!(titles, ["shop/production/web is crashing", "shop/production/web has recovered"]);
+    assert_eq!(
+        notified[1].text,
+        "Its container was restarted 3 times in a short while. Its logs usually say why; fix it and deploy, or roll back."
+    );
 }
 
 #[tokio::test]
