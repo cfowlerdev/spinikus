@@ -59,6 +59,7 @@ pub fn v1() -> OpenApiRouter<Control> {
         .routes(routes!(deployments::restart))
         .routes(routes!(deployments::stop))
         .routes(routes!(deployments::start))
+        .routes(routes!(deployments::crash_loops))
         .routes(routes!(service_logs::show))
         .routes(routes!(terminals::open))
         .routes(routes!(deployments::show))

@@ -52,6 +52,27 @@ The most common causes:
   deployment's page.
 - **The app is slow to start.** Raise the health check's start period.
 
+## A service is marked crashing
+
+A **crashing** badge on a service, in its environment's list and on the project's page,
+means its live container keeps failing. It is marked when either is true:
+
+- **It was restarted 3 or more times within 10 minutes.** Docker restarts a container
+  whose process exits, waiting a little longer each time.
+- **It hasn't been running for over a minute**, or its server doesn't report it at all.
+
+The service's page says which, and since when, with a link to the container's logs, which
+usually say why: a missing variable, a database it can't reach, a wrong start command.
+`spinikus service show` says the same, and `spinikus logs` prints the logs.
+
+Fix the cause and deploy, or roll back to the previous deployment. The mark goes away once
+the container has run for 10 minutes without a restart, or when another deployment goes
+live. Stopping the service removes it too.
+
+Nothing is done to the container while it crashes, apart from Docker's restarts. A server
+whose agent is disconnected keeps its marks as they were until it reconnects. The service's
+past crash loops are listed at `GET /api/v1/services/{id}/crash-loops` and kept for 30 days.
+
 ## An app's address answers with an error
 
 The proxy answers with a short message:

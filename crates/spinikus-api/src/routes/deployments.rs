@@ -12,8 +12,9 @@ use serde::Deserialize;
 use serde_json::json;
 use spinikus_control::{Control, deployments::stream::DeploymentUpdate};
 use spinikus_core::{
+    crash::CrashLoop,
     deployment::{Deployment, DeploymentEvent},
-    id::{DeploymentId, ServiceId},
+    id::{CrashLoopId, DeploymentId, ServiceId},
     service::Service,
 };
 use tokio_stream::StreamExt;
@@ -210,6 +211,26 @@ pub async fn start(
     Path(service_id): Path<ServiceId>,
 ) -> Result<Json<Service>, ApiError> {
     Ok(Json(control.start_service(&principal, service_id).await?))
+}
+
+/// The service's crash loops, newest first: times its live container kept restarting or
+/// wasn't running. One with no `ended_at` is still going on.
+#[utoipa::path(
+    get,
+    path = "/services/{id}/crash-loops",
+    operation_id = "deployments_crash_loops",
+    tag = "deployments",
+    params(("id" = ServiceId, Path), crate::response::PageQuery),
+    responses((status = 200, body = PageBody<CrashLoop>)),
+)]
+pub async fn crash_loops(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+    Query(params): Query<PageParams<CrashLoopId>>,
+) -> Result<Json<PageBody<CrashLoop>>, ApiError> {
+    let page = control.list_crash_loops(&principal, service_id, params.after, params.limit()).await?;
+    Ok(PageBody::new(page, |crash| crash.id.to_string()))
 }
 
 /// Follows the deployment as server-sent events: `log` events (a line each, with the byte

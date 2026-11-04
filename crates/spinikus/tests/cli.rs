@@ -234,6 +234,10 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
     assert_eq!(stopped.code, 0, "{}", stopped.stderr);
     assert!(stopped.stderr.contains("Stopping shop/production/web"), "{}", stopped.stderr);
     assert_eq!(stopped.stdout, "web stopped. Start it with `spinikus start shop/production/web`.\n");
+    let shown = cli(&["service", "show"]).await;
+    assert!(shown.stdout.contains("State:    stopped ("), "{}", shown.stdout);
+    assert!(shown.stdout.contains("start it with `spinikus start shop/production/web`)"), "{}", shown.stdout);
+    assert!(!shown.stdout.contains("crashing"), "{}", shown.stdout);
     let restart_stopped = cli(&["restart"]).await;
     assert_eq!(restart_stopped.code, 6, "{}", restart_stopped.stderr);
     assert!(restart_stopped.stderr.contains("it is stopped; start it instead"), "{}", restart_stopped.stderr);

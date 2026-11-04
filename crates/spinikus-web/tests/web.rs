@@ -9,6 +9,7 @@ use http_body_util::BodyExt;
 use spinikus_control::{Control, NewEnvironment, NewProject, NewServer, NewService, password};
 use spinikus_core::{
     actor::Actor,
+    crash::CrashReason,
     deployment::DeploymentStatus,
     environment::EnvironmentKind,
     membership::{MembershipScope, Role},
@@ -18,7 +19,8 @@ use spinikus_core::{
     user::UserFields,
 };
 use spinikus_store::{
-    DeploymentRepository, MasterKey, MembershipRepository, ServiceRepository, SqliteStore, UserRepository, connect, migrate,
+    CrashLoopRepository, DeploymentRepository, MasterKey, MembershipRepository, NewCrashLoop, ServiceRepository, SqliteStore,
+    UserRepository, connect, migrate,
 };
 use tower::ServiceExt;
 
@@ -494,6 +496,26 @@ async fn deploys_follows_cancels_and_rolls_back() {
     assert!(environment.body.contains(">stopped</span>"), "{}", environment.body);
     assert_eq!(start.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(start.body.contains("no container on its server"), "{}", start.body);
+
+    // A crash loop marks the service and points at the container's logs.
+    control.store().set_service_stopped(web_app.id, false).await.unwrap();
+    let new = NewCrashLoop {
+        service_id: web_app.id,
+        deployment_id: second.id,
+        server_id: server.id,
+        reason: CrashReason::Restarting,
+        restarts: 4,
+    };
+    control.store().create_crash_loop(new).await.unwrap();
+    let crashing = web.get(&service_url, Some(&viewer)).await;
+    let listed = web.get(&format!("/environments/{}", production.id), Some(&viewer)).await;
+    let project = web.get(&format!("/projects/{}", shop.id), Some(&viewer)).await;
+
+    assert!(crashing.body.contains(">crashing</span>"), "{}", crashing.body);
+    assert!(crashing.body.contains("Its container keeps crashing: restarted 4 times since"), "{}", crashing.body);
+    assert!(crashing.body.contains(&format!("{service_url}/logs?deployment_id={}", second.id)), "{}", crashing.body);
+    assert_eq!(listed.body.matches(">crashing</span>").count(), 1, "{}", listed.body);
+    assert_eq!(project.body.matches(">crashing</span>").count(), 1, "{}", project.body);
 }
 
 /// A form body from its fields.

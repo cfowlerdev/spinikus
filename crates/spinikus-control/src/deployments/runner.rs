@@ -173,6 +173,7 @@ impl Control {
         if let Err(error) = self.clean_up_deployments(&mut sent, &uncleaned, &deleted).await {
             tracing::error!(%error, "failed to clean up deployments");
         }
+        self.watch_crashes().await;
     }
 
     /// Every deployment not cleaned up yet, after ending those of deleted services: one in

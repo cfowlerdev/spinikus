@@ -5,6 +5,7 @@ pub mod backup;
 pub mod build;
 pub mod certificate;
 pub mod config;
+pub mod crash;
 pub mod database;
 pub mod deployment;
 pub mod domain;

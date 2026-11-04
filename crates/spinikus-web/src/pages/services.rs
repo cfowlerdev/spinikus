@@ -11,6 +11,7 @@ use maud::{Markup, html};
 use serde::Deserialize;
 use spinikus_control::{Control, ControlError};
 use spinikus_core::{
+    crash::{CrashLoop, CrashReason},
     database::Engine,
     deployment::{Deployment, DeploymentStatus},
     id::{DeploymentId, ServiceId},
@@ -23,7 +24,10 @@ use super::{Tab, crumbs, parse_id, redirect, refused, service_tabs};
 use crate::{
     auth::Signed,
     error::WebError,
-    layout::{self, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, LINK, csrf_field, service_badge, status_badge, stopped_badge},
+    layout::{
+        self, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, LINK, crashing_badge, csrf_field, service_badge, status_badge,
+        stopped_badge,
+    },
 };
 
 /// How many deployments the history shows at a time.
@@ -209,6 +213,7 @@ async fn service_page(
     };
     let can_deploy = role >= Role::Developer;
     let stopped = service.stopped_at.is_some();
+    let crash = control.lasting_crash_loop(principal, id).await?;
     let placement = match service.server_id {
         Some(server) => html! { span class="font-mono" { (server) } },
         None => html! { "This machine (the embedded server)" },
@@ -223,6 +228,7 @@ async fn service_page(
             div {
                 h1 class="flex items-center gap-3 text-2xl font-semibold tracking-tight" {
                     (service.name) (service_badge(service.kind))
+                    @if crash.is_some() { (crashing_badge()) }
                     @if service.stopped_at.is_some() { (stopped_badge()) }
                 }
                 p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400" { (source_summary(source.as_ref())) }
@@ -260,6 +266,7 @@ async fn service_page(
         @if let Some(engine) = Engine::of(&service.config) { (super::databases::connection(&service, engine)) }
         section class="mb-8" {
             h2 class="mb-3 font-semibold" { "Running now" }
+            @if let Some(crash) = &crash { (crash_note(&service, crash)) }
             (current(live.as_ref(), service.stopped_at))
         }
         section class="mb-8" {
@@ -324,6 +331,24 @@ fn current(live: Option<&Deployment>, stopped_at: Option<jiff::Timestamp>) -> Ma
                 span class="ml-auto text-sm text-zinc-500 dark:text-zinc-400" { (deployment.id) }
             }
         },
+    }
+}
+
+/// Why the service is marked crashing, and where to look.
+fn crash_note(service: &Service, crash: &CrashLoop) -> Markup {
+    let what = match crash.reason {
+        CrashReason::Restarting => match crash.restarts {
+            1 => "Its container keeps crashing: restarted once".to_string(),
+            restarts => format!("Its container keeps crashing: restarted {restarts} times"),
+        },
+        CrashReason::NotRunning => "Its container isn't running".to_string(),
+    };
+    html! {
+        div role="alert" class="mb-3 rounded-md bg-red-50 px-4 py-3 text-sm text-red-700 ring-1 ring-red-600/10 ring-inset dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20" {
+            (what) " since " (layout::time(crash.started_at)) ". "
+            a href={ "/services/" (service.id) "/logs?deployment_id=" (crash.deployment_id) } class="font-medium underline" { "Its logs" }
+            " say why. Fix it and deploy, or roll back."
+        }
     }
 }
 

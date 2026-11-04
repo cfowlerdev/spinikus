@@ -53,6 +53,8 @@ pub struct Service {
     pub kind: String,
     #[serde(default)]
     pub server_id: Option<String>,
+    #[serde(default)]
+    pub stopped_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

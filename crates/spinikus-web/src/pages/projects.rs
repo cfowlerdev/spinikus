@@ -1,9 +1,11 @@
 //! A project with its environments, and an environment with its services.
 
+use std::collections::HashSet;
+
 use axum::extract::{Path, State};
 use maud::{Markup, html};
 use spinikus_control::Control;
-use spinikus_core::{membership::Role, service::Service};
+use spinikus_core::{id::ServiceId, membership::Role, service::Service};
 
 use super::{Tab, crumbs, environment_tabs, parse_id, project_tabs};
 use crate::{
@@ -22,7 +24,8 @@ pub async fn project(State(control): State<Control>, signed: Signed, Path(id): P
     let mut sections = Vec::with_capacity(environments.items.len());
     for environment in environments.items {
         let services = control.list_services(&signed.principal, environment.id, None, SERVICES_SHOWN).await?;
-        sections.push((environment, services.items, services.has_more));
+        let crashing = control.crashing_services(&signed.principal, environment.id).await?;
+        sections.push((environment, services.items, services.has_more, crashing));
     }
     let role = control.project_role(&signed.principal, &project).await?;
     let actions = html! {
@@ -37,7 +40,7 @@ pub async fn project(State(control): State<Control>, signed: Signed, Path(id): P
             (layout::empty("This project has no environments yet."))
         }
         div class="space-y-8" {
-            @for (environment, services, more) in &sections {
+            @for (environment, services, more, crashing) in &sections {
                 section {
                     div class="mb-3 flex items-center gap-2" {
                         h2 class="font-semibold" {
@@ -45,7 +48,7 @@ pub async fn project(State(control): State<Control>, signed: Signed, Path(id): P
                         }
                         (environment_badge(environment.kind))
                     }
-                    (service_list(services, "No services in this environment yet."))
+                    (service_list(services, crashing, "No services in this environment yet."))
                     @if *more {
                         div class="mt-3 text-sm" { a href={ "/environments/" (environment.id) } class=(LINK) { "All services" } }
                     }
@@ -60,6 +63,7 @@ pub async fn environment(State(control): State<Control>, signed: Signed, Path(id
     let environment = control.get_environment(&signed.principal, parse_id(&id)?).await?;
     let project = control.get_project(&signed.principal, environment.project_id).await?;
     let services = control.list_services(&signed.principal, environment.id, None, SERVICES_SHOWN).await?;
+    let crashing = control.crashing_services(&signed.principal, environment.id).await?;
     let subtitle = html! { span class="inline-flex items-center gap-2" { span class="font-mono" { (environment.slug) } (environment_badge(environment.kind)) } };
     let role = control.environment_role(&signed.principal, &environment).await?;
     let actions = html! {
@@ -78,14 +82,14 @@ pub async fn environment(State(control): State<Control>, signed: Signed, Path(id
         @if let Some(number) = environment.kind.pr_number() {
             (layout::notice(&super::manage::preview_note(number, base.as_ref())))
         }
-        (service_list(&services.items, "No services in this environment yet."))
+        (service_list(&services.items, &crashing, "No services in this environment yet."))
         (layout::next_page(services.has_more, services.items.last().map(|service| service.id.to_string())))
     };
     let title = format!("{} · {}", environment.name, project.name);
     Ok(layout::page(&signed, &title, &crumbs(&project, None), content))
 }
 
-fn service_list(services: &[Service], empty: &str) -> Markup {
+fn service_list(services: &[Service], crashing: &HashSet<ServiceId>, empty: &str) -> Markup {
     html! {
         @if services.is_empty() {
             (layout::empty(empty))
@@ -97,6 +101,7 @@ fn service_list(services: &[Service], empty: &str) -> Markup {
                             span class="font-medium" { (service.name) }
                             span class="font-mono text-xs text-zinc-500 dark:text-zinc-400" { (service.slug) }
                             span class="ml-auto flex gap-2" {
+                                @if crashing.contains(&service.id) { (layout::crashing_badge()) }
                                 @if service.stopped_at.is_some() { (layout::stopped_badge()) }
                                 (service_badge(service.kind))
                             }

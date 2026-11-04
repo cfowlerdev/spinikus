@@ -2651,6 +2651,68 @@
         }
       }
     },
+    "/api/v1/services/{id}/crash-loops": {
+      "get": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "The service's crash loops, newest first: times its live container kept restarting or wasn't running.",
+        "description": "The service's crash loops, newest first: times its live container kept restarting or wasn't running. One with no `ended_at` is still going on.",
+        "operationId": "deployments_crash_loops",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ServiceId"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "The `next_cursor` of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many items, 50 by default and at most 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageBody_CrashLoop"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/services/{id}/logs": {
       "get": {
         "tags": [
@@ -5963,6 +6025,75 @@
         ],
         "pattern": "^crt_[0-9A-HJKMNP-TV-Z]{26}$"
       },
+      "CrashLoop": {
+        "type": "object",
+        "description": "A time a live deployment's container was crashing.",
+        "required": [
+          "id",
+          "service_id",
+          "deployment_id",
+          "server_id",
+          "reason",
+          "restarts",
+          "started_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/CrashLoopId"
+          },
+          "service_id": {
+            "$ref": "#/components/schemas/ServiceId"
+          },
+          "deployment_id": {
+            "$ref": "#/components/schemas/DeploymentId"
+          },
+          "server_id": {
+            "$ref": "#/components/schemas/ServerId"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/CrashReason",
+            "description": "The latest reason; it can change while the loop lasts."
+          },
+          "restarts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How often the container was restarted from just before the loop began to the last\nreport.",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it recovered, or stopped mattering (another deployment went live, or the service\nwas stopped); `None` while it lasts."
+          }
+        }
+      },
+      "CrashLoopId": {
+        "type": "string",
+        "description": "An ID: `crl_` and a ULID, which sorts by creation time.",
+        "examples": [
+          "crl_01J9ZX4Q8V6T3N2M1K0H9G8F7E"
+        ],
+        "pattern": "^crl_[0-9A-HJKMNP-TV-Z]{26}$"
+      },
+      "CrashReason": {
+        "type": "string",
+        "enum": [
+          "restarting",
+          "not_running"
+        ]
+      },
       "CreateBackup": {
         "type": "object",
         "required": [
@@ -7434,6 +7565,78 @@
                     "null"
                   ],
                   "format": "date-time"
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PageBody_CrashLoop": {
+        "type": "object",
+        "description": "A page of a list: pass `next_cursor` as `after` to get the next one. It is `null` on the last page.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A time a live deployment's container was crashing.",
+              "required": [
+                "id",
+                "service_id",
+                "deployment_id",
+                "server_id",
+                "reason",
+                "restarts",
+                "started_at",
+                "updated_at"
+              ],
+              "properties": {
+                "id": {
+                  "$ref": "#/components/schemas/CrashLoopId"
+                },
+                "service_id": {
+                  "$ref": "#/components/schemas/ServiceId"
+                },
+                "deployment_id": {
+                  "$ref": "#/components/schemas/DeploymentId"
+                },
+                "server_id": {
+                  "$ref": "#/components/schemas/ServerId"
+                },
+                "reason": {
+                  "$ref": "#/components/schemas/CrashReason",
+                  "description": "The latest reason; it can change while the loop lasts."
+                },
+                "restarts": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "How often the container was restarted from just before the loop began to the last\nreport.",
+                  "minimum": 0
+                },
+                "started_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "ended_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "description": "When it recovered, or stopped mattering (another deployment went live, or the service\nwas stopped); `None` while it lasts."
                 }
               }
             }
@@ -9719,7 +9922,7 @@
     },
     {
       "name": "deployments",
-      "description": "Deploying, following, rolling back, restarting, stopping and starting."
+      "description": "Deploying, following, rolling back, restarting, stopping and starting, and crash loops."
     },
     {
       "name": "logs",

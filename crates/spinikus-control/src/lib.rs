@@ -8,6 +8,7 @@ pub mod auth;
 pub mod backups;
 pub mod ca;
 pub mod certificates;
+pub mod crashes;
 pub mod databases;
 pub mod deployments;
 pub mod domains;
@@ -79,6 +80,7 @@ pub struct Control {
     logs: Arc<deployments::logs::DeploymentLogs>,
     sessions: Arc<service_logs::Sessions>,
     restarts: Arc<restarts::Restarts>,
+    crashes: Arc<crashes::Crashes>,
     sign_ins: Arc<throttle::SignInThrottle>,
     backups: Arc<backups::Backups>,
     /// Held while a pull request's preview is made, updated or removed, since each service's
@@ -105,6 +107,7 @@ impl Control {
             logs,
             sessions,
             restarts: Arc::default(),
+            crashes: Arc::default(),
             sign_ins: Arc::default(),
             backups,
             previews: Arc::default(),

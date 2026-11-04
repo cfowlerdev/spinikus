@@ -437,6 +437,8 @@ async fn sets_a_source_and_deploys_it() {
     assert_eq!(nothing_live.status, StatusCode::CONFLICT);
     assert!(nothing_live.body["detail"].as_str().unwrap().contains("nothing live to restart"), "{:?}", nothing_live.body);
     let id = service.body["id"].as_str().unwrap();
+    let crash_loops = api.send(Method::GET, &format!("/api/v1/services/{id}/crash-loops"), token, &[], None).await;
+    assert_eq!((crash_loops.status, &crash_loops.body["items"]), (StatusCode::OK, &json!([])));
     for (action, expected) in [("stop", "nothing live to stop"), ("start", "nothing live to start")] {
         let response = api.send(Method::POST, &format!("/api/v1/services/{id}/{action}"), token, &[], None).await;
         assert_eq!(response.status, StatusCode::CONFLICT);

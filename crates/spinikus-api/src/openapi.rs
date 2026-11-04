@@ -40,7 +40,7 @@ const TAGS: &[(&str, &str)] = &[
     ("services", "Apps and databases in an environment."),
     ("databases", "One-click databases."),
     ("sources", "Where a service's code or image comes from, its deploy key and its webhook."),
-    ("deployments", "Deploying, following, rolling back, restarting, stopping and starting."),
+    ("deployments", "Deploying, following, rolling back, restarting, stopping and starting, and crash loops."),
     ("logs", "A service's runtime logs."),
     ("terminals", "Shells and commands in a service's running container, over a WebSocket."),
     ("variables", "Variables of projects, environments and services."),

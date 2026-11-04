@@ -225,6 +225,21 @@ async fn show_service(session: &Session, name: Option<&str>) -> anyhow::Result<(
         None => out.paint("nothing live", Style::Dim),
     };
     lines.push(format!("Running:  {running}"));
+    if let Some(stopped_at) = &service.stopped_at {
+        let start = format!("start it with `spinikus start {path}`");
+        lines.push(format!("State:    {} ({}; {start})", out.paint("stopped", Style::Yellow), ago(stopped_at)));
+    }
+    let crashes: Vec<Value> =
+        api.get_with::<Page>(&format!("/services/{}/crash-loops", service.id), &[("limit", "1".into())]).await?.items;
+    if let Some(crash) = crashes.first().filter(|crash| crash["ended_at"].is_null()) {
+        let what = match crash["reason"].as_str() {
+            Some("restarting") => format!("restarted {} times", crash["restarts"]),
+            _ => "not running".to_string(),
+        };
+        let since = ago(crash["started_at"].as_str().unwrap_or_default());
+        let logs = format!("see `spinikus logs {path}`");
+        lines.push(format!("State:    {}, {what} ({since}; {logs})", out.paint("crashing", Style::Red)));
+    }
     if let Some(latest) = deployments.first().filter(|latest| latest.status != "live") {
         let status = out.paint(&latest.status, status_style(&latest.status));
         lines.push(format!("Latest:   {status} {} ({})", latest.id, ago(&latest.created_at)));

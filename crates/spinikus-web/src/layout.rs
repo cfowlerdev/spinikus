@@ -256,6 +256,12 @@ pub fn service_badge(kind: ServiceKind) -> Markup {
 }
 
 /// A deployment's status; in-progress ones get a pulsing dot.
+/// Marks a service whose live container keeps restarting or isn't running.
+pub fn crashing_badge() -> Markup {
+    let colors = "bg-red-50 text-red-700 ring-red-600/20 dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20";
+    html! { span class={ (BADGE) " " (colors) } { "crashing" } }
+}
+
 /// Marks a service stopped by a user.
 pub fn stopped_badge() -> Markup {
     let colors = "bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-500/10 dark:text-amber-400 dark:ring-amber-500/20";
