@@ -29,6 +29,7 @@ mod report;
 mod restore;
 pub mod runtime;
 mod sessions;
+mod stats;
 
 pub use backoff::Backoff;
 pub use backup::{BackupStores, s3};

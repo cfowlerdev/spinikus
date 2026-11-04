@@ -57,6 +57,23 @@ fn timestamp(at: prost_types::Timestamp) -> Result<Timestamp, String> {
     Timestamp::new(at.seconds, at.nanos).map_err(|error| format!("invalid timestamp: {error}"))
 }
 
+/// A container's or the server's minute of resource use, as `(container ID, point)`;
+/// `None` without a valid time.
+pub(crate) fn stat_sample(sample: pb::StatSample) -> Option<(String, spinikus_core::metrics::MetricPoint)> {
+    let at = timestamp(sample.at?).ok()?;
+    let point = spinikus_core::metrics::MetricPoint {
+        at,
+        cpu_cores: sample.cpu_cores,
+        memory_bytes: sample.memory_bytes,
+        memory_limit_bytes: sample.memory_limit_bytes,
+        network_rx_rate: sample.network_rx_rate,
+        network_tx_rate: sample.network_tx_rate,
+        disk_used_bytes: sample.disk_used_bytes,
+        disk_total_bytes: sample.disk_total_bytes,
+    };
+    Some((sample.container_id, point))
+}
+
 #[cfg(test)]
 mod tests {
     use spinikus_core::id::{DeploymentId, ServiceId};

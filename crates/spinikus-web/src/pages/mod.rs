@@ -9,6 +9,7 @@ pub mod instance_backups;
 pub mod logs;
 pub mod manage;
 pub mod members;
+pub mod metrics;
 pub mod notifications;
 pub mod overview;
 pub mod palette;
@@ -47,6 +48,7 @@ enum Tab {
     /// The project's environments, the environment's services, the service's deployments.
     Main,
     Logs,
+    Metrics,
     Variables,
     Domains,
     Backups,
@@ -90,6 +92,7 @@ fn service_tabs(service: &Service, role: Role, current: Tab) -> Markup {
     let mut tabs = vec![
         ("Deployments", base.clone(), current == Tab::Main),
         ("Logs", format!("{base}/logs"), current == Tab::Logs),
+        ("Metrics", format!("{base}/metrics"), current == Tab::Metrics),
         ("Variables", format!("{base}/variables"), current == Tab::Variables),
     ];
     if service.kind == ServiceKind::App {

@@ -298,12 +298,26 @@ async fn admins_create_servers_and_join_tokens() {
 
     let created = api.send(Method::POST, "/api/v1/servers", token, &[], Some(json!({ "name": "web-1" }))).await;
     let id = created.body["id"].as_str().unwrap().to_string();
+    let minute = jiff::SignedDuration::from_mins(1);
+    let at = spinikus_core::metrics::period_end(jiff::Timestamp::now(), minute) - minute;
+    let point = spinikus_core::metrics::MetricPoint {
+        at,
+        cpu_cores: Some(0.5),
+        disk_used_bytes: Some(30),
+        disk_total_bytes: Some(100),
+        ..Default::default()
+    };
+    api.control.record_stats(id.parse().unwrap(), vec![(String::new(), point)]).await.unwrap();
+    let metrics = api.send(Method::GET, &format!("/api/v1/servers/{id}/metrics"), token, &[], None).await;
     let join = api.send(Method::POST, &format!("/api/v1/servers/{id}/enrollment-tokens"), token, &[], None).await;
     let revoked = api.send(Method::POST, &format!("/api/v1/servers/{id}/revoke"), token, &[], None).await;
     let shown = api.send(Method::GET, &format!("/api/v1/servers/{id}"), token, &[], None).await;
     let listed = api.send(Method::GET, "/api/v1/servers", token, &[], None).await;
 
     assert_eq!((created.status, &created.body["status"]), (StatusCode::CREATED, &json!("pending")));
+    assert_eq!((metrics.status, &metrics.body["range"]), (StatusCode::OK, &json!("1h")));
+    assert_eq!(metrics.body["points"][0]["disk_used_bytes"], 30);
+    assert_eq!(metrics.body["points"][0]["network_rx_rate"], json!(null));
     assert_eq!(join.status, StatusCode::CREATED);
     assert!(join.body["token"].as_str().unwrap().starts_with("spj_"));
     assert!(join.body["ca_fingerprint"].as_str().unwrap().starts_with("sha256:"));
@@ -439,6 +453,14 @@ async fn sets_a_source_and_deploys_it() {
     let id = service.body["id"].as_str().unwrap();
     let crash_loops = api.send(Method::GET, &format!("/api/v1/services/{id}/crash-loops"), token, &[], None).await;
     assert_eq!((crash_loops.status, &crash_loops.body["items"]), (StatusCode::OK, &json!([])));
+    let metrics = api.send(Method::GET, &format!("/api/v1/services/{id}/metrics?range=24h"), token, &[], None).await;
+    assert_eq!(
+        (metrics.status, &metrics.body["range"], &metrics.body["step_seconds"]),
+        (StatusCode::OK, &json!("24h"), &json!(300))
+    );
+    assert_eq!(metrics.body["points"], json!([]));
+    let bad_range = api.send(Method::GET, &format!("/api/v1/services/{id}/metrics?range=2h"), token, &[], None).await;
+    assert_eq!(bad_range.status, StatusCode::BAD_REQUEST);
     for (action, expected) in [("stop", "nothing live to stop"), ("start", "nothing live to start")] {
         let response = api.send(Method::POST, &format!("/api/v1/services/{id}/{action}"), token, &[], None).await;
         assert_eq!(response.status, StatusCode::CONFLICT);

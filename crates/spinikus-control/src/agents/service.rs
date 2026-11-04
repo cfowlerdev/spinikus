@@ -128,8 +128,22 @@ impl AgentService for AgentGrpc {
         Ok(Response::new(Box::pin(frames.map(Ok))))
     }
 
-    async fn push_stats(&self, _: Request<Streaming<pb::StatsBatch>>) -> Result<Response<pb::PushStatsResponse>, Status> {
-        Err(Status::unimplemented("stats are not available yet"))
+    async fn push_stats(&self, request: Request<Streaming<pb::StatsBatch>>) -> Result<Response<pb::PushStatsResponse>, Status> {
+        let AgentIdentity(server) = identity(&request)?;
+        // Only from an agent that is connected, so never from a revoked server's.
+        if !self.control.agents().is_connected(server) {
+            return Err(Status::failed_precondition("connect first"));
+        }
+        let mut batches = request.into_inner();
+        let mut points = Vec::new();
+        while let Some(batch) = batches.message().await? {
+            points.extend(batch.samples.into_iter().filter_map(convert::stat_sample));
+            if points.len() > crate::metrics::MAX_POINTS_PER_PUSH {
+                return Err(Status::resource_exhausted("too many samples in one push"));
+            }
+        }
+        self.control.record_stats(server, points).await.map_err(status)?;
+        Ok(Response::new(pb::PushStatsResponse {}))
     }
 }
 

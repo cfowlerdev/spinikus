@@ -15,6 +15,7 @@ pub mod id;
 pub mod instance_backup;
 pub mod job;
 pub mod membership;
+pub mod metrics;
 pub mod notification;
 #[cfg(feature = "openapi")]
 mod openapi;

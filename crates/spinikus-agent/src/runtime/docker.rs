@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -16,15 +16,15 @@ use bollard::{
     errors::Error,
     exec::{ResizeExecOptions, StartExecResults},
     models::{
-        ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EndpointSettings, EventMessageTypeEnum,
-        ExecConfig, HealthStatusEnum, HostConfig, NetworkCreateRequest, NetworkingConfig, PortBinding, RestartPolicy,
-        RestartPolicyNameEnum,
+        ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, ContainerStatsResponse, EndpointSettings,
+        EventMessageTypeEnum, ExecConfig, HealthStatusEnum, HostConfig, NetworkCreateRequest, NetworkingConfig, PortBinding,
+        RestartPolicy, RestartPolicyNameEnum,
     },
     query_parameters::{
         BuildImageOptionsBuilder, BuilderVersion, CreateContainerOptionsBuilder, CreateImageOptionsBuilder, EventsOptionsBuilder,
         ListContainersOptionsBuilder, ListNetworksOptionsBuilder, LogsOptionsBuilder, PruneBuildOptionsBuilder,
-        RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
-        WaitContainerOptionsBuilder,
+        RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RestartContainerOptionsBuilder, StatsOptionsBuilder,
+        StopContainerOptionsBuilder, WaitContainerOptionsBuilder,
     },
 };
 use jiff::Timestamp;
@@ -33,9 +33,9 @@ use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 
 use super::{
-    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, ExecInput, ExecOutput, ExecStream, LogLine,
-    LogLines, LogOptions, Network, ONE_OFF_LABEL, OneOffExit, OneOffSpec, PORT_LABEL, RuntimeError, SERVICE_LABEL, TERMINAL_TYPE,
-    TerminalInput, TerminalInputs, TerminalSize, owner, session,
+    BuildSpec, ContainerCounters, ContainerEvents, ContainerRuntime, ContainerSpec, DEPLOYMENT_LABEL, ExecInput, ExecOutput,
+    ExecStream, LogLine, LogLines, LogOptions, Network, ONE_OFF_LABEL, OneOffExit, OneOffSpec, PORT_LABEL, RuntimeError,
+    SERVICE_LABEL, TERMINAL_TYPE, TerminalInput, TerminalInputs, TerminalSize, owner, session,
 };
 
 /// Aborts a task when dropped, such as stdin's writer once the command's output ends.
@@ -672,6 +672,50 @@ impl ContainerRuntime for DockerRuntime {
         }
         Ok(removed)
     }
+
+    async fn stats(&self, container_id: &str) -> Result<Option<ContainerCounters>, RuntimeError> {
+        // One sample, without waiting for a second to compute a percentage: the agent
+        // computes rates from its own successive samples.
+        let options = StatsOptionsBuilder::new().stream(false).one_shot(true).build();
+        let mut stream = self.client()?.stats(container_id, Some(options));
+        let stats = match stream.next().await {
+            Some(Ok(stats)) => stats,
+            Some(Err(error)) => match runtime_error(error) {
+                RuntimeError::NotFound => return Ok(None),
+                error => return Err(error),
+            },
+            None => return Ok(None),
+        };
+        Ok(counters(stats))
+    }
+
+    async fn data_root(&self) -> Option<PathBuf> {
+        let info = self.client().ok()?.info().await.ok()?;
+        info.docker_root_dir.map(PathBuf::from)
+    }
+}
+
+/// The counters in one stats sample; `None` for a container that isn't running, whose
+/// sample has no CPU usage.
+fn counters(stats: ContainerStatsResponse) -> Option<ContainerCounters> {
+    let cpu_nanos = stats.cpu_stats.and_then(|cpu| cpu.cpu_usage).and_then(|usage| usage.total_usage)?;
+    let memory = stats.memory_stats.unwrap_or_default();
+    let usage = memory.usage.unwrap_or(0);
+    // What `docker stats` subtracts: reclaimable page cache, named differently by cgroup v1 and v2.
+    let cache = memory.stats.as_ref().and_then(|stats| {
+        stats.get("inactive_file").or_else(|| stats.get("total_inactive_file")).or_else(|| stats.get("cache")).copied()
+    });
+    let (mut network_rx_bytes, mut network_tx_bytes) = (0, 0);
+    for network in stats.networks.unwrap_or_default().into_values() {
+        network_rx_bytes += network.rx_bytes.unwrap_or(0);
+        network_tx_bytes += network.tx_bytes.unwrap_or(0);
+    }
+    Some(ContainerCounters {
+        cpu_nanos,
+        memory_bytes: usage.saturating_sub(cache.unwrap_or(0)),
+        network_rx_bytes,
+        network_tx_bytes,
+    })
 }
 
 /// `image` with `:latest` added when it names neither a tag nor a digest.

@@ -2713,6 +2713,107 @@
         }
       }
     },
+    "/api/v1/services/{id}/metrics": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "The service's CPU, memory and network use over a range: the sum of its containers, in points of `step_seconds` each, oldest first.",
+        "description": "The service's CPU, memory and network use over a range: the sum of its containers, in points of `step_seconds` each, oldest first. Viewers may read it.",
+        "operationId": "metrics_service",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ServiceId"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "description": "How far back: `1h` (the default), `6h`, `24h`, `7d` or `30d`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/MetricRange"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Metrics"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/servers/{id}/metrics": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "The server's CPU, memory, network and disk use over a range, for instance admins.",
+        "operationId": "metrics_server",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ServerId"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "description": "How far back: `1h` (the default), `6h`, `24h`, `7d` or `30d`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/MetricRange"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Metrics"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/services/{id}/logs": {
       "get": {
         "tags": [
@@ -7941,6 +8042,124 @@
         ],
         "description": "What a membership grants access to. A user has at most one membership per scope."
       },
+      "MetricPoint": {
+        "type": "object",
+        "description": "One period's resource use. `at` is the period's end. Fields are `None` where nothing was\nmeasured: network and disk for containers that share the host's, or a server whose\nsystem the agent can't read.",
+        "required": [
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cpu_cores": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "CPU cores in use: 0.5 is half of one core."
+          },
+          "memory_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "memory_limit_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "A container's memory limit, or the server's memory.",
+            "minimum": 0
+          },
+          "network_rx_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Bytes received per second."
+          },
+          "network_tx_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Bytes sent per second."
+          },
+          "disk_used_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Servers only: the disk Docker keeps images, containers and volumes on.",
+            "minimum": 0
+          },
+          "disk_total_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "MetricRange": {
+        "type": "string",
+        "description": "How far back a graph goes.",
+        "enum": [
+          "1h",
+          "6h",
+          "24h",
+          "7d",
+          "30d"
+        ]
+      },
+      "Metrics": {
+        "type": "object",
+        "description": "A graph's points over a range.",
+        "required": [
+          "range",
+          "step_seconds",
+          "points",
+          "since",
+          "until"
+        ],
+        "properties": {
+          "range": {
+            "$ref": "#/components/schemas/MetricRange"
+          },
+          "step_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long each point covers, in seconds."
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricPoint"
+            },
+            "description": "From `since` until `until`, oldest first; periods with nothing measured are left out."
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "MountPath": {
         "type": "string",
         "description": "An absolute path in the container.",
@@ -8082,7 +8301,8 @@
           "certificate.failed",
           "certificate.expiring",
           "server.disconnected",
-          "server.reconnected"
+          "server.reconnected",
+          "server.disk_low"
         ]
       },
       "NotificationId": {
@@ -10767,6 +10987,10 @@
     {
       "name": "instance-backups",
       "description": "Backups of Spinikus itself."
+    },
+    {
+      "name": "metrics",
+      "description": "CPU, memory, network and disk use of services and servers, as agents measure it each minute."
     },
     {
       "name": "notifications",

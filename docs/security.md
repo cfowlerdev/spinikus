@@ -53,7 +53,9 @@ accepts for now. Report vulnerabilities privately to the maintainers rather than
   compared in constant time) before anything is parsed, with a size limit.
 - **Agents** enroll with a single-use, one-hour join token (stored hashed) and pin the
   control plane's CA by fingerprint. Revoking a server disconnects its agent and refuses it
-  from then on.
+  from then on. Metrics are taken only from a connected agent, and only for containers that
+  agent reported, under its own server ID. A server's metrics are for instance admins, a
+  service's for its viewers.
 - **Containers** publish their ports on `127.0.0.1` only; the proxy is the way in. Volumes
   are named Docker volumes, never host paths. `git` runs with no user or system config and
   only the `https`, `http` and `ssh` protocols.
@@ -107,6 +109,9 @@ Fixed:
 - **`X-Forwarded-For` is believed from any process on the same machine**, since that is
   where the proxy runs. Anything else on the host could set the address recorded for
   sessions and the audit log, and so for sign-in throttling.
+- **Agents are trusted for what they report about their containers**, including which
+  service each belongs to (from its labels). A compromised agent could make up containers,
+  and with them metrics, for any service; it can't act on other servers.
 - **The database file** relies on its directory for privacy (`/var/lib/spinikus` is
   `0750`, owned by `spinikus`). Its secrets are encrypted regardless.
 - **The terminal page allows inline styles** (`style-src 'unsafe-inline'`), which xterm.js

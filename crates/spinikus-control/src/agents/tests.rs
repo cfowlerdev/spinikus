@@ -214,3 +214,35 @@ async fn a_quiet_agent_is_disconnected() {
     assert_eq!(agent.receive().await, None);
     wait_for_status(&control, id, ServerStatus::Disconnected).await;
 }
+
+#[tokio::test]
+async fn takes_stats_only_from_a_connected_agent() {
+    use spinikus_core::metrics::Resolution;
+    use spinikus_store::MetricRepository;
+
+    let (_dir, control) = control().await;
+    let id = server(&control).await;
+    let mut client = serve(&control, Some(id), AgentTimings::default()).await;
+    let minute = jiff::SignedDuration::from_mins(1);
+    let at = spinikus_core::metrics::period_end(jiff::Timestamp::now(), minute) - minute;
+    let batch = || pb::StatsBatch {
+        samples: vec![pb::StatSample {
+            at: Some(std::time::SystemTime::from(at).into()),
+            cpu_cores: Some(1.25),
+            disk_used_bytes: Some(10),
+            disk_total_bytes: Some(100),
+            ..Default::default()
+        }],
+    };
+
+    let refused = client.push_stats(tokio_stream::iter([batch()])).await.unwrap_err();
+    let mut agent = Agent::connect(&mut client, hello(pb::PROTOCOL_VERSION)).await.unwrap();
+    agent.receive().await;
+    client.push_stats(tokio_stream::iter([batch(), batch()])).await.unwrap();
+
+    assert_eq!(refused.code(), Code::FailedPrecondition);
+    let since = at - jiff::SignedDuration::from_hours(1);
+    let points = control.store().server_metric_points(id, Resolution::Minute, since).await.unwrap();
+    assert_eq!(points.len(), 1);
+    assert_eq!((points[0].at, points[0].cpu_cores, points[0].disk_percent()), (at, Some(1.25), Some(10.0)));
+}

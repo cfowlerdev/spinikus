@@ -698,3 +698,39 @@ async fn removes_networks_no_container_is_on() {
     // Only what nothing has used for a week goes, so a fresh cache stays.
     runtime.prune_build_cache(Duration::from_secs(7 * 24 * 60 * 60)).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon"]
+async fn reads_a_running_containers_counters() {
+    let runtime = DockerRuntime::new();
+    let docker = runtime.client().unwrap();
+    let pull = CreateImageOptionsBuilder::new().from_image(IMAGE).build();
+    let mut pulling = docker.create_image(Some(pull), None, None);
+    while let Some(progress) = pulling.next().await {
+        progress.unwrap();
+    }
+    // Busy for a while, holding 20 MB in memory.
+    let script = "head -c 20000000 /dev/zero > /dev/shm/held; while true; do :; done";
+    let body = ContainerCreateBody {
+        image: Some(IMAGE.to_string()),
+        cmd: Some(vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()]),
+        ..Default::default()
+    };
+    let id = docker.create_container(None, body).await.unwrap().id;
+    let _cleanup = Cleanup(runtime.clone(), id.clone());
+    let before_start = runtime.stats(&id).await.unwrap();
+    docker.start_container(&id, None).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let first = runtime.stats(&id).await.unwrap().expect("counters of a running container");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let second = runtime.stats(&id).await.unwrap().expect("counters of a running container");
+    let missing = runtime.stats("no-such-container").await.unwrap();
+    let root = runtime.data_root().await;
+
+    assert_eq!(before_start, None);
+    assert!(second.cpu_nanos > first.cpu_nanos + 500_000_000, "a busy loop uses most of a core: {first:?} {second:?}");
+    assert!(second.memory_bytes > 15_000_000, "{second:?}");
+    assert_eq!(missing, None);
+    assert!(root.is_some_and(|root| root.is_absolute()));
+}

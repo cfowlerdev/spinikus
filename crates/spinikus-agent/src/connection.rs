@@ -37,6 +37,7 @@ use crate::{
     proxy::{ProxyState, RuntimeUpstreams},
     report::report,
     runtime::ContainerRuntime,
+    stats::{self, HostSource, PUSH_INTERVAL, StatsQueue},
 };
 
 /// How long to wait for `Welcome` after sending `Hello`.
@@ -84,6 +85,9 @@ pub async fn run(files: &AgentFiles, options: RunOptions, shutdown: impl Future<
         }
     };
     let mut serving = vec![tokio::spawn(crate::housekeeping::run(runtime.clone(), stopped()))];
+    let reports = Reports { facts, stats: StatsQueue::default() };
+    let host = HostSource::of(&*runtime, files.dir()).await;
+    serving.push(tokio::spawn(stats::run(runtime.clone(), host, reports.stats.clone(), stopped())));
     let mut served = None;
     if let Some(ProxyListeners { http, https, dashboard }) = proxy {
         let https_port = https.as_ref().and_then(|listener| listener.local_addr().ok()).map(|address| address.port());
@@ -97,7 +101,7 @@ pub async fn run(files: &AgentFiles, options: RunOptions, shutdown: impl Future<
     let mut proxy = ProxyState::load(files, served);
     // Outlives connections: a command that finishes while disconnected reports on the next.
     let commands = Commands::new(runtime.clone(), build, backups);
-    let result = stay_connected(files, facts, backoff, runtime, commands, &mut proxy, shutdown).await;
+    let result = stay_connected(files, reports, backoff, runtime, commands, &mut proxy, shutdown).await;
     let _ = stop_proxy.send(true);
     for serving in serving {
         let _ = serving.await;
@@ -105,9 +109,16 @@ pub async fn run(files: &AgentFiles, options: RunOptions, shutdown: impl Future<
     result
 }
 
+/// What the agent reports besides its containers: facts about this machine in `Hello`,
+/// and resource metrics on their own stream.
+struct Reports {
+    facts: pb::ServerFacts,
+    stats: StatsQueue,
+}
+
 async fn stay_connected(
     files: &AgentFiles,
-    facts: pb::ServerFacts,
+    reports: Reports,
     mut backoff: Backoff,
     runtime: Arc<dyn ContainerRuntime>,
     mut commands: Commands,
@@ -124,7 +135,7 @@ async fn stay_connected(
             return Err(AgentError::CertificateExpired(not_after));
         }
 
-        let ended = session(files, &credentials, &facts, &*runtime, &mut commands, proxy, shutdown.as_mut()).await?;
+        let ended = session(files, &credentials, &reports, &*runtime, &mut commands, proxy, shutdown.as_mut()).await?;
         let reason = match ended {
             Ended::Shutdown => return Ok(()),
             Ended::Renewed => {
@@ -176,7 +187,7 @@ fn refused(status: Status, welcomed: bool) -> Result<Ended, AgentError> {
 async fn session(
     files: &AgentFiles,
     credentials: &Credentials,
-    facts: &pb::ServerFacts,
+    reports: &Reports,
     runtime: &dyn ContainerRuntime,
     commands: &mut Commands,
     proxy: &mut ProxyState,
@@ -200,7 +211,7 @@ async fn session(
     let hello = pb::Hello {
         protocol_version: pb::PROTOCOL_VERSION,
         agent_version: crate::AGENT_VERSION.to_string(),
-        facts: Some(facts.clone()),
+        facts: Some(reports.facts.clone()),
         in_flight_command_ids: commands.in_flight(),
         routes_revision: proxy.routes_revision(),
         certificates_revision: proxy.certificates_revision(),
@@ -235,6 +246,7 @@ async fn session(
     let (not_before, not_after) = validity(&credentials.certificate_pem).expect("checked before connecting");
     let renewal = tokio::time::sleep(until(renewal_due(not_before, not_after)));
     let mut renewal = std::pin::pin!(renewal);
+    let mut pushes = tokio::time::interval_at(tokio::time::Instant::now() + PUSH_INTERVAL, PUSH_INTERVAL);
     let reporter = report(runtime, &outbound, RESYNC_DELAY);
     let mut reporter = std::pin::pin!(reporter);
 
@@ -255,6 +267,7 @@ async fn session(
                     renewal.as_mut().reset(tokio::time::Instant::now() + RENEWAL_RETRY);
                 }
             },
+            _ = pushes.tick() => push_stats(&client, &reports.stats),
             // Returns only once the stream has closed.
             () = reporter.as_mut() => return Ok(lost(true, "the stream closed")),
             event = commands.next(), if commands.busy() => {
@@ -273,6 +286,22 @@ async fn session(
             },
         }
     }
+}
+
+/// Sends the queued metrics on their own stream, putting them back if that fails.
+fn push_stats(client: &AgentServiceClient<Channel>, queue: &StatsQueue) {
+    let samples = queue.take();
+    if samples.is_empty() {
+        return;
+    }
+    let (mut client, queue) = (client.clone(), queue.clone());
+    tokio::spawn(async move {
+        let batch = pb::StatsBatch { samples: samples.clone() };
+        if let Err(status) = client.push_stats(tokio_stream::iter([batch])).await {
+            tracing::debug!(%status, "failed to send metrics, will retry");
+            queue.put_back(samples);
+        }
+    });
 }
 
 fn message(message: agent_message::Message) -> AgentMessage {

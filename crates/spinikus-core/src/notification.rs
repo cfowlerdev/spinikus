@@ -166,10 +166,12 @@ pub enum NotificationEvent {
     ServerDisconnected,
     #[serde(rename = "server.reconnected")]
     ServerReconnected,
+    #[serde(rename = "server.disk_low")]
+    ServerDiskLow,
 }
 
 impl NotificationEvent {
-    pub const ALL: [NotificationEvent; 9] = [
+    pub const ALL: [NotificationEvent; 10] = [
         Self::DeploymentFailed,
         Self::ServiceCrashing,
         Self::ServiceRecovered,
@@ -179,6 +181,7 @@ impl NotificationEvent {
         Self::CertificateExpiring,
         Self::ServerDisconnected,
         Self::ServerReconnected,
+        Self::ServerDiskLow,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -192,6 +195,7 @@ impl NotificationEvent {
             Self::CertificateExpiring => "certificate.expiring",
             Self::ServerDisconnected => "server.disconnected",
             Self::ServerReconnected => "server.reconnected",
+            Self::ServerDiskLow => "server.disk_low",
         }
     }
 
@@ -207,6 +211,7 @@ impl NotificationEvent {
             Self::CertificateExpiring => "An HTTPS certificate expires soon",
             Self::ServerDisconnected => "A server is disconnected",
             Self::ServerReconnected => "A disconnected server is back",
+            Self::ServerDiskLow => "A server is low on disk",
         }
     }
 

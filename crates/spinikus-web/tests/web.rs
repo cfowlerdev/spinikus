@@ -1167,6 +1167,69 @@ async fn instance_admins_manage_notification_channels() {
 }
 
 #[tokio::test]
+async fn shows_a_services_and_a_servers_resources() {
+    use spinikus_core::{
+        id::DeploymentId,
+        metrics::{MetricPoint, period_end},
+        server::{InstanceHealth, InstanceStatus, ObservedInstance, ServerFields},
+    };
+    use spinikus_store::{InstanceRepository, ServerRepository};
+
+    let web = Web::new().await;
+    let (_, _, _, service) = shop_with_team(&web).await;
+    let control = &web.control;
+    let server = control.store().get_or_create_embedded_server(ServerFields { name: "this machine".to_string() }).await.unwrap();
+    let container = ObservedInstance {
+        service_id: service.id,
+        deployment_id: DeploymentId::new(),
+        container_id: "web-1".to_string(),
+        status: InstanceStatus::Running,
+        health: InstanceHealth::None,
+        restart_count: 0,
+        started_at: None,
+    };
+    control.store().upsert_instance(server.id, container).await.unwrap();
+    let minute = jiff::SignedDuration::from_mins(1);
+    let now = period_end(jiff::Timestamp::now(), minute) - minute;
+    let point = |minutes_ago: i32, cores: f64| MetricPoint {
+        at: now - minute * minutes_ago,
+        cpu_cores: Some(cores),
+        memory_bytes: Some(64 * 1024 * 1024),
+        network_rx_rate: Some(1536.0),
+        network_tx_rate: Some(512.0),
+        ..MetricPoint::default()
+    };
+    let disk = MetricPoint {
+        disk_used_bytes: Some(95),
+        disk_total_bytes: Some(100),
+        memory_limit_bytes: Some(1 << 30),
+        ..point(0, 2.0)
+    };
+    let points = vec![("web-1".to_string(), point(2, 0.25)), ("web-1".to_string(), point(1, 0.5)), (String::new(), disk)];
+    control.record_stats(server.id, points).await.unwrap();
+    let ada = web.sign_in("ada%40example.com").await;
+    let viewer = web.sign_in("viewer%40example.com").await;
+
+    let page = web.get(&format!("/services/{}/metrics", service.id), Some(&viewer)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    for expected in ["CPU (cores)", "Memory", "Network", ">0.50<", "1.5 KiB/s", "Received", "Sent", "<svg", "<title>", "Table"] {
+        assert!(page.body.contains(expected), "{expected} in {}", page.body);
+    }
+    assert!(page.body.contains(r#"aria-current="true""#) && page.body.contains("?range=7d"));
+    assert!(!page.body.contains("Disk"), "a service has no disk chart");
+    let week = web.get(&format!("/services/{}/metrics?range=7d", service.id), Some(&viewer)).await;
+    assert!(week.body.contains("Nothing measured in this range"), "hours are rolled up later");
+    let tab = web.get(&format!("/services/{}", service.id), Some(&viewer)).await;
+    assert!(tab.body.contains(&format!(r#"href="/services/{}/metrics""#, service.id)));
+
+    let server_page = web.get(&format!("/settings/servers/{}?range=6h", server.id), Some(&ada)).await;
+    assert_eq!(server_page.status, StatusCode::OK);
+    for expected in ["Resources", "Disk", "of 1.0 GiB", "of 100 B", "over 90% full"] {
+        assert!(server_page.body.contains(expected), "{expected} in {}", server_page.body);
+    }
+}
+
+#[tokio::test]
 async fn creates_databases_and_backs_them_up_and_restores_them() {
     use spinikus_control::NewStorageDestination;
     use spinikus_core::{backup::BackupStatus, server::ServerFields};

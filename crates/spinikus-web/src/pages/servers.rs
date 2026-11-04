@@ -4,7 +4,7 @@
 
 use axum::{
     Form,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -13,11 +13,13 @@ use serde::Deserialize;
 use spinikus_control::{Control, ControlError, JoinToken, NewServer, page::MAX_PAGE_SIZE};
 use spinikus_core::{
     id::ServerId,
+    metrics::{DISK_LOW_PERCENT, Metrics},
     server::{Server, ServerStatus},
 };
 
 use super::{
     backups::human_size,
+    metrics::{RangeQuery, ServerScale, charts, ranges},
     parse_id, problem_message, redirect,
     settings::{SettingsTab, require_admin, tabs},
 };
@@ -147,10 +149,36 @@ pub fn status_badge(status: ServerStatus) -> Markup {
     html! { span class={ (BADGE) " " (colors) } { (label) } }
 }
 
-pub async fn server(State(control): State<Control>, signed: Signed, Path(id): Path<String>) -> Result<Markup, WebError> {
+pub async fn server(
+    State(control): State<Control>,
+    signed: Signed,
+    Path(id): Path<String>,
+    Query(query): Query<RangeQuery>,
+) -> Result<Markup, WebError> {
     require_admin(&signed)?;
     let server = control.get_server(&signed.principal, parse_id(&id)?).await?;
-    Ok(server_page(&signed, &server, None))
+    let resources = resources(&control, &signed, &server, &query).await?;
+    Ok(server_page(&signed, &server, None, resources))
+}
+
+/// What the server's page shows about its resource use, unless it was revoked.
+struct Resources {
+    metrics: Metrics,
+    low_on_disk: bool,
+}
+
+async fn resources(
+    control: &Control,
+    signed: &Signed,
+    server: &Server,
+    query: &RangeQuery,
+) -> Result<Option<Resources>, ControlError> {
+    if server.revoked_at.is_some() {
+        return Ok(None);
+    }
+    let metrics = control.server_metrics(&signed.principal, server.id, query.range()).await?;
+    let low_on_disk = control.servers_low_on_disk().contains(&server.id);
+    Ok(Some(Resources { metrics, low_on_disk }))
 }
 
 /// A join token for the server's agent, shown on the server's page this once.
@@ -163,7 +191,8 @@ pub async fn join_token(
     require_admin(&signed)?;
     let server = control.get_server(&signed.principal, parse_id(&id)?).await?;
     let join = control.create_join_token(&signed.principal, server.id).await?;
-    let page = server_page(&signed, &server, Some(Join { token: &join, host: host(&headers) }));
+    let resources = resources(&control, &signed, &server, &RangeQuery::default()).await?;
+    let page = server_page(&signed, &server, Some(Join { token: &join, host: host(&headers) }), resources);
     // The page is the server's, whatever URL the button posted to.
     Ok((StatusCode::OK, [("hx-replace-url", format!("{URL}/{}", server.id))], page).into_response())
 }
@@ -200,7 +229,7 @@ struct Join<'a> {
     host: String,
 }
 
-fn server_page(signed: &Signed, server: &Server, join: Option<Join<'_>>) -> Markup {
+fn server_page(signed: &Signed, server: &Server, join: Option<Join<'_>>, resources: Option<Resources>) -> Markup {
     let base = format!("{URL}/{}", server.id);
     let content = html! {
         (tabs(signed, SettingsTab::Servers))
@@ -256,6 +285,24 @@ fn server_page(signed: &Signed, server: &Server, join: Option<Join<'_>>) -> Mark
                     &format!("{base}/revoke"), "Revoke server", "Revoke this server? This can't be undone."))
             }
             div class="text-sm" { a href=(URL) class=(LINK) { "Back to servers" } }
+        }
+        @if let Some(resources) = resources {
+            section class="mt-10" {
+                h2 class="mb-1 font-semibold" { "Resources" }
+                p class="mb-4 text-sm text-zinc-500 dark:text-zinc-400" {
+                    "What the whole server uses, as its agent measures it every minute, in UTC. "
+                    "Disk is the filesystem Docker keeps images, containers and volumes on."
+                }
+                @if resources.low_on_disk {
+                    (layout::alert(&format!("Its disk is over {DISK_LOW_PERCENT:.0}% full. Remove images, volumes or build cache it doesn't need, or make the disk bigger, before deployments and databases fail.")))
+                }
+                (ranges(&base, resources.metrics.range))
+                @if resources.metrics.points.is_empty() {
+                    (layout::empty("Nothing measured in this range. The agent sends what the server uses every minute while it is connected."))
+                } @else {
+                    (charts(&resources.metrics, Some(ServerScale::of(&resources.metrics))))
+                }
+            }
         }
     };
     layout::page(signed, &format!("{} · Servers", server.name), &[], content)

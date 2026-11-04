@@ -11,6 +11,7 @@
 
 mod assets;
 mod auth;
+mod charts;
 mod error;
 mod forms;
 mod layout;
@@ -130,6 +131,7 @@ pub fn router(control: Control) -> Router {
         .route("/settings/backups/schedule", post(pages::instance_backups::set_schedule))
         .route("/settings/backups/activity", get(pages::instance_backups::activity))
         .route("/settings/backups/{id}/delete", post(pages::instance_backups::delete))
+        .route("/services/{id}/metrics", get(pages::metrics::service))
         .route("/services/{id}/deployments", get(pages::services::deployments))
         .route("/services/{id}/deploy", post(pages::services::deploy))
         .route("/services/{id}/rollback", post(pages::services::rollback))

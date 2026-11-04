@@ -7,6 +7,7 @@ mod environments;
 mod hooks;
 mod instance_backups;
 mod members;
+mod metrics;
 mod notifications;
 mod projects;
 mod servers;
@@ -61,6 +62,8 @@ pub fn v1() -> OpenApiRouter<Control> {
         .routes(routes!(deployments::stop))
         .routes(routes!(deployments::start))
         .routes(routes!(deployments::crash_loops))
+        .routes(routes!(metrics::service))
+        .routes(routes!(metrics::server))
         .routes(routes!(service_logs::show))
         .routes(routes!(terminals::open))
         .routes(routes!(deployments::show))

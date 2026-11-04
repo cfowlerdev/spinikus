@@ -31,6 +31,18 @@ pub const PORT_LABEL: &str = "spinikus.port";
 /// in place of [`DEPLOYMENT_LABEL`], so it is never taken for one of the deployment's own.
 pub const ONE_OFF_LABEL: &str = "spinikus.one-off";
 
+/// A container's resource counters at one moment. CPU and network are totals since it
+/// started, so rates come from two of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContainerCounters {
+    /// CPU time used, in nanoseconds.
+    pub cpu_nanos: u64,
+    /// Memory in use, without the page cache the kernel can reclaim (as `docker stats` counts).
+    pub memory_bytes: u64,
+    pub network_rx_bytes: u64,
+    pub network_tx_bytes: u64,
+}
+
 /// A container to create for a deployment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerSpec {
@@ -259,6 +271,13 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// returns their names. A network can't go between being created for a container and
     /// the container joining it.
     async fn remove_unused_networks(&self) -> Result<Vec<String>, RuntimeError>;
+
+    /// The container's resource counters now, or `None` if it isn't running.
+    async fn stats(&self, container_id: &str) -> Result<Option<ContainerCounters>, RuntimeError>;
+
+    /// The directory the runtime keeps images, containers and volumes in, as seen from
+    /// this machine, if it says. Its filesystem is the disk the agent watches.
+    async fn data_root(&self) -> Option<PathBuf>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

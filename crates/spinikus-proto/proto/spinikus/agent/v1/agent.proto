@@ -553,18 +553,30 @@ message SessionClosed {
   optional int64 exit_code = 2;
 }
 
+// Resource use, sent every minute or so on its own stream so it never delays the control
+// stream. Only the agent's own server's containers are taken.
 message StatsBatch {
   repeated StatSample samples = 1;
 }
 
+// One minute's resource use of a container or of the server: the mean of the agent's
+// samples in it. Fields the agent couldn't measure are left out.
 message StatSample {
+  // The end of the minute it covers, on the minute.
   google.protobuf.Timestamp at = 1;
   // Empty for the server as a whole.
   string container_id = 2;
-  double cpu_percent = 3;
-  uint64 memory_bytes = 4;
-  uint64 network_rx_bytes = 5;
-  uint64 network_tx_bytes = 6;
+  // CPU cores in use: 0.5 is half of one core.
+  optional double cpu_cores = 3;
+  optional uint64 memory_bytes = 4;
+  // The container's memory limit, or the server's memory.
+  optional uint64 memory_limit_bytes = 5;
+  // Bytes per second.
+  optional double network_rx_rate = 6;
+  optional double network_tx_rate = 7;
+  // The server only: the filesystem Docker keeps its data on.
+  optional uint64 disk_used_bytes = 8;
+  optional uint64 disk_total_bytes = 9;
 }
 
 message PushStatsResponse {}

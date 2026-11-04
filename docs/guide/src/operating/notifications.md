@@ -43,6 +43,7 @@ whether it got through, with the server's answer when it didn't.
 | `certificate.expiring`   | A certificate in use expires within 14 days (renewal starts well before, so this means renewal keeps failing) |
 | `server.disconnected`    | A server's agent has been disconnected for 5 minutes                                    |
 | `server.reconnected`     | A server reported disconnected is back                                                  |
+| `server.disk_low`        | A server's disk is 90% full (again only after it went below 85%; see [Metrics](../apps/metrics.md)) |
 
 A channel gets the events checked on it. With every event checked it also gets events that
 later versions add. A channel that is off gets nothing.

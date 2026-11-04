@@ -44,6 +44,11 @@ serves only its own services.
 Volumes' data stays on the server that wrote it: a service moved to another server starts
 there with empty volumes.
 
+## Resources
+
+A server's page shows what the whole machine uses (CPU, memory, network and disk) over
+time, and warns when its disk is nearly full. See [Metrics](../apps/metrics.md).
+
 ## When a server goes away
 
 If an agent loses its connection, its server shows **disconnected** (a server whose agent

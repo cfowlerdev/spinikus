@@ -16,6 +16,7 @@ pub mod environments;
 pub mod error;
 mod input;
 pub mod members;
+pub mod metrics;
 pub mod notifications;
 pub mod page;
 pub mod password;
@@ -83,6 +84,7 @@ pub struct Control {
     restarts: Arc<restarts::Restarts>,
     crashes: Arc<crashes::Crashes>,
     notifications: Arc<notifications::runner::Notifications>,
+    metrics: Arc<metrics::MetricsState>,
     sign_ins: Arc<throttle::SignInThrottle>,
     backups: Arc<backups::Backups>,
     /// Held while a pull request's preview is made, updated or removed, since each service's
@@ -111,6 +113,7 @@ impl Control {
             restarts: Arc::default(),
             crashes: Arc::default(),
             notifications: Arc::default(),
+            metrics: Arc::default(),
             sign_ins: Arc::default(),
             backups,
             previews: Arc::default(),

@@ -24,6 +24,7 @@ reqwest.workspace = true
 prost-types.workspace = true
 rand.workspace = true
 rcgen.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true

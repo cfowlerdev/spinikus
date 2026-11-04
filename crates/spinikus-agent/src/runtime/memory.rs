@@ -4,6 +4,7 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     net::SocketAddr,
+    path::PathBuf,
     sync::{
         Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -18,8 +19,8 @@ use tokio::sync::broadcast;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 use super::{
-    BuildSpec, ContainerEvents, ContainerRuntime, ContainerSpec, ExecInput, ExecOutput, ExecStream, LogLine, LogLines,
-    LogOptions, OneOffExit, OneOffSpec, RuntimeError, TerminalInput, TerminalInputs, TerminalSize,
+    BuildSpec, ContainerCounters, ContainerEvents, ContainerRuntime, ContainerSpec, ExecInput, ExecOutput, ExecStream, LogLine,
+    LogLines, LogOptions, OneOffExit, OneOffSpec, RuntimeError, TerminalInput, TerminalInputs, TerminalSize,
 };
 
 /// A terminal opened in a container, as [`MemoryRuntime::terminals`] lists it.
@@ -70,6 +71,8 @@ pub struct MemoryRuntime {
     /// The networks containers were created on, and the build cache prunes so far.
     networks: Mutex<std::collections::BTreeSet<String>>,
     build_cache_prunes: Mutex<Vec<Duration>>,
+    /// Each running container's counters, as `set_stats` left them.
+    stats: Mutex<HashMap<String, ContainerCounters>>,
     next_id: AtomicU64,
     events: broadcast::Sender<Event>,
     available: AtomicBool,
@@ -105,6 +108,7 @@ impl MemoryRuntime {
             removed_one_offs: Mutex::default(),
             networks: Mutex::default(),
             build_cache_prunes: Mutex::default(),
+            stats: Mutex::default(),
             next_id: AtomicU64::new(1),
             events: broadcast::channel(256).0,
             available: AtomicBool::new(true),
@@ -150,6 +154,10 @@ impl MemoryRuntime {
 
     /// What commands run in containers write from now on; `output` should end with
     /// [`ExecOutput::Exited`]. By default they write nothing and exit with 0.
+    pub fn set_stats(&self, container_id: &str, counters: ContainerCounters) {
+        lock(&self.stats).insert(container_id.to_string(), counters);
+    }
+
     pub fn set_exec_output(&self, output: Vec<ExecOutput>) {
         *lock(&self.exec_output) = output;
     }
@@ -543,6 +551,17 @@ impl ContainerRuntime for MemoryRuntime {
         let unused: Vec<String> = networks.iter().filter(|name| !used.contains(name.as_str())).cloned().collect();
         networks.retain(|name| used.contains(name.as_str()));
         Ok(unused)
+    }
+
+    async fn stats(&self, container_id: &str) -> Result<Option<ContainerCounters>, RuntimeError> {
+        self.check()?;
+        let running =
+            lock(&self.containers).get(container_id).is_some_and(|container| container.status == InstanceStatus::Running);
+        Ok(running.then(|| lock(&self.stats).get(container_id).copied().unwrap_or_default()))
+    }
+
+    async fn data_root(&self) -> Option<PathBuf> {
+        None
     }
 }
 
