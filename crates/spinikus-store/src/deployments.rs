@@ -43,6 +43,10 @@ pub trait DeploymentRepository: Send + Sync {
     /// Every live deployment, at most one per service, oldest first.
     async fn list_live_deployments(&self) -> Result<Vec<Deployment>, StoreError>;
 
+    /// For each service not deleted whose newest deployment, leaving out canceled ones,
+    /// failed: that deployment, oldest first.
+    async fn list_failed_latest_deployments(&self) -> Result<Vec<Deployment>, StoreError>;
+
     /// Every deployment not cleaned up yet, active ones included, oldest first.
     async fn list_uncleaned_deployments(&self) -> Result<Vec<Deployment>, StoreError>;
 
@@ -419,6 +423,20 @@ impl DeploymentRepository for SqliteStore {
         rows.into_iter().map(Deployment::try_from).collect()
     }
 
+    async fn list_failed_latest_deployments(&self) -> Result<Vec<Deployment>, StoreError> {
+        let rows: Vec<DeploymentRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM deployments AS d WHERE status = 'failed'
+               AND id = (SELECT MAX(id) FROM deployments WHERE service_id = d.service_id AND status != 'canceled')
+               AND EXISTS (SELECT 1 FROM services WHERE services.id = d.service_id AND services.deleted_at IS NULL)
+             ORDER BY id"
+        ))
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(Deployment::try_from).collect()
+    }
+
     async fn list_uncleaned_deployments(&self) -> Result<Vec<Deployment>, StoreError> {
         let rows: Vec<DeploymentRow> =
             sqlx::query_as(concat!("SELECT ", columns!(), " FROM deployments WHERE cleaned_at IS NULL ORDER BY id"))
@@ -670,6 +688,36 @@ mod tests {
         assert_eq!((last.to, last.reason, last.message.as_deref()), (Failed, Some(EndReason::BuildFailed), Some("cannot pull")));
         assert_eq!(last.actor, Actor::Server(server_id));
         assert_eq!(events[0].message, None);
+    }
+
+    #[tokio::test]
+    async fn lists_services_whose_latest_deployment_failed() {
+        let (_dir, store) = store().await;
+        let (service_id, server_id) = service(&store).await;
+        let fail = |id| {
+            let store = &store;
+            async move {
+                store.transition_deployment(id, Preparing, None, None, Actor::System).await.unwrap();
+                store.transition_deployment(id, Failed, Some(EndReason::BuildFailed), None, Actor::System).await.unwrap();
+            }
+        };
+        assert!(store.list_failed_latest_deployments().await.unwrap().is_empty());
+
+        let failed = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
+        fail(failed.id).await;
+        let canceled = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
+        store.transition_deployment(canceled.id, Canceled, Some(EndReason::CanceledByUser), None, Actor::System).await.unwrap();
+        let listed: Vec<_> = store.list_failed_latest_deployments().await.unwrap().into_iter().map(|d| d.id).collect();
+        assert_eq!(listed, vec![failed.id], "a cancel after the failure leaves it latest");
+
+        deploy_live(&store, service_id, server_id).await;
+        assert!(store.list_failed_latest_deployments().await.unwrap().is_empty(), "went live since");
+
+        let again = store.create_deployment(new_deployment(service_id, server_id), Actor::System).await.unwrap();
+        fail(again.id).await;
+        assert_eq!(store.list_failed_latest_deployments().await.unwrap().len(), 1);
+        store.delete_service(service_id).await.unwrap();
+        assert!(store.list_failed_latest_deployments().await.unwrap().is_empty(), "deleted service");
     }
 
     #[tokio::test]

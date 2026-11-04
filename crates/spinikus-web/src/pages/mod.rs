@@ -1,5 +1,6 @@
 //! Page handlers, by area.
 
+pub mod attention;
 pub mod audit;
 pub mod backups;
 pub mod databases;

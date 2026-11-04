@@ -99,6 +99,10 @@ pub trait BackupRepository: Send + Sync {
     /// The service's backups that are not deleted, newest first, starting after `after`.
     async fn list_backups(&self, service_id: ServiceId, after: Option<BackupId>, limit: u32) -> Result<Vec<Backup>, StoreError>;
 
+    /// For each service not deleted whose newest finished backup (not deleted) failed: that
+    /// backup, oldest first.
+    async fn list_failed_latest_backups(&self) -> Result<Vec<Backup>, StoreError>;
+
     /// Every queued and running backup, oldest first.
     async fn list_active_backups(&self) -> Result<Vec<Backup>, StoreError>;
 
@@ -613,6 +617,21 @@ impl BackupRepository for SqliteStore {
         row.ok_or_else(|| StoreError::NotFound { entity: BACKUP, id: id.to_string() })?.try_into()
     }
 
+    async fn list_failed_latest_backups(&self) -> Result<Vec<Backup>, StoreError> {
+        let rows: Vec<BackupRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            backup_columns!(),
+            " FROM backups AS b WHERE status = 'failed' AND deleted_at IS NULL
+               AND id = (SELECT MAX(id) FROM backups WHERE service_id = b.service_id AND deleted_at IS NULL
+                         AND status IN ('succeeded', 'failed'))
+               AND EXISTS (SELECT 1 FROM services WHERE services.id = b.service_id AND services.deleted_at IS NULL)
+             ORDER BY id"
+        ))
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(Backup::try_from).collect()
+    }
+
     async fn list_backups(&self, service_id: ServiceId, after: Option<BackupId>, limit: u32) -> Result<Vec<Backup>, StoreError> {
         let rows: Vec<BackupRow> = match after {
             Some(after) => {
@@ -874,5 +893,36 @@ mod tests {
         assert_eq!((first.status, first.size_bytes, first.server_id), (BackupStatus::Succeeded, Some(1024), Some(server)));
         assert!(first.started_at.is_some() && first.finished_at.is_some());
         assert!(matches!(store.get_backup(made[0]).await, Err(StoreError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn lists_databases_whose_latest_finished_backup_failed() {
+        let (_dir, store) = store().await;
+        let service = database(&store).await;
+        let destination = store.create_storage_destination(destination("S3"), &Secret::new("s")).await.unwrap();
+        let backup = |outcome: Option<Result<u64, String>>| {
+            let store = &store;
+            async move {
+                let backup = store.create_backup(new_backup(service, destination.id, None)).await.unwrap();
+                if let Some(outcome) = outcome {
+                    store.finish_backup(backup.id, outcome).await.unwrap();
+                }
+                backup.id
+            }
+        };
+        let listed = || async { store.list_failed_latest_backups().await.unwrap().into_iter().map(|b| b.id).collect::<Vec<_>>() };
+
+        backup(Some(Ok(1))).await;
+        assert!(listed().await.is_empty());
+        let failed = backup(Some(Err("disk full".to_string()))).await;
+        backup(None).await;
+        assert_eq!(listed().await, vec![failed], "one still queued doesn't count");
+
+        let succeeded = backup(Some(Ok(1))).await;
+        assert!(listed().await.is_empty(), "succeeded since");
+        store.mark_backup_deleted(succeeded).await.unwrap();
+        assert_eq!(listed().await, vec![failed], "a deleted backup doesn't count");
+        store.mark_backup_deleted(failed).await.unwrap();
+        assert!(listed().await.is_empty(), "nor does a deleted failure");
     }
 }

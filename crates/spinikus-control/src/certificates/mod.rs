@@ -91,10 +91,10 @@ impl Certificates {
 }
 
 /// How close to expiring a certificate is reported, if it hasn't been renewed.
-const EXPIRING_WITHIN: SignedDuration = SignedDuration::from_hours(14 * 24);
+pub(crate) const EXPIRING_WITHIN: SignedDuration = SignedDuration::from_hours(14 * 24);
 
 /// Hostnames that can get a certificate: public names, not wildcards.
-fn certifiable(hostname: &Hostname) -> bool {
+pub(crate) fn certifiable(hostname: &Hostname) -> bool {
     hostname.is_public() && !hostname.is_wildcard()
 }
 
@@ -255,7 +255,7 @@ impl Control {
         })
     }
 
-    async fn certificates_by_id(&self) -> Result<HashMap<CertificateId, Certificate>, ControlError> {
+    pub(crate) async fn certificates_by_id(&self) -> Result<HashMap<CertificateId, Certificate>, ControlError> {
         let certificates = self.store().list_certificates().await?;
         Ok(certificates.into_iter().map(|certificate| (certificate.id, certificate)).collect())
     }

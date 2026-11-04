@@ -2713,6 +2713,38 @@
         }
       }
     },
+    "/api/v1/attention": {
+      "get": {
+        "tags": [
+          "attention"
+        ],
+        "summary": "What needs attention: servers that are away or low on disk, services that are crashing or whose latest deployment failed, databases whose latest backup failed, HTTPS certificates that couldn't be had or expire soon, a failed backup of Spinikus, and notification channels that couldn't send.",
+        "description": "What needs attention: servers that are away or low on disk, services that are crashing or whose latest deployment failed, databases whose latest backup failed, HTTPS certificates that couldn't be had or expire soon, a failed backup of Spinikus, and notification channels that couldn't send. Each user gets only what they may see: a service's problems need a role in its environment, the rest needs an instance admin.",
+        "operationId": "attention_list",
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/services/{id}/metrics": {
       "get": {
         "tags": [
@@ -6161,6 +6193,325 @@
           "tok_01J9ZX4Q8V6T3N2M1K0H9G8F7E"
         ],
         "pattern": "^tok_[0-9A-HJKMNP-TV-Z]{26}$"
+      },
+      "AttentionItem": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A server's agent connected before and isn't connected now.",
+            "required": [
+              "server_id",
+              "server_name",
+              "kind"
+            ],
+            "properties": {
+              "server_id": {
+                "$ref": "#/components/schemas/ServerId"
+              },
+              "server_name": {
+                "type": "string"
+              },
+              "last_seen_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "server_disconnected"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A server's disk is at least [`crate::metrics::DISK_LOW_PERCENT`] full.",
+            "required": [
+              "server_id",
+              "server_name",
+              "kind"
+            ],
+            "properties": {
+              "server_id": {
+                "$ref": "#/components/schemas/ServerId"
+              },
+              "server_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "server_low_on_disk"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A service's live container keeps crashing.",
+            "required": [
+              "service",
+              "crash_loop",
+              "kind"
+            ],
+            "properties": {
+              "service": {
+                "$ref": "#/components/schemas/ServiceRef"
+              },
+              "crash_loop": {
+                "$ref": "#/components/schemas/CrashLoop"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "service_crashing"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A service's latest deployment, canceled ones left out, failed.",
+            "required": [
+              "service",
+              "deployment_id",
+              "at",
+              "kind"
+            ],
+            "properties": {
+              "service": {
+                "$ref": "#/components/schemas/ServiceRef"
+              },
+              "deployment_id": {
+                "$ref": "#/components/schemas/DeploymentId"
+              },
+              "reason": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/EndReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "deployment_failed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A database's latest finished backup failed.",
+            "required": [
+              "service",
+              "backup_id",
+              "at",
+              "kind"
+            ],
+            "properties": {
+              "service": {
+                "$ref": "#/components/schemas/ServiceRef"
+              },
+              "backup_id": {
+                "$ref": "#/components/schemas/BackupId"
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "backup_failed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Getting an HTTPS certificate for a service's hostname failed, the last time it was\ntried; `expires_at` is when the certificate it has now, if any, expires.",
+            "required": [
+              "service",
+              "hostname",
+              "failures",
+              "kind"
+            ],
+            "properties": {
+              "service": {
+                "$ref": "#/components/schemas/ServiceRef"
+              },
+              "hostname": {
+                "$ref": "#/components/schemas/Hostname"
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "failures": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "retry_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "expires_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "certificate_failed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A service's HTTPS certificate expires soon, and hasn't been renewed.",
+            "required": [
+              "service",
+              "hostname",
+              "expires_at",
+              "kind"
+            ],
+            "properties": {
+              "service": {
+                "$ref": "#/components/schemas/ServiceRef"
+              },
+              "hostname": {
+                "$ref": "#/components/schemas/Hostname"
+              },
+              "expires_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "certificate_expiring"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The latest finished backup of Spinikus failed.",
+            "required": [
+              "backup_id",
+              "at",
+              "kind"
+            ],
+            "properties": {
+              "backup_id": {
+                "$ref": "#/components/schemas/InstanceBackupId"
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "instance_backup_failed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A notification channel's latest notification couldn't be sent.",
+            "required": [
+              "channel_id",
+              "channel_name",
+              "event",
+              "at",
+              "kind"
+            ],
+            "properties": {
+              "channel_id": {
+                "$ref": "#/components/schemas/NotificationChannelId"
+              },
+              "channel_name": {
+                "type": "string"
+              },
+              "event": {
+                "$ref": "#/components/schemas/NotificationEvent"
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "notifications_failing"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "One thing that needs attention."
+      },
+      "AttentionList": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttentionItem"
+            },
+            "description": "Servers first, then services, then Spinikus's own backups and notification channels."
+          }
+        }
       },
       "AuditAction": {
         "type": "string",
@@ -9861,6 +10212,42 @@
           "template"
         ]
       },
+      "ServiceRef": {
+        "type": "object",
+        "description": "The service an item is about, with the names to show it by.",
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "environment_id",
+          "environment_name",
+          "project_id",
+          "project_name"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ServiceId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ServiceKind"
+          },
+          "environment_id": {
+            "$ref": "#/components/schemas/EnvironmentId"
+          },
+          "environment_name": {
+            "type": "string"
+          },
+          "project_id": {
+            "$ref": "#/components/schemas/ProjectId"
+          },
+          "project_name": {
+            "type": "string"
+          }
+        }
+      },
       "ServiceUpdate": {
         "type": "object",
         "properties": {
@@ -10987,6 +11374,10 @@
     {
       "name": "instance-backups",
       "description": "Backups of Spinikus itself."
+    },
+    {
+      "name": "attention",
+      "description": "What needs attention across the instance, for the overview."
     },
     {
       "name": "metrics",

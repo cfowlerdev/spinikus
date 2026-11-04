@@ -157,6 +157,7 @@ async fn setup_creates_the_first_admin_and_signs_them_in() {
     assert!(!set_cookie.contains("Secure"), "plain HTTP without a proxy");
     assert_eq!(overview.status, StatusCode::OK);
     assert!(overview.body.contains("No projects yet"), "{}", overview.body);
+    assert!(!overview.body.contains("Needs attention"), "nothing does: {}", overview.body);
     assert_eq!(again.header("location"), Some("/login"));
     assert_eq!(taken.header("location"), Some("/login"));
     assert_eq!(web.control.store().count_users().await.unwrap(), 1);
@@ -516,6 +517,16 @@ async fn deploys_follows_cancels_and_rolls_back() {
     assert!(crashing.body.contains(&format!("{service_url}/logs?deployment_id={}", second.id)), "{}", crashing.body);
     assert_eq!(listed.body.matches(">crashing</span>").count(), 1, "{}", listed.body);
     assert_eq!(project.body.matches(">crashing</span>").count(), 1, "{}", project.body);
+
+    // The overview says so first, for whoever may see the service; the server's agent never
+    // connected, so there is nothing about it.
+    let overview = web.get("/", Some(&viewer)).await;
+    let admins = web.get("/", Some(&session)).await;
+
+    assert!(overview.body.contains("Needs attention") && overview.body.contains("Storefront is crashing"), "{}", overview.body);
+    assert!(overview.body.contains("Its container was restarted 4 times."), "{}", overview.body);
+    assert!(overview.body.contains(&format!("{service_url}/logs?deployment_id={}", second.id)), "{}", overview.body);
+    assert!(admins.body.contains("Storefront is crashing") && !admins.body.contains("disconnected"), "{}", admins.body);
 }
 
 /// A form body from its fields.

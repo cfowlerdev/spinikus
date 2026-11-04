@@ -80,7 +80,7 @@ The web dashboard is the main way users will configure and monitor Spinikus, so 
 
 ### Core screens
 
-- **Overview**: all projects, apps, databases and servers with live status, recent deploys, and anything needing attention (failed deploys, disk nearly full, cert about to expire).
+- **Overview**: all projects, apps, databases and servers with live status, recent deploys, and anything needing attention (failed deploys, disk nearly full, cert about to expire). The **Needs attention** list (also `GET /api/v1/attention`) is computed on each request from what is already recorded (lasting crash loops, each service's latest non-canceled deployment, each database's latest finished backup, hostname certificate records, server status and low disk, the latest instance backup, each channel's latest notification), rather than kept in a table of its own, so nothing has to be cleared by hand: an item goes once its cause does. Each principal gets only what they may see.
 - **Project / environment / app hierarchy**: production, staging and preview environments per project, with per-environment config.
 - **App detail page**: current release, deploy history, rollback button, domains, env vars and secrets, resource limits, health status.
 - **Live logs**: build and runtime logs streamed in the browser, with search, filtering and download.

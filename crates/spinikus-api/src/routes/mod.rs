@@ -1,3 +1,4 @@
+mod attention;
 mod audit;
 mod backups;
 mod databases;
@@ -62,6 +63,7 @@ pub fn v1() -> OpenApiRouter<Control> {
         .routes(routes!(deployments::stop))
         .routes(routes!(deployments::start))
         .routes(routes!(deployments::crash_loops))
+        .routes(routes!(attention::list))
         .routes(routes!(metrics::service))
         .routes(routes!(metrics::server))
         .routes(routes!(service_logs::show))

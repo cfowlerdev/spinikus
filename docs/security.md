@@ -9,7 +9,10 @@ accepts for now. Report vulnerabilities privately to the maintainers rather than
   destinations and the instance's backups. Settings that make the control plane connect
   somewhere (storage endpoints, the ACME directory) are theirs alone.
 - **Project and environment members** get the role they were given (viewer, developer,
-  admin) in that scope only. Something a user has no role in answers "not found".
+  admin) in that scope only. Something a user has no role in answers "not found". The
+  overview's **Needs attention** list (`GET /api/v1/attention`) follows the same rule: a
+  service's problems for anyone with a role in its environment, servers, Spinikus's own
+  backups and notification channels for instance admins (not for a scoped token).
 - **Developers run code on your servers.** Builds (Dockerfile or Railpack) and the
   containers they produce run whatever the repository says, with network access. Give the
   developer role only to people you would give a shell on the servers.

@@ -2,6 +2,8 @@
 
 ## Where to look
 
+- **Everything at once**: the dashboard's home page lists what **needs attention** above the
+  projects (see below).
 - **A deployment**: its page (the service's **Deployments** tab), or
   `spinikus deployment logs <id>`. Failures end the log with the reason and the error.
 - **An app**: the service's **Logs** tab, or `spinikus logs -f`. To look inside its running
@@ -11,6 +13,26 @@
   `[logging] level = "debug"` in `/etc/spinikus/spinikus.toml` and restart.
 - **Containers**: `docker ps --filter label=spinikus.service` on the server. Each deployment's
   container is named `spinikus-<deployment ID>`.
+
+## What needs attention
+
+The dashboard's home page starts with a **Needs attention** list when something is wrong,
+each with a link to where to look or fix it. Nothing is listed while all is well.
+
+| What                                                                                               | Who sees it                                    |
+| -------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| A server whose agent was connected and isn't now                                                   | Instance admins                                |
+| A server whose disk is 90% full or more                                                            | Instance admins                                |
+| A service that is [crashing](#a-service-is-marked-crashing)                                        | Anyone with a role in the service's environment |
+| A service whose latest deployment failed (canceled ones don't count), until one goes live         | The same                                       |
+| A database whose latest finished backup failed, until one succeeds                                 | The same                                       |
+| An app's hostname that has no HTTPS certificate, or whose renewal failed, or whose certificate expires within 14 days | The same, while HTTPS is on        |
+| The latest backup of Spinikus itself, if it failed                                                 | Instance admins                                |
+| A notification channel whose latest notification couldn't be sent                                | Instance admins                                |
+
+The list is worked out each time the page loads, from what Spinikus already records, so an
+item goes away once its cause does: the agent reconnects, a deployment goes live, a backup
+succeeds. `GET /api/v1/attention` returns the same list (see [The API](../api.md)).
 
 ## The dashboard doesn't load
 

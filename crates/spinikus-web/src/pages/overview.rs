@@ -1,4 +1,5 @@
-//! The overview: the projects the user can see, with their environments.
+//! The overview: what needs attention, then the projects the user can see, with their
+//! environments.
 
 use axum::extract::{Query, State};
 use maud::{Markup, html};
@@ -28,6 +29,11 @@ pub async fn overview(
     Query(After { after }): Query<After>,
 ) -> Result<Markup, WebError> {
     let after: Option<ProjectId> = after.as_deref().map(parse_id).transpose()?;
+    // Only on the first page, above the projects.
+    let attention = match after {
+        None => control.attention(&signed.principal).await?,
+        Some(_) => Vec::new(),
+    };
     let projects = control.list_projects(&signed.principal, after, PROJECTS_PER_PAGE).await?;
     let mut rows = Vec::with_capacity(projects.items.len());
     for project in &projects.items {
@@ -39,6 +45,7 @@ pub async fn overview(
         false => "You don't have access to any projects yet. An admin can add you to one.",
     };
     let content = html! {
+        (super::attention::section(&attention))
         (layout::header("Projects", None, html! {
             @if signed.principal.is_instance_admin() { a href="/projects/new" class=(BUTTON_PRIMARY) { "New project" } }
         }))

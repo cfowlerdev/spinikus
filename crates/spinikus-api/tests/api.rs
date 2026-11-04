@@ -303,12 +303,13 @@ async fn admins_create_servers_and_join_tokens() {
     let point = spinikus_core::metrics::MetricPoint {
         at,
         cpu_cores: Some(0.5),
-        disk_used_bytes: Some(30),
+        disk_used_bytes: Some(95),
         disk_total_bytes: Some(100),
         ..Default::default()
     };
     api.control.record_stats(id.parse().unwrap(), vec![(String::new(), point)]).await.unwrap();
     let metrics = api.send(Method::GET, &format!("/api/v1/servers/{id}/metrics"), token, &[], None).await;
+    let attention = api.send(Method::GET, "/api/v1/attention", token, &[], None).await;
     let join = api.send(Method::POST, &format!("/api/v1/servers/{id}/enrollment-tokens"), token, &[], None).await;
     let revoked = api.send(Method::POST, &format!("/api/v1/servers/{id}/revoke"), token, &[], None).await;
     let shown = api.send(Method::GET, &format!("/api/v1/servers/{id}"), token, &[], None).await;
@@ -316,7 +317,9 @@ async fn admins_create_servers_and_join_tokens() {
 
     assert_eq!((created.status, &created.body["status"]), (StatusCode::CREATED, &json!("pending")));
     assert_eq!((metrics.status, &metrics.body["range"]), (StatusCode::OK, &json!("1h")));
-    assert_eq!(metrics.body["points"][0]["disk_used_bytes"], 30);
+    assert_eq!(metrics.body["points"][0]["disk_used_bytes"], 95);
+    assert_eq!(attention.status, StatusCode::OK);
+    assert_eq!(attention.body["items"], json!([{ "kind": "server_low_on_disk", "server_id": id, "server_name": "web-1" }]));
     assert_eq!(metrics.body["points"][0]["network_rx_rate"], json!(null));
     assert_eq!(join.status, StatusCode::CREATED);
     assert!(join.body["token"].as_str().unwrap().starts_with("spj_"));

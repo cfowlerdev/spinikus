@@ -36,7 +36,7 @@ impl Control {
         Ok(self.generated_hostnames().await?.remove(&service_id))
     }
 
-    async fn generated_hostnames(&self) -> Result<BTreeMap<ServiceId, Hostname>, ControlError> {
+    pub(crate) async fn generated_hostnames(&self) -> Result<BTreeMap<ServiceId, Hostname>, ControlError> {
         let Some(base) = self.base_domain().await? else {
             return Ok(BTreeMap::new());
         };
