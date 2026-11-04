@@ -1,4 +1,5 @@
-//! A service: what runs now, its deployments, and deploying, restarting or rolling it back.
+//! A service: what runs now, its deployments, and deploying, restarting, stopping, starting or
+//! rolling it back.
 
 use axum::{
     Form,
@@ -22,7 +23,7 @@ use super::{Tab, crumbs, parse_id, redirect, refused, service_tabs};
 use crate::{
     auth::Signed,
     error::WebError,
-    layout::{self, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, LINK, csrf_field, service_badge, status_badge},
+    layout::{self, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, LINK, csrf_field, service_badge, status_badge, stopped_badge},
 };
 
 /// How many deployments the history shows at a time.
@@ -33,8 +34,10 @@ const POLL_EVERY: &str = "every 2s";
 #[derive(Deserialize)]
 pub struct After {
     after: Option<String>,
-    /// Set after a restart, to say it happened.
+    /// Set after a restart, a stop or a start, to say it happened.
     restarted: Option<String>,
+    stopped: Option<String>,
+    started: Option<String>,
     /// `undeployed` after creating a database without deploying it, to say what's next.
     created: Option<String>,
 }
@@ -43,15 +46,19 @@ pub async fn service(
     State(control): State<Control>,
     signed: Signed,
     Path(id): Path<String>,
-    Query(After { after, restarted, created }): Query<After>,
+    Query(After { after, restarted, stopped, started, created }): Query<After>,
 ) -> Result<Response, WebError> {
     let after = after.as_deref().map(parse_id).transpose()?;
-    let shown = match (restarted, created.as_deref()) {
-        (Some(_), _) => Some(Shown::Notice("Restarted.")),
-        (None, Some("undeployed")) => {
-            Some(Shown::Notice("Created, not deployed yet. Change its settings or variables if you need to, then deploy it."))
-        }
-        _ => None,
+    let shown = if restarted.is_some() {
+        Some(Shown::Notice("Restarted."))
+    } else if stopped.is_some() {
+        Some(Shown::Notice("Stopped. It stays stopped until you start it or deploy it."))
+    } else if started.is_some() {
+        Some(Shown::Notice("Started."))
+    } else if created.as_deref() == Some("undeployed") {
+        Some(Shown::Notice("Created, not deployed yet. Change its settings or variables if you need to, then deploy it."))
+    } else {
+        None
     };
     Ok(service_page(&control, &signed, parse_id(&id)?, after, shown).await?.into_response())
 }
@@ -121,11 +128,48 @@ pub async fn restart(
     Path(id): Path<String>,
 ) -> Result<Response, WebError> {
     let service_id = parse_id(&id)?;
-    match control.restart_service(&signed.principal, service_id).await {
-        Ok(_) => Ok(redirect(&headers, &format!("/services/{service_id}?restarted=1"))),
+    let outcome = control.restart_service(&signed.principal, service_id).await.map(|_| ());
+    act(&control, &signed, &headers, service_id, outcome, "restarted").await
+}
+
+/// Stops the service's running container, then shows the service.
+pub async fn stop(
+    State(control): State<Control>,
+    signed: Signed,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, WebError> {
+    let service_id = parse_id(&id)?;
+    let outcome = control.stop_service(&signed.principal, service_id).await.map(|_| ());
+    act(&control, &signed, &headers, service_id, outcome, "stopped").await
+}
+
+/// Starts the service's stopped container, then shows the service.
+pub async fn start(
+    State(control): State<Control>,
+    signed: Signed,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, WebError> {
+    let service_id = parse_id(&id)?;
+    let outcome = control.start_service(&signed.principal, service_id).await.map(|_| ());
+    act(&control, &signed, &headers, service_id, outcome, "started").await
+}
+
+/// Shows the service after a restart, stop or start: saying `done` happened, or why not.
+async fn act(
+    control: &Control,
+    signed: &Signed,
+    headers: &HeaderMap,
+    service_id: ServiceId,
+    outcome: Result<(), ControlError>,
+    done: &str,
+) -> Result<Response, WebError> {
+    match outcome {
+        Ok(()) => Ok(redirect(headers, &format!("/services/{service_id}?{done}=1"))),
         Err(error) => match refused(&error) {
             Some(message) => {
-                let page = service_page(&control, &signed, service_id, None, Some(Shown::Alert(&message))).await?;
+                let page = service_page(control, signed, service_id, None, Some(Shown::Alert(&message))).await?;
                 Ok((StatusCode::UNPROCESSABLE_ENTITY, page).into_response())
             }
             None => Err(error.into()),
@@ -164,6 +208,7 @@ async fn service_page(
         None => find_live(control, signed, id).await?,
     };
     let can_deploy = role >= Role::Developer;
+    let stopped = service.stopped_at.is_some();
     let placement = match service.server_id {
         Some(server) => html! { span class="font-mono" { (server) } },
         None => html! { "This machine (the embedded server)" },
@@ -176,15 +221,28 @@ async fn service_page(
         }
         div class="mb-6 flex flex-wrap items-start gap-4" {
             div {
-                h1 class="flex items-center gap-3 text-2xl font-semibold tracking-tight" { (service.name) (service_badge(service.kind)) }
+                h1 class="flex items-center gap-3 text-2xl font-semibold tracking-tight" {
+                    (service.name) (service_badge(service.kind))
+                    @if service.stopped_at.is_some() { (stopped_badge()) }
+                }
                 p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400" { (source_summary(source.as_ref())) }
             }
             @if can_deploy {
                 div class="ml-auto flex gap-2" {
-                    @if live.is_some() && role == Role::Admin {
-                        a href=(super::terminal::url(service.id, None)) hx-boost="false" class=(BUTTON_SECONDARY) { "Terminal" }
-                    }
-                    @if live.is_some() {
+                    @if live.is_some() && stopped {
+                        form method="post" action={ "/services/" (service.id) "/start" } {
+                            (csrf_field(signed))
+                            button type="submit" class=(BUTTON_SECONDARY) { "Start" }
+                        }
+                    } @else if live.is_some() {
+                        @if role == Role::Admin {
+                            a href=(super::terminal::url(service.id, None)) hx-boost="false" class=(BUTTON_SECONDARY) { "Terminal" }
+                        }
+                        form method="post" action={ "/services/" (service.id) "/stop" }
+                            hx-confirm="Stop the running container? Requests to it fail until you start it or deploy again." {
+                            (csrf_field(signed))
+                            button type="submit" class=(BUTTON_SECONDARY) { "Stop" }
+                        }
                         form method="post" action={ "/services/" (service.id) "/restart" }
                             hx-confirm="Restart the running container? Requests to it fail until it is back up." {
                             (csrf_field(signed))
@@ -202,7 +260,7 @@ async fn service_page(
         @if let Some(engine) = Engine::of(&service.config) { (super::databases::connection(&service, engine)) }
         section class="mb-8" {
             h2 class="mb-3 font-semibold" { "Running now" }
-            (current(live.as_ref()))
+            (current(live.as_ref(), service.stopped_at))
         }
         section class="mb-8" {
             h2 class="mb-3 font-semibold" { "Deployments" }
@@ -250,10 +308,15 @@ fn source_summary(source: Option<&SourceSpec>) -> Markup {
     }
 }
 
-fn current(live: Option<&Deployment>) -> Markup {
+fn current(live: Option<&Deployment>, stopped_at: Option<jiff::Timestamp>) -> Markup {
     match live {
         None => layout::empty("Nothing is running. Deploy the service to start it."),
         Some(deployment) => html! {
+            @if let Some(at) = stopped_at {
+                p class="mb-3 text-sm text-zinc-600 dark:text-zinc-400" {
+                    "Stopped " (layout::time(at)) ". Its container is kept, and requests to it fail until it is started or deployed again."
+                }
+            }
             a href={ "/deployments/" (deployment.id) } class={ (CARD) " flex flex-wrap items-center gap-x-6 gap-y-2 p-5 hover:border-zinc-300 dark:hover:border-zinc-700" } {
                 (status_badge(deployment.status))
                 span class="font-mono text-sm" { (what_runs_short(deployment)) }

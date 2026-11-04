@@ -256,6 +256,12 @@ pub fn service_badge(kind: ServiceKind) -> Markup {
 }
 
 /// A deployment's status; in-progress ones get a pulsing dot.
+/// Marks a service stopped by a user.
+pub fn stopped_badge() -> Markup {
+    let colors = "bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-500/10 dark:text-amber-400 dark:ring-amber-500/20";
+    html! { span class={ (BADGE) " " (colors) } { "stopped" } }
+}
+
 pub fn status_badge(status: DeploymentStatus) -> Markup {
     use DeploymentStatus::*;
     let colors = match status {

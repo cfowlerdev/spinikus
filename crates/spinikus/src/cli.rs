@@ -49,6 +49,10 @@ pub enum Commands {
     Rollback(RollbackArgs),
     /// Restart a service's running container, keeping its deployment
     Restart(RestartArgs),
+    /// Stop a service's running container until it is started or deployed again
+    Stop(RestartArgs),
+    /// Start a stopped service's container again
+    Start(RestartArgs),
     /// A service's deployments
     #[command(subcommand)]
     Deployment(DeploymentCommand),

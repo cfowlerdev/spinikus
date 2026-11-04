@@ -35,6 +35,9 @@ impl Control {
         if self.store().live_deployment(service.id).await?.is_none() {
             return Err(rejected("the database has nothing live to restore into".to_string()));
         }
+        if service.stopped_at.is_some() {
+            return Err(rejected("the database is stopped; start it first".to_string()));
+        }
         let restoring = self.store().list_active_restores().await?;
         if restoring.iter().any(|restore| restore.service_id == service.id) {
             return Err(rejected("a restore of this database is in progress".to_string()));

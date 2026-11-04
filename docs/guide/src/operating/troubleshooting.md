@@ -59,7 +59,7 @@ The proxy answers with a short message:
 | Answer                                     | Meaning                                                            |
 | ------------------------------------------ | ------------------------------------------------------------------ |
 | `404 no app is served at <name>`           | No live app has this hostname on this server: the domain isn't added, the base domain differs, the DNS points at another server, or the service has no live deployment or no port |
-| `503 the app is not running`               | The live deployment's container isn't running; check its logs, and restart or redeploy |
+| `503 the app is not running`               | The live deployment's container isn't running; start it if it was stopped, else check its logs, and restart or redeploy |
 | `502 the app is not reachable`             | The container runs but doesn't accept connections on its port      |
 
 Right after Docker itself restarts, the first request to an app may answer `502` while the

@@ -483,6 +483,13 @@ impl DeploymentRepository for SqliteStore {
             let draining = previous.status.transition(DeploymentStatus::Draining, None)?;
             apply(&mut tx, &previous, draining, None, actor).await?;
         }
+        if to == DeploymentStatus::Live {
+            // A new deployment going live starts a stopped service again.
+            sqlx::query("UPDATE services SET stopped_at = NULL WHERE id = ?")
+                .bind(deployment.service_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
         apply(&mut tx, &deployment, transition, message, actor).await?;
 
         let deployment = fetch(&mut tx, id).await?;
@@ -600,6 +607,24 @@ mod tests {
 
     fn statuses(events: &[DeploymentEvent]) -> Vec<(Option<DeploymentStatus>, DeploymentStatus)> {
         events.iter().map(|event| (event.from, event.to)).collect()
+    }
+
+    #[tokio::test]
+    async fn stopping_keeps_the_revision_and_a_new_live_deployment_starts_the_service() {
+        let (_dir, store) = store().await;
+        let (service_id, server_id) = service(&store).await;
+        deploy_live(&store, service_id, server_id).await;
+
+        let stopped = store.set_service_stopped(service_id, true).await.unwrap();
+        let again = store.set_service_stopped(service_id, true).await.unwrap();
+        let started = store.set_service_stopped(service_id, false).await.unwrap();
+        store.set_service_stopped(service_id, true).await.unwrap();
+        deploy_live(&store, service_id, server_id).await;
+
+        assert!(stopped.stopped_at.is_some());
+        assert_eq!(again.stopped_at, stopped.stopped_at, "stopping again keeps when");
+        assert_eq!((started.stopped_at, started.revision), (None, stopped.revision));
+        assert_eq!(store.get_service(service_id).await.unwrap().stopped_at, None);
     }
 
     #[tokio::test]

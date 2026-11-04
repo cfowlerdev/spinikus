@@ -14,6 +14,7 @@ use spinikus_control::{Control, deployments::stream::DeploymentUpdate};
 use spinikus_core::{
     deployment::{Deployment, DeploymentEvent},
     id::{DeploymentId, ServiceId},
+    service::Service,
 };
 use tokio_stream::StreamExt;
 
@@ -173,6 +174,42 @@ pub async fn restart(
     Path(service_id): Path<ServiceId>,
 ) -> Result<Json<Deployment>, ApiError> {
     Ok(Json(control.restart_service(&principal, service_id).await?))
+}
+
+/// Stops the service's live container, answering with the service (`stopped_at` set) once the
+/// agent has. It stays stopped until it is started, or another deployment goes live.
+#[utoipa::path(
+    post,
+    path = "/services/{id}/stop",
+    operation_id = "deployments_stop",
+    tag = "deployments",
+    params(("id" = ServiceId, Path)),
+    responses((status = 200, body = Service)),
+)]
+pub async fn stop(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+) -> Result<Json<Service>, ApiError> {
+    Ok(Json(control.stop_service(&principal, service_id).await?))
+}
+
+/// Starts the service's stopped live container again, answering with the service once the
+/// agent has.
+#[utoipa::path(
+    post,
+    path = "/services/{id}/start",
+    operation_id = "deployments_start",
+    tag = "deployments",
+    params(("id" = ServiceId, Path)),
+    responses((status = 200, body = Service)),
+)]
+pub async fn start(
+    State(control): State<Control>,
+    Authenticated(principal): Authenticated,
+    Path(service_id): Path<ServiceId>,
+) -> Result<Json<Service>, ApiError> {
+    Ok(Json(control.start_service(&principal, service_id).await?))
 }
 
 /// Follows the deployment as server-sent events: `log` events (a line each, with the byte

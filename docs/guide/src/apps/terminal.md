@@ -42,7 +42,7 @@ echo 'ls /app' | spinikus shell
 
 ## What to know
 
-- **Only running containers.** A deployment whose health check failed has its container
+- **Only running containers.** A stopped service has to be started first. A deployment whose health check failed has its container
   stopped; read its **Container logs** instead (see [Logs](logs.md)). A container that keeps
   crashing may not stay up long enough to open one.
 - **Changes are temporary.** Files you change are lost when the container is replaced by the

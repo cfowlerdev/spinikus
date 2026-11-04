@@ -17,7 +17,9 @@ use spinikus_core::{
     source::{GitSource, ImageSource, SourceSpec},
     user::UserFields,
 };
-use spinikus_store::{DeploymentRepository, MasterKey, MembershipRepository, SqliteStore, UserRepository, connect, migrate};
+use spinikus_store::{
+    DeploymentRepository, MasterKey, MembershipRepository, ServiceRepository, SqliteStore, UserRepository, connect, migrate,
+};
 use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery staple";
@@ -469,6 +471,29 @@ async fn deploys_follows_cancels_and_rolls_back() {
     assert!(restart.body.contains("no container on its server"), "{}", restart.body);
     assert!(restarted.body.contains("Restarted."), "{}", restarted.body);
     assert!(!nothing_live.body.contains("/restart"), "{}", nothing_live.body);
+
+    // Stopping and starting: refused the same way without a container. A stopped service
+    // offers Start alone, and is marked stopped here and in its environment's list.
+    let stop = web.post(&format!("{service_url}/stop"), Some(&session), &form).await;
+    let stopped_notice = web.get(&format!("{service_url}?stopped=1"), Some(&session)).await;
+    let stopped_service = control.store().set_service_stopped(web_app.id, true).await.unwrap();
+    let stopped = web.get(&service_url, Some(&session)).await;
+    let environment = web.get(&format!("/environments/{}", stopped_service.environment_id), Some(&session)).await;
+    let start = web.post(&format!("{service_url}/start"), Some(&session), &form).await;
+
+    assert!(history.body.contains(&format!(r#"action="{service_url}/stop""#)), "{}", history.body);
+    assert!(!history.body.contains(&format!(r#"action="{service_url}/start""#)), "{}", history.body);
+    assert_eq!(stop.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(stop.body.contains("no container on its server"), "{}", stop.body);
+    assert!(stopped_notice.body.contains("Stopped. It stays stopped"), "{}", stopped_notice.body);
+    assert!(stopped.body.contains(&format!(r#"action="{service_url}/start""#)), "{}", stopped.body);
+    for gone in ["/stop\"", "/restart\"", r#"hx-boost="false" class="inline-flex"#] {
+        assert!(!stopped.body.contains(gone), "{gone}: {}", stopped.body);
+    }
+    assert!(stopped.body.contains(">stopped</span>") && stopped.body.contains("Its container is kept"), "{}", stopped.body);
+    assert!(environment.body.contains(">stopped</span>"), "{}", environment.body);
+    assert_eq!(start.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(start.body.contains("no container on its server"), "{}", start.body);
 }
 
 /// A form body from its fields.

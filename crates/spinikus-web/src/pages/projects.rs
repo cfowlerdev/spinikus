@@ -96,7 +96,10 @@ fn service_list(services: &[Service], empty: &str) -> Markup {
                         a href={ "/services/" (service.id) } class="flex items-center gap-3 px-5 py-3 hover:bg-zinc-50 dark:hover:bg-zinc-800/50" {
                             span class="font-medium" { (service.name) }
                             span class="font-mono text-xs text-zinc-500 dark:text-zinc-400" { (service.slug) }
-                            span class="ml-auto" { (service_badge(service.kind)) }
+                            span class="ml-auto flex gap-2" {
+                                @if service.stopped_at.is_some() { (layout::stopped_badge()) }
+                                (service_badge(service.kind))
+                            }
                         }
                     }
                 }

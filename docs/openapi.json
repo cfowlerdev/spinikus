@@ -2568,6 +2568,89 @@
         }
       }
     },
+    "/api/v1/services/{id}/stop": {
+      "post": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Stops the service's live container, answering with the service (`stopped_at` set) once the agent has.",
+        "description": "Stops the service's live container, answering with the service (`stopped_at` set) once the agent has. It stays stopped until it is started, or another deployment goes live.",
+        "operationId": "deployments_stop",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ServiceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Service"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/services/{id}/start": {
+      "post": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Starts the service's stopped live container again, answering with the service once the agent has.",
+        "operationId": "deployments_start",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ServiceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Service"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem detail; `code` says which.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/services/{id}/logs": {
       "get": {
         "tags": [
@@ -7919,6 +8002,14 @@
                     }
                   ]
                 },
+                "stopped_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "description": "When it was stopped; its live deployment's container stays stopped until it is\nstarted or another deployment goes live."
+                },
                 "revision": {
                   "type": "integer",
                   "format": "int64"
@@ -8433,6 +8524,14 @@
                 "type": "null"
               }
             ]
+          },
+          "stopped_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it was stopped; its live deployment's container stays stopped until it is\nstarted or another deployment goes live."
           },
           "revision": {
             "type": "integer",
@@ -9620,7 +9719,7 @@
     },
     {
       "name": "deployments",
-      "description": "Deploying, following, rolling back and restarting."
+      "description": "Deploying, following, rolling back, restarting, stopping and starting."
     },
     {
       "name": "logs",

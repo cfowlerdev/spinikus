@@ -33,7 +33,7 @@ use crate::{
 enum Owner {
     Project(Project),
     Environment(Environment, Project),
-    Service(Service, Environment, Project),
+    Service(Box<Service>, Environment, Project),
 }
 
 /// A scope's page: the scope, its owner, and the principal's role there (`None` for a project
@@ -64,7 +64,7 @@ impl Context {
                 let environment = control.get_environment(principal, service.environment_id).await?;
                 let role = control.environment_role(principal, &environment).await?;
                 let project = control.get_project(principal, environment.project_id).await?;
-                (Owner::Service(service, environment, project), Some(role))
+                (Owner::Service(Box::new(service), environment, project), Some(role))
             }
         };
         if role.is_none() {

@@ -107,7 +107,7 @@ impl Control {
             return Err(ControlError::Rejected {
                 entity: "deployment",
                 id: deployment.id.to_string(),
-                problem: "its container is not running; read its logs, or restart or redeploy the service".to_string(),
+                problem: "its container is not running; read its logs, or start, restart or redeploy the service".to_string(),
             });
         }
         let (rows, columns) = bounded(options.rows, options.columns);

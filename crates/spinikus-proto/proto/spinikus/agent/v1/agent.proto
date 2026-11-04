@@ -259,6 +259,8 @@ message Command {
     RemoveDeployment remove_deployment = 9;
     BackupDatabase backup_database = 10;
     RestoreDatabase restore_database = 11;
+    StopInstance stop_instance = 12;
+    StartInstance start_instance = 13;
   }
 }
 
@@ -420,6 +422,18 @@ message StorageDestination {
 message RestartInstance {
   string container_id = 1;
   google.protobuf.Duration grace_period = 2;
+}
+
+// Stops one container in place, killing it after the grace period. It stays stopped, also
+// across reboots, until started; stopping a stopped container succeeds.
+message StopInstance {
+  string container_id = 1;
+  google.protobuf.Duration grace_period = 2;
+}
+
+// Starts one stopped container in place; starting a running one succeeds.
+message StartInstance {
+  string container_id = 1;
 }
 
 // Open a session stream (`AgentService.OpenSession`) tagged with `session_id`.

@@ -1,4 +1,4 @@
-//! Restarts against a fake agent that answers them.
+//! Restarts, stops and starts against a fake agent that answers them.
 
 use spinikus_core::{
     membership::MembershipScope,
@@ -54,6 +54,28 @@ fn answer(
             }
         }
     })
+}
+
+/// Answers every restart, stop and start with success, passing each command on.
+fn answer_all(
+    control: &Control,
+    mut agent: mpsc::Receiver<pb::ControlMessage>,
+    server: ServerId,
+) -> mpsc::UnboundedReceiver<Kind> {
+    let (commands, received) = mpsc::unbounded_channel();
+    let control = control.clone();
+    tokio::spawn(async move {
+        while let Some(message) = agent.recv().await {
+            if let Some(control_message::Message::Command(command)) = message.message
+                && is_restart_command(&command.command_id)
+            {
+                let result = pb::CommandResult { command_id: command.command_id.clone(), outcome: Some(succeeded()) };
+                control.restart_result(server, result);
+                let _ = commands.send(command.kind.expect("a kind"));
+            }
+        }
+    });
+    received
 }
 
 fn succeeded() -> Outcome {
@@ -145,4 +167,42 @@ async fn only_the_server_it_was_sent_to_answers() {
 
     assert_eq!(restarting.await.unwrap().unwrap().id, deployment.id);
     assert!(is_restart_command(&command.command_id));
+}
+
+#[tokio::test]
+async fn developers_stop_and_start_the_live_container() {
+    let setup = setup(DeploymentTimings::default()).await;
+    let control = &setup.control;
+    let viewer = user(control, "viewer@example.com", false).await;
+    grant(control, &viewer, MembershipScope::Environment(setup.environment.id), Role::Viewer).await;
+    let (admin, service) = (&setup.admin, setup.service.id);
+
+    let nothing_live = control.stop_service(admin, service).await;
+    let (deployment, agent) = live(&setup).await;
+    record_container(&setup, &deployment).await;
+    let mut commands = answer_all(control, agent, setup.server.id);
+    let by_viewer = control.stop_service(&viewer, service).await;
+    let stopped = control.stop_service(admin, service).await.unwrap();
+    let stop = commands.recv().await.unwrap();
+    let restart_while_stopped = control.restart_service(admin, service).await;
+    let started = control.start_service(admin, service).await.unwrap();
+    let start = commands.recv().await.unwrap();
+
+    match nothing_live {
+        Err(ControlError::Rejected { problem, .. }) => assert_eq!(problem, "it has nothing live to stop"),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(by_viewer, Err(ControlError::Forbidden)), "{by_viewer:?}");
+    assert!(stopped.stopped_at.is_some());
+    let Kind::StopInstance(stop) = stop else { panic!("{stop:?}") };
+    assert_eq!((stop.container_id.as_str(), stop.grace_period.map(|grace| grace.seconds)), ("web-container", Some(20)));
+    assert!(
+        matches!(&restart_while_stopped, Err(ControlError::Rejected { problem, .. }) if problem == "it is stopped; start it instead"),
+        "{restart_while_stopped:?}"
+    );
+    assert_eq!(started.stopped_at, None);
+    assert_eq!(start, Kind::StartInstance(pb::StartInstance { container_id: "web-container".to_string() }));
+    let audit = control.store().list_audit_entries(None, None, None, 10).await.unwrap();
+    let actions: Vec<_> = audit.iter().take(2).map(|entry| entry.action.as_str()).collect();
+    assert_eq!(actions, ["service.start", "service.stop"]);
 }

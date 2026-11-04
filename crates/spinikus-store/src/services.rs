@@ -41,6 +41,10 @@ pub trait ServiceRepository: Send + Sync {
     /// Replaces the service's fields if it is still at `revision`.
     async fn update_service(&self, id: ServiceId, revision: i64, fields: ServiceFields) -> Result<Service, StoreError>;
 
+    /// Marks the service stopped (keeping when it was, if it already is) or not. This is
+    /// state, not settings, so the revision stays.
+    async fn set_service_stopped(&self, id: ServiceId, stopped: bool) -> Result<Service, StoreError>;
+
     /// Soft-deletes the service, which frees its slug. Refused while it has domains, so a
     /// deleted service never keeps hostnames reserved.
     async fn delete_service(&self, id: ServiceId) -> Result<(), StoreError>;
@@ -55,6 +59,7 @@ struct ServiceRow {
     kind: String,
     config: String,
     server_id: Option<String>,
+    stopped_at: Option<String>,
     revision: i64,
     created_at: String,
     updated_at: String,
@@ -76,6 +81,7 @@ impl TryFrom<ServiceRow> for Service {
                 problem: error.to_string(),
             })?,
             server_id: row.server_id.map(|id| parse_column(ENTITY, "server_id", &id)).transpose()?,
+            stopped_at: row.stopped_at.map(|at| parse_column(ENTITY, "stopped_at", &at)).transpose()?,
             revision: row.revision,
             created_at: parse_column(ENTITY, "created_at", &row.created_at)?,
             updated_at: parse_column(ENTITY, "updated_at", &row.updated_at)?,
@@ -103,7 +109,7 @@ impl ServiceRepository for SqliteStore {
         let row: Option<ServiceRow> = sqlx::query_as(
             "INSERT INTO services (id, environment_id, name, slug, kind, config, server_id)
              SELECT ?, id, ?, ?, ?, ?, ? FROM environments WHERE id = ? AND deleted_at IS NULL
-             RETURNING id, environment_id, name, slug, kind, config, server_id, revision, created_at, updated_at",
+             RETURNING id, environment_id, name, slug, kind, config, server_id, stopped_at, revision, created_at, updated_at",
         )
         .bind(ServiceId::new().to_string())
         .bind(&fields.name)
@@ -147,7 +153,7 @@ impl ServiceRepository for SqliteStore {
 
     async fn get_service(&self, id: ServiceId) -> Result<Service, StoreError> {
         let row: Option<ServiceRow> = sqlx::query_as(
-            "SELECT id, environment_id, name, slug, kind, config, server_id, revision, created_at, updated_at
+            "SELECT id, environment_id, name, slug, kind, config, server_id, stopped_at, revision, created_at, updated_at
              FROM services WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(id.to_string())
@@ -159,7 +165,7 @@ impl ServiceRepository for SqliteStore {
 
     async fn find_service_by_slug(&self, environment_id: EnvironmentId, slug: &Slug) -> Result<Option<Service>, StoreError> {
         let row: Option<ServiceRow> = sqlx::query_as(
-            "SELECT id, environment_id, name, slug, kind, config, server_id, revision, created_at, updated_at
+            "SELECT id, environment_id, name, slug, kind, config, server_id, stopped_at, revision, created_at, updated_at
              FROM services WHERE environment_id = ? AND slug = ? AND deleted_at IS NULL",
         )
         .bind(environment_id.to_string())
@@ -177,7 +183,7 @@ impl ServiceRepository for SqliteStore {
         limit: u32,
     ) -> Result<Vec<Service>, StoreError> {
         let rows: Vec<ServiceRow> = sqlx::query_as(
-            "SELECT id, environment_id, name, slug, kind, config, server_id, revision, created_at, updated_at
+            "SELECT id, environment_id, name, slug, kind, config, server_id, stopped_at, revision, created_at, updated_at
              FROM services WHERE environment_id = ? AND deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?",
         )
         .bind(environment_id.to_string())
@@ -199,7 +205,7 @@ impl ServiceRepository for SqliteStore {
              SET name = ?, slug = ?, config = ?, server_id = ?, revision = revision + 1,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ? AND revision = ? AND deleted_at IS NULL
-             RETURNING id, environment_id, name, slug, kind, config, server_id, revision, created_at, updated_at",
+             RETURNING id, environment_id, name, slug, kind, config, server_id, stopped_at, revision, created_at, updated_at",
         )
         .bind(&fields.name)
         .bind(fields.slug.as_str())
@@ -224,6 +230,21 @@ impl ServiceRepository for SqliteStore {
                 })
             }
         }
+    }
+
+    async fn set_service_stopped(&self, id: ServiceId, stopped: bool) -> Result<Service, StoreError> {
+        let row: Option<ServiceRow> = sqlx::query_as(
+            "UPDATE services
+             SET stopped_at = CASE WHEN ? THEN COALESCE(stopped_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) END
+             WHERE id = ? AND deleted_at IS NULL
+             RETURNING id, environment_id, name, slug, kind, config, server_id, stopped_at, revision, created_at, updated_at",
+        )
+        .bind(stopped)
+        .bind(id.to_string())
+        .fetch_optional(self.pool())
+        .await?;
+
+        row.ok_or_else(|| not_found(id))?.try_into()
     }
 
     async fn delete_service(&self, id: ServiceId) -> Result<(), StoreError> {

@@ -399,6 +399,7 @@ impl Control {
     /// The server and container of the database's live deployment.
     async fn locate_database(&self, service_id: ServiceId) -> Result<Located, ControlError> {
         match self.store().get_service(service_id).await {
+            Ok(service) if service.stopped_at.is_some() => return Ok(Located::Never("the database is stopped".to_string())),
             Ok(_) => {}
             Err(StoreError::NotFound { .. }) => return Ok(Located::Never("its database was deleted".to_string())),
             Err(error) => return Err(error.into()),

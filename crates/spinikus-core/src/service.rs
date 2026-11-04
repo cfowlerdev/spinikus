@@ -25,6 +25,9 @@ pub struct Service {
     pub config: ServiceConfig,
     /// The server new deployments run on; `None` means the embedded server.
     pub server_id: Option<ServerId>,
+    /// When it was stopped; its live deployment's container stays stopped until it is
+    /// started or another deployment goes live.
+    pub stopped_at: Option<Timestamp>,
     pub revision: i64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,

@@ -64,6 +64,8 @@ async fn run_with(session: &Session, command: Commands) -> anyhow::Result<()> {
         Commands::Deploy(args) => deploy::deploy(session, args).await,
         Commands::Rollback(args) => deploy::rollback(session, args).await,
         Commands::Restart(args) => deploy::restart(session, args).await,
+        Commands::Stop(args) => deploy::stop(session, args).await,
+        Commands::Start(args) => deploy::start(session, args).await,
         Commands::Deployment(command) => deploy::deployment(session, command).await,
         Commands::Logs(args) => deploy::logs(session, args).await,
         Commands::Shell(args) => shell::shell(session, args).await,

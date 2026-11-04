@@ -329,6 +329,10 @@ impl Control {
         destination_id: StorageDestinationId,
     ) -> Result<Backup, ControlError> {
         let (service, environment) = self.service_with_access(principal, service_id, Role::Developer).await?;
+        if service.stopped_at.is_some() {
+            let problem = "the database is stopped; start it first".to_string();
+            return Err(ControlError::Rejected { entity: "service", id: service_id.to_string(), problem });
+        }
         let backup = self.queue_backup(&service, destination_id, None).await?;
         let details = json!({ "service_id": service_id.to_string(), "destination_id": destination_id.to_string() });
         self.audit_by(principal, "backup.create", backup.id, Some(environment.project_id), details).await?;

@@ -130,6 +130,8 @@ pub fn router(control: Control) -> Router {
         .route("/services/{id}/deploy", post(pages::services::deploy))
         .route("/services/{id}/rollback", post(pages::services::rollback))
         .route("/services/{id}/restart", post(pages::services::restart))
+        .route("/services/{id}/stop", post(pages::services::stop))
+        .route("/services/{id}/start", post(pages::services::start))
         .route("/deployments/{id}", get(pages::deployments::deployment))
         .route("/deployments/{id}/log", get(pages::deployments::download_log))
         .route("/deployments/{id}/summary", get(pages::deployments::summary))

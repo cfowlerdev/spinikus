@@ -23,7 +23,7 @@ environment's admins on its **Members** tab (add a member by their email):
 | Role          | May                                                                                     |
 | ------------- | --------------------------------------------------------------------------------------- |
 | **Viewer**    | See services, deployments, logs and variables (not secret values)                       |
-| **Developer** | Also create and change services, variables, volumes and domains; deploy, roll back, restart; back databases up |
+| **Developer** | Also create and change services, variables, volumes and domains; deploy, roll back, restart, stop and start; back databases up |
 | **Admin**     | Also delete services and volumes; reveal secrets; open terminals in containers; restore backups; manage backup schedules and members. A project's admins also manage its environments and turn previews on |
 
 A role in a project covers all its environments; a role in an environment covers only that

@@ -229,6 +229,19 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
     assert_eq!(not_live.code, 6, "{}", not_live.stderr);
     assert!(not_live.stderr.contains("nothing live to restart"), "{}", not_live.stderr);
 
+    // Stopping and starting it in place, through the agent; a stopped one isn't restarted.
+    let stopped = cli(&["stop"]).await;
+    assert_eq!(stopped.code, 0, "{}", stopped.stderr);
+    assert!(stopped.stderr.contains("Stopping shop/production/web"), "{}", stopped.stderr);
+    assert_eq!(stopped.stdout, "web stopped. Start it with `spinikus start shop/production/web`.\n");
+    let restart_stopped = cli(&["restart"]).await;
+    assert_eq!(restart_stopped.code, 6, "{}", restart_stopped.stderr);
+    assert!(restart_stopped.stderr.contains("it is stopped; start it instead"), "{}", restart_stopped.stderr);
+    let started = cli(&["-o", "json", "start"]).await;
+    assert_eq!(started.code, 0, "{}", started.stderr);
+    let service: serde_json::Value = serde_json::from_str(&started.stdout).unwrap();
+    assert_eq!(service["stopped_at"], serde_json::Value::Null);
+
     // A command in the running container, its input piped (the in-memory terminal echoes it,
     // and `exit <code>` ends it), exiting with the command's status.
     let shell = spinikus(&config, &work, &["shell", "--", "sh", "-l"], Some("echo hi\nexit 5\n")).await;

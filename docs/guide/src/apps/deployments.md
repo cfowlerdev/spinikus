@@ -89,6 +89,19 @@ place, with the same image and settings. It doesn't make a new deployment, and t
 is unavailable for the moment it takes. To pick up changed variables or settings, deploy
 instead.
 
+## Stopping and starting
+
+**Stop** on the service's page (or `spinikus stop`) stops the live container, for when you
+want a service down for a while. The container and its deployment are kept, and the service
+is marked **stopped** on its page and in its environment's list. Requests to its domains
+are answered with `503 the app is not running`. It stays stopped when the server reboots.
+
+**Start** (or `spinikus start`) starts the same container again. Deploying or rolling back
+also starts a stopped service, since the new deployment's container runs as usual.
+
+While a service is stopped, it can't be restarted, opened in a terminal, backed up or
+restored. A stopped database's scheduled backups fail until it is started.
+
 ## Canceling
 
 A deployment that is queued or in progress can be canceled from its page with **Cancel**,

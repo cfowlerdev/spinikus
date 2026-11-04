@@ -190,6 +190,14 @@ impl Commands {
                 tracing::info!(command = id, container = restart.container_id, "restarting a container");
                 Box::pin(async move { restart_instance(&*runtime, restart).await.map(|()| pb::CommandSucceeded::default()) })
             }
+            Some(Kind::StopInstance(stop)) => {
+                tracing::info!(command = id, container = stop.container_id, "stopping a container");
+                Box::pin(async move { stop_instance(&*runtime, stop).await.map(|()| pb::CommandSucceeded::default()) })
+            }
+            Some(Kind::StartInstance(start)) => {
+                tracing::info!(command = id, container = start.container_id, "starting a container");
+                Box::pin(async move { start_instance(&*runtime, start).await.map(|()| pb::CommandSucceeded::default()) })
+            }
             kind => {
                 // The rest come with the builder, proxy and sessions.
                 let message = match &kind {
@@ -258,6 +266,8 @@ fn name(kind: &Kind) -> &'static str {
         Kind::StartDeployment(_) => "StartDeployment",
         Kind::StopDeployment(_) => "StopDeployment",
         Kind::RestartInstance(_) => "RestartInstance",
+        Kind::StopInstance(_) => "StopInstance",
+        Kind::StartInstance(_) => "StartInstance",
         Kind::OpenSession(_) => "OpenSession",
         Kind::CancelCommand(_) => "CancelCommand",
         Kind::RemoveDeployment(_) => "RemoveDeployment",
@@ -350,11 +360,32 @@ async fn remove_deployment(runtime: &dyn ContainerRuntime, remove: pb::RemoveDep
 
 /// Restarts one container Spinikus manages.
 async fn restart_instance(runtime: &dyn ContainerRuntime, restart: pb::RestartInstance) -> Result<(), pb::CommandFailed> {
-    let unknown = || failure(FailureReason::Internal, format!("no container `{}` managed by Spinikus", restart.container_id));
-    if runtime.inspect(&restart.container_id).await?.is_none() {
+    let grace = grace(restart.grace_period);
+    on_instance(runtime, &restart.container_id, |id| async move { runtime.restart(&id, grace).await }).await
+}
+
+/// Stops one container Spinikus manages, leaving it stopped.
+async fn stop_instance(runtime: &dyn ContainerRuntime, stop: pb::StopInstance) -> Result<(), pb::CommandFailed> {
+    let grace = grace(stop.grace_period);
+    on_instance(runtime, &stop.container_id, |id| async move { runtime.stop(&id, grace).await }).await
+}
+
+/// Starts one stopped container Spinikus manages.
+async fn start_instance(runtime: &dyn ContainerRuntime, start: pb::StartInstance) -> Result<(), pb::CommandFailed> {
+    on_instance(runtime, &start.container_id, |id| async move { runtime.start(&id).await }).await
+}
+
+/// Does `action` to a container if Spinikus manages it.
+async fn on_instance<F, Fut>(runtime: &dyn ContainerRuntime, container_id: &str, action: F) -> Result<(), pb::CommandFailed>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), RuntimeError>>,
+{
+    let unknown = || failure(FailureReason::Internal, format!("no container `{container_id}` managed by Spinikus"));
+    if runtime.inspect(container_id).await?.is_none() {
         return Err(unknown());
     }
-    match runtime.restart(&restart.container_id, grace(restart.grace_period)).await {
+    match action(container_id.to_string()).await {
         Err(RuntimeError::NotFound) => Err(unknown()),
         outcome => Ok(outcome?),
     }
@@ -539,6 +570,29 @@ mod tests {
         assert!(succeeded(&results[0]), "{:?}", results[0]);
         assert_eq!(runtime.get("c").unwrap().status, InstanceStatus::Running);
         assert_eq!(failed(&results[1]).message, "no container `missing` managed by Spinikus");
+    }
+
+    #[tokio::test]
+    async fn stops_and_starts_a_managed_container_in_place() {
+        let runtime = Arc::new(MemoryRuntime::new());
+        runtime.put(container("c", DeploymentId::new()));
+        let mut commands = Commands::new(runtime.clone(), builds(), BackupStores::default());
+
+        let stop = |id: &str| Kind::StopInstance(pb::StopInstance { container_id: id.to_string(), grace_period: None });
+        commands.start(command("cmd-1", stop("c")));
+        let stopped = finish(&mut commands).await;
+        let status_after_stop = runtime.get("c").unwrap().status;
+        commands.start(command("cmd-2", stop("c")));
+        let stopped_again = finish(&mut commands).await;
+        commands.start(command("cmd-3", Kind::StartInstance(pb::StartInstance { container_id: "c".to_string() })));
+        let started = finish(&mut commands).await;
+        commands.start(command("cmd-4", stop("missing")));
+        let missing = finish(&mut commands).await;
+
+        assert!(succeeded(&stopped) && succeeded(&stopped_again) && succeeded(&started));
+        assert_eq!(status_after_stop, InstanceStatus::Exited);
+        assert_eq!(runtime.get("c").unwrap().status, InstanceStatus::Running, "the same container again");
+        assert_eq!(failed(&missing).message, "no container `missing` managed by Spinikus");
     }
 
     #[tokio::test]

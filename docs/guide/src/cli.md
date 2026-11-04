@@ -76,6 +76,7 @@ picked by directory.
 | `deploy`       | Deploy a service and follow it until it is live                                 |
 | `rollback`     | Go back to an earlier deployment                                                |
 | `restart`      | Restart a service's running container                                           |
+| `stop`, `start` | Stop a service's running container until it is started or deployed again, and start it |
 | `deployment`   | List deployments, show one, print or follow its log, cancel it                  |
 | `logs`         | Print or follow a service's runtime logs                                        |
 | `shell`        | Open a shell, or run a command, in a service's running container ([Terminal](apps/terminal.md)) |

@@ -14,7 +14,7 @@ machines, you add them as servers, and each one runs a small agent that Spinikus
 - **Deploy apps** from a Git repository (built from its Dockerfile, or detected and built
   for you when it has none) or from a prebuilt image.
 - **Deploy on every push**, and get a **preview environment for each pull request**.
-- **Roll back** to an earlier deployment in seconds, and restart an app in place.
+- **Roll back** to an earlier deployment in seconds, and restart, stop or start an app in place.
 - **Serve apps on your domains with HTTPS**, with certificates from Let's Encrypt that
   renew themselves.
 - **Run PostgreSQL and Redis** next to your apps, and **back them up** to S3-compatible

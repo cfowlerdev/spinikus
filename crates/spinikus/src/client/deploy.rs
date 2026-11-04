@@ -51,6 +51,30 @@ pub async fn restart(session: &Session, args: RestartArgs) -> anyhow::Result<()>
     session.out.done(&format!("{} restarted ({}).", service.slug, deployment.id))
 }
 
+/// Stops the service's running container, until it is started or deployed again.
+pub async fn stop(session: &Session, args: RestartArgs) -> anyhow::Result<()> {
+    let service = session.service(args.service.as_deref()).await?;
+    let path = session.service_path(&service).await?;
+    session.out.info(&format!("Stopping {path}"));
+    let stopped: Value = session.api.post_empty(&format!("/services/{}/stop", service.id)).await?;
+    if session.out.json() {
+        return session.out.print_json(&stopped);
+    }
+    session.out.done(&format!("{} stopped. Start it with `spinikus start {path}`.", service.slug))
+}
+
+/// Starts the service's stopped container again.
+pub async fn start(session: &Session, args: RestartArgs) -> anyhow::Result<()> {
+    let service = session.service(args.service.as_deref()).await?;
+    let path = session.service_path(&service).await?;
+    session.out.info(&format!("Starting {path}"));
+    let started: Value = session.api.post_empty(&format!("/services/{}/start", service.id)).await?;
+    if session.out.json() {
+        return session.out.print_json(&started);
+    }
+    session.out.done(&format!("{} started.", service.slug))
+}
+
 /// Prints the deployment right away with `detach`, else follows it to the end: its log on
 /// stderr, then the result on stdout, failing with [`Exit::Failed`] if it didn't go live.
 pub(super) async fn finish(session: &Session, service: &Service, created: Value, detach: bool) -> anyhow::Result<()> {
