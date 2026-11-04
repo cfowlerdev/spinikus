@@ -25,10 +25,14 @@ pub struct Create {
     server_id: Option<ServerId>,
     /// A backup of another database to restore into this one once it runs.
     from_backup: Option<BackupId>,
+    /// Deploy it right away (the default). With `false` its settings can be changed before
+    /// its first deployment; not with `from_backup`.
+    deploy: Option<bool>,
 }
 
-/// Creates a database service and deploys it. The body has the service and its first
-/// deployment, and the restore when it starts from a backup; the location is the service's.
+/// Creates a database service and deploys it, unless `deploy` is `false`. The body has the
+/// service and its first deployment (`null` when not deployed), and the restore when it
+/// starts from a backup; the location is the service's.
 #[utoipa::path(
     post,
     path = "/environments/{id}/databases",
@@ -51,6 +55,7 @@ pub async fn create(
         version: body.version,
         server_id: body.server_id,
         from_backup: body.from_backup,
+        deploy: body.deploy.unwrap_or(true),
     };
     let created = control.create_database(&principal, environment_id, new).await?;
     Ok(located(format!("/api/v1/services/{}", created.service.id), created))

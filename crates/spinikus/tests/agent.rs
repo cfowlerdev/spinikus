@@ -1153,6 +1153,7 @@ async fn databases_are_reachable_by_name_and_keep_their_data() {
         version: None,
         server_id: Some(server),
         from_backup: None,
+        deploy: true,
     };
     let postgres = control.create_database(admin, environment, database("Postgres", Engine::Postgres)).await.unwrap();
     let redis = control.create_database(admin, environment, database("Redis", Engine::Redis)).await.unwrap();
@@ -1169,8 +1170,8 @@ async fn databases_are_reachable_by_name_and_keep_their_data() {
     };
     let within = Duration::from_secs(300);
 
-    control_plane.wait_for_deployment(postgres.deployment.id, DeploymentStatus::Live, within).await;
-    control_plane.wait_for_deployment(redis.deployment.id, DeploymentStatus::Live, within).await;
+    control_plane.wait_for_deployment(postgres.deployment.as_ref().unwrap().id, DeploymentStatus::Live, within).await;
+    control_plane.wait_for_deployment(redis.deployment.as_ref().unwrap().id, DeploymentStatus::Live, within).await;
     let url = secret(postgres.service.id, "DATABASE_URL").await;
     let sql = |statement: &str| ["psql", url.as_str(), "--tuples-only", "--no-align", "--command", statement].map(str::to_string);
     let created = sql("CREATE TABLE notes (body text); INSERT INTO notes VALUES ('kept');");
@@ -1186,7 +1187,7 @@ async fn databases_are_reachable_by_name_and_keep_their_data() {
     // A redeploy replaces the container (recreate) on the same volume.
     let again = control.create_deployment(admin, postgres.service.id).await.unwrap();
     control_plane.wait_for_deployment(again.id, DeploymentStatus::Live, within).await;
-    control_plane.wait_for_deployment(postgres.deployment.id, DeploymentStatus::Superseded, within).await;
+    control_plane.wait_for_deployment(postgres.deployment.as_ref().unwrap().id, DeploymentStatus::Superseded, within).await;
     let read = sql("SELECT body FROM notes;");
     let read: Vec<&str> = read.iter().map(String::as_str).collect();
     let kept = run_on_network(&network, "postgres:18", &read, Duration::from_secs(60)).await;
@@ -1301,6 +1302,7 @@ async fn backs_up_and_restores_a_database_through_s3() {
         version: None,
         server_id: Some(server),
         from_backup: None,
+        deploy: true,
     };
     let postgres = control.create_database(admin, environment, new).await.unwrap();
     let volumes = control.store().list_volumes(postgres.service.id).await.unwrap();
@@ -1311,7 +1313,7 @@ async fn backs_up_and_restores_a_database_through_s3() {
         pulled,
     };
     let within = Duration::from_secs(300);
-    control_plane.wait_for_deployment(postgres.deployment.id, DeploymentStatus::Live, within).await;
+    control_plane.wait_for_deployment(postgres.deployment.as_ref().unwrap().id, DeploymentStatus::Live, within).await;
     let destination = NewStorageDestination {
         name: "RustFS".to_string(),
         endpoint: Some(format!("http://127.0.0.1:{}", s3.port)),
@@ -1435,6 +1437,7 @@ async fn backs_up_and_restores_redis_through_s3() {
         version: None,
         server_id: Some(server),
         from_backup: None,
+        deploy: true,
     };
     let redis = control.create_database(admin, environment, new).await.unwrap();
     let volumes = control.store().list_volumes(redis.service.id).await.unwrap();
@@ -1444,7 +1447,9 @@ async fn backs_up_and_restores_redis_through_s3() {
         network: network.clone(),
         pulled,
     };
-    control_plane.wait_for_deployment(redis.deployment.id, DeploymentStatus::Live, Duration::from_secs(300)).await;
+    control_plane
+        .wait_for_deployment(redis.deployment.as_ref().unwrap().id, DeploymentStatus::Live, Duration::from_secs(300))
+        .await;
     let destination = NewStorageDestination {
         name: "RustFS".to_string(),
         endpoint: Some(format!("http://127.0.0.1:{}", s3.port)),
@@ -1503,7 +1508,7 @@ async fn backs_up_and_restores_redis_through_s3() {
     let after_undo = keys().await;
     // Writes after a restore are kept: Redis is back on its append-only file.
     cli(&["SET", "later", "x"]).await;
-    let container = format!("spinikus-{}", redis.deployment.id);
+    let container = format!("spinikus-{}", redis.deployment.as_ref().unwrap().id);
     let restarted = std::process::Command::new("docker").args(["restart", &container]).output().unwrap();
     // redis-cli exits 0 with Redis's LOADING error too.
     let mut later = String::new();

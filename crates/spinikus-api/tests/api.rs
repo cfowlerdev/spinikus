@@ -628,6 +628,8 @@ async fn creates_a_database_with_its_parts() {
     let no_engine = api.send(Method::POST, &databases, token, &[], Some(json!({ "name": "X" }))).await;
     let unknown_backup = json!({ "name": "X", "from_backup": "bkp_01J0000000000000000000000Z" });
     let unknown_backup = api.send(Method::POST, &databases, token, &[], Some(unknown_backup)).await;
+    let later = json!({ "name": "Later", "engine": "postgres", "server_id": server.body["id"], "deploy": false });
+    let later = api.send(Method::POST, &databases, token, &[], Some(later)).await;
     let location = created.header(header::LOCATION).to_string();
     let variables = api.send(Method::GET, &format!("{location}/variables"), token, &[], None).await;
     let volumes = api.send(Method::GET, &format!("{location}/volumes"), token, &[], None).await;
@@ -655,6 +657,7 @@ async fn creates_a_database_with_its_parts() {
     assert_eq!((no_engine.status, &no_engine.body["field"]), (StatusCode::UNPROCESSABLE_ENTITY, &json!("engine")));
     assert_eq!(unknown_backup.status, StatusCode::NOT_FOUND, "{:?}", unknown_backup.body);
     assert!(created.body.get("restore").is_none(), "only when it starts from a backup");
+    assert_eq!((later.status, &later.body["deployment"]), (StatusCode::CREATED, &json!(null)), "{:?}", later.body);
 }
 
 #[tokio::test]

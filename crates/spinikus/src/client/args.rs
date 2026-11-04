@@ -408,6 +408,9 @@ pub enum DbCommand {
         /// Don't wait for its first deployment
         #[arg(short, long)]
         detach: bool,
+        /// Don't deploy it yet, to change its settings or variables first
+        #[arg(long, conflicts_with_all = ["from_backup", "detach"])]
+        no_deploy: bool,
     },
     /// Back a database up now
     Backup {

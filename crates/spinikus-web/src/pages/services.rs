@@ -35,16 +35,24 @@ pub struct After {
     after: Option<String>,
     /// Set after a restart, to say it happened.
     restarted: Option<String>,
+    /// `undeployed` after creating a database without deploying it, to say what's next.
+    created: Option<String>,
 }
 
 pub async fn service(
     State(control): State<Control>,
     signed: Signed,
     Path(id): Path<String>,
-    Query(After { after, restarted }): Query<After>,
+    Query(After { after, restarted, created }): Query<After>,
 ) -> Result<Response, WebError> {
     let after = after.as_deref().map(parse_id).transpose()?;
-    let shown = restarted.is_some().then_some(Shown::Notice("Restarted."));
+    let shown = match (restarted, created.as_deref()) {
+        (Some(_), _) => Some(Shown::Notice("Restarted.")),
+        (None, Some("undeployed")) => {
+            Some(Shown::Notice("Created, not deployed yet. Change its settings or variables if you need to, then deploy it."))
+        }
+        _ => None,
+    };
     Ok(service_page(&control, &signed, parse_id(&id)?, after, shown).await?.into_response())
 }
 

@@ -1054,12 +1054,22 @@ async fn creates_databases_and_backs_them_up_and_restores_them() {
     // A database, from the newest PostgreSQL by default or a chosen version.
     let new_page = web.get(&format!("/environments/{}/databases/new", production.id), Some(&dev)).await;
     assert!(new_page.body.contains(r#"value="postgres:18" selected"#) && new_page.body.contains("Redis 7"), "{}", new_page.body);
+    assert!(new_page.body.contains(r#"name="deploy" type="checkbox" checked"#), "deployed by default: {}", new_page.body);
     let databases = format!("/environments/{}/databases", production.id);
     let unknown = web.post(&databases, Some(&dev), &form(&[("_csrf", &token), ("name", "Main"), ("database", "mysql:8")])).await;
     assert_eq!(unknown.status, StatusCode::UNPROCESSABLE_ENTITY);
-    let reply =
-        web.post(&databases, Some(&dev), &form(&[("_csrf", &token), ("name", "Main DB"), ("database", "postgres:17")])).await;
+    let main = form(&[("_csrf", &token), ("name", "Main DB"), ("database", "postgres:17"), ("deploy", "on")]);
+    let reply = web.post(&databases, Some(&dev), &main).await;
     let service_id = created(&reply, "/services/");
+    assert_eq!(control.list_deployments(&admin, service_id.parse().unwrap(), None, 10).await.unwrap().items.len(), 1);
+    // Unchecked, it waits on its page to be deployed.
+    let later = web.post(&databases, Some(&dev), &form(&[("_csrf", &token), ("name", "Later"), ("database", "redis:8")])).await;
+    let later = created(&later, "/services/");
+    let (later_id, query) = later.split_once('?').unwrap();
+    assert_eq!(query, "created=undeployed");
+    assert!(control.list_deployments(&admin, later_id.parse().unwrap(), None, 10).await.unwrap().items.is_empty());
+    let later_page = web.get(&format!("/services/{later}"), Some(&dev)).await;
+    assert!(later_page.body.contains("Created, not deployed yet."), "{}", later_page.body);
     let id: spinikus_core::id::ServiceId = service_id.parse().unwrap();
     let source = control.get_source(&admin, id).await.unwrap();
     assert_eq!(source.spec, SourceSpec::Image(ImageSource { image: "postgres:17".to_string() }));
@@ -1293,7 +1303,14 @@ async fn admins_add_servers_and_developers_place_services_on_them() {
     // New databases and services can go there too.
     let new_database = web.get(&format!("/environments/{}/databases/new", production.id), Some(&dev)).await;
     assert!(new_database.body.contains("web-2"));
-    let database = form(&[("_csrf", &dev_token), ("name", "Cache"), ("slug", ""), ("database", "redis:8"), ("server_id", &id)]);
+    let database = form(&[
+        ("_csrf", &dev_token),
+        ("name", "Cache"),
+        ("slug", ""),
+        ("database", "redis:8"),
+        ("server_id", &id),
+        ("deploy", "on"),
+    ]);
     let reply = web.post(&format!("/environments/{}/databases", production.id), Some(&dev), &database).await;
     let cache = web.control.get_service(&admin, created(&reply, "/services/").parse().unwrap()).await.unwrap();
     assert_eq!(cache.server_id.map(|id| id.to_string()), Some(id.clone()));
@@ -1765,6 +1782,7 @@ async fn developers_add_and_change_volumes_and_admins_remove_them() {
         version: None,
         server_id: None,
         from_backup: None,
+        deploy: true,
     };
     let database = control.create_database(&admin, production.id, new).await.unwrap();
     let page = web.get(&format!("/services/{}/settings", database.service.id), Some(&admin_session)).await;

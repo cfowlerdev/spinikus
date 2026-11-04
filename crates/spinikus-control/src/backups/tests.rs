@@ -85,6 +85,7 @@ async fn live_engine(fixture: &mut Fixture, engine: Engine) -> (Service, Deploym
         version: None,
         server_id: Some(fixture.setup.server.id),
         from_backup: None,
+        deploy: true,
     };
     let created = control.create_database(&fixture.setup.admin, fixture.setup.service.environment_id, new).await.unwrap();
     for step in ["prepare", "start"] {
@@ -95,7 +96,7 @@ async fn live_engine(fixture: &mut Fixture, engine: Engine) -> (Service, Deploym
         let outcome = Outcome::Succeeded(pb::CommandSucceeded { prepared, backup: None });
         control.deployment_result(fixture.setup.server.id, result(&command.command_id, outcome)).await;
     }
-    let deployment = control.store().get_deployment(created.deployment.id).await.unwrap();
+    let deployment = control.store().get_deployment(created.deployment.as_ref().unwrap().id).await.unwrap();
     assert_eq!(deployment.status, DeploymentStatus::Live);
     let container = ObservedInstance {
         service_id: created.service.id,
@@ -467,6 +468,7 @@ async fn backups_restore_into_a_new_database_once_it_runs() {
         version: version.map(str::to_string),
         server_id: Some(server),
         from_backup: Some(backup.id),
+        deploy: true,
     };
     let environment = database.environment_id;
 
@@ -496,7 +498,7 @@ async fn backups_restore_into_a_new_database_once_it_runs() {
     }
     let container = ObservedInstance {
         service_id: created.service.id,
-        deployment_id: created.deployment.id,
+        deployment_id: created.deployment.as_ref().unwrap().id,
         container_id: "copy-container".to_string(),
         status: InstanceStatus::Running,
         health: InstanceHealth::None,

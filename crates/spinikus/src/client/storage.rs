@@ -20,7 +20,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub async fn db(session: &Session, command: DbCommand) -> anyhow::Result<()> {
     let (api, out) = (&session.api, &session.out);
     match command {
-        DbCommand::Create { name, engine, version, from_backup, environment, slug, server_id, detach } => {
+        DbCommand::Create { name, engine, version, from_backup, environment, slug, server_id, detach, no_deploy } => {
             let environment = session.environment(environment.as_deref()).await?;
             let engine = engine.map(|engine| match engine {
                 Engine::Postgres => "postgres",
@@ -33,10 +33,18 @@ pub async fn db(session: &Session, command: DbCommand) -> anyhow::Result<()> {
                 "version": version,
                 "server_id": server_id,
                 "from_backup": from_backup,
+                "deploy": !no_deploy,
             });
             let created: Value = api.post(&format!("/environments/{}/databases", environment.id), &body).await?;
             let service: Service = views::read(&created["service"])?;
             let path = format!("{}/{}", session.environment_path(&environment).await?, service.slug);
+            if no_deploy {
+                if out.json() {
+                    return out.print_json(&created);
+                }
+                return out
+                    .done(&format!("Created {path} ({}), not deployed. Deploy it with `spinikus deploy {path}`.", service.id));
+            }
             out.info(&format!("Created {path} ({}); deploying it", service.id));
             deploy::finish(session, &service, created["deployment"].clone(), detach).await?;
             if let Some(restore) = created.get("restore").filter(|restore| !detach && !restore.is_null()) {

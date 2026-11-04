@@ -1761,8 +1761,8 @@
         "tags": [
           "databases"
         ],
-        "summary": "Creates a database service and deploys it.",
-        "description": "Creates a database service and deploys it. The body has the service and its first deployment, and the restore when it starts from a backup; the location is the service's.",
+        "summary": "Creates a database service and deploys it, unless `deploy` is `false`.",
+        "description": "Creates a database service and deploys it, unless `deploy` is `false`. The body has the service and its first deployment (`null` when not deployed), and the restore when it starts from a backup; the location is the service's.",
         "operationId": "databases_create",
         "parameters": [
           {
@@ -5970,17 +5970,23 @@
       },
       "CreatedDatabase": {
         "type": "object",
-        "description": "A database just created, and its first deployment.",
+        "description": "A database just created, and its first deployment, unless it was created without one.",
         "required": [
-          "service",
-          "deployment"
+          "service"
         ],
         "properties": {
           "service": {
             "$ref": "#/components/schemas/Service"
           },
           "deployment": {
-            "$ref": "#/components/schemas/Deployment"
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Deployment"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "restore": {
             "oneOf": [
@@ -6067,6 +6073,13 @@
                 "type": "null"
               }
             ]
+          },
+          "deploy": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Deploy it right away (the default). With `false` its settings can be changed before\nits first deployment; not with `from_backup`."
           }
         },
         "additionalProperties": false

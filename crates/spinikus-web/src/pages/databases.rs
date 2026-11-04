@@ -42,6 +42,9 @@ pub struct NewDatabaseForm {
     /// A backup to start from; empty for none.
     #[serde(default)]
     from_backup: String,
+    /// Deploy it right away: the checkbox, sent only when checked.
+    #[serde(default)]
+    deploy: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -72,7 +75,7 @@ impl Source {
 impl NewDatabaseForm {
     fn new() -> Self {
         let database = format!("{}:{}", Engine::Postgres.as_str(), Engine::Postgres.default_version());
-        Self { database, ..Default::default() }
+        Self { database, deploy: Some("on".to_string()), ..Default::default() }
     }
 
     fn engine_and_version(&self) -> Result<(Engine, String), ControlError> {
@@ -144,6 +147,8 @@ pub async fn create_database(
                 version: Some(version),
                 server_id,
                 from_backup: source.as_ref().map(|source| source.backup.id),
+                // One started from a backup is deployed to restore it, and has no checkbox.
+                deploy: form.deploy.is_some() || source.is_some(),
             };
             control.create_database(&signed.principal, environment.id, new).await
         }
@@ -152,6 +157,9 @@ pub async fn create_database(
     match created {
         // Its Backups tab shows the restore.
         Ok(created) if created.restore.is_some() => Ok(redirect(&headers, &format!("/services/{}/backups", created.service.id))),
+        Ok(created) if created.deployment.is_none() => {
+            Ok(redirect(&headers, &format!("/services/{}?created=undeployed", created.service.id)))
+        }
         Ok(created) => Ok(redirect(&headers, &format!("/services/{}", created.service.id))),
         Err(error) => problem(error, |message| {
             page(&signed, &project, &environment, &servers, source.as_ref(), &form, Notice::Problem(message))
@@ -191,6 +199,10 @@ fn page(
         (form.naming.fields("database"))
         (forms::select("database-engine", "database", "Database", &options, &form.database))
         @if let Some(servers) = servers { (servers::select("database-server", servers, &form.server_id)) }
+        @if source.is_none() {
+            (forms::checkbox("database-deploy", "deploy", "Deploy it now", form.deploy.is_some(), false,
+                Some("Leave unchecked to change its settings or variables first, then deploy it from its page.")))
+        }
     };
     let action = format!("/environments/{}/databases", environment.id);
     let description = "Runs the official image with its data on a volume, and generated credentials in its variables. \

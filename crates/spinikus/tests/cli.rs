@@ -291,6 +291,12 @@ async fn the_cli_signs_in_links_deploys_and_manages_variables() {
     assert_eq!(cli(&["db", "create", "Copy"]).await.code, 2, "an engine, or a backup to start from");
     let unknown = cli(&["db", "create", "Copy", "--from-backup", "bkp_01J0000000000000000000000Z"]).await;
     assert_eq!(unknown.code, 5, "{}", unknown.stderr);
+    let later = cli(&["db", "create", "Later", "--engine", "postgres", "--no-deploy"]).await;
+    assert_eq!(later.code, 0, "{}", later.stderr);
+    assert!(later.stdout.contains("not deployed. Deploy it with `spinikus deploy shop/production/later`"), "{}", later.stdout);
+    assert_eq!(cli(&["deployment", "list", "production/later"]).await.stdout.lines().count(), 1, "only the header");
+    let both = cli(&["db", "create", "Copy", "--no-deploy", "--from-backup", "bkp_01J0000000000000000000000Z"]).await;
+    assert_eq!(both.code, 2, "a copy is deployed to restore it");
 
     // Tokens, and using one for CI.
     let created = cli(&["token", "create", "ci", "--role", "viewer", "--project", "shop", "-o", "json"]).await.json();

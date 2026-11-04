@@ -34,6 +34,12 @@ Spinikus creates a service of the kind **database** with:
 
 Then it deploys it. `spinikus db create` waits until it is live; pass `--detach` not to.
 
+To change its settings or variables before it first runs, such as its placement or extra
+variables, uncheck **Deploy it now** on the form, or pass `--no-deploy`. It then waits on its
+page until you press **Deploy** (or run `spinikus deploy shop/production/postgres`). The
+credentials are read only when the database first starts with an empty volume, so change
+them, if you want to, before that first deployment.
+
 ## Connecting an app
 
 The database's page shows how to connect, under **Connecting**. In the app's variables,
